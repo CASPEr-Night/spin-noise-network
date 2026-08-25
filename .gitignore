@@ -20,3 +20,7 @@ server/node_modules/
 node_modules/
 .wrangler/
 server/.dev.vars
+
+# Jython (testing/run_jython_harness.sh) bytecode caches
+.jython_cache/
+*$py.class

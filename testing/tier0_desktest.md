@@ -12,6 +12,55 @@ Time needed: ~1 h once, of which ~40 min is the TopSpin download.
 
 ---
 
+## Tier −1: real-Jython harness (no TopSpin needed)
+
+Before Tier 0, run the script under a **real Jython 2.7 interpreter** with
+a stubbed TopSpin API — no TopSpin installation required, ~30 s total.
+This executes `topspin/spin_noise_run.py` **unmodified** end to end
+(`testing/jython_entry.py` registers `testing/topspin_stub.py` as the
+`TopCmds` module, so the script runs its `IN_TOPSPIN` code paths: real
+`java.util.zip` bundling, real `java.security` SHA-256, real `jarray`
+buffers, and unicode dialog strings exactly as TopSpin's embedded Jython
+delivers them). Requires `jython` (2.7.x) and `python3` on PATH.
+
+One command runs everything:
+
+```
+./testing/run_jython_harness.sh
+```
+
+or the two mode runs individually:
+
+```
+jython -Dpython.path=testing testing/jython_entry.py simulate
+jython -Dpython.path=testing testing/jython_entry.py desktest
+```
+
+Pass criteria (the wrapper enforces all of them; exit code 0 = pass):
+
+1. Each mode run ends with `HARNESS simulate: PASS` /
+   `HARNESS desktest: PASS` — meaning, per run: no unscripted dialog, no
+   hardware-guard breach (`XCMD`/`ZG` never reached), no crash `ERRMSG`,
+   no abort, the full expno tree **1, 10, 14, 15, 16, 11, 12, 13**, the
+   pulse program installed, `meta.json` written twice with
+   `run_mode` equal to the mode (so the bundle can never pass as data)
+   and a real `sha256:<64 hex>` script self-fingerprint, and a bundle
+   zip readable back through `java.util.zip.ZipFile`.
+2. Each produced bundle passes the repository validator:
+   `python3 uploader/upload_bundle.py <bundle.zip> --selftest`
+   → `RESULT: PASS` (schema validation + SHA-256 verification of every
+   data file — java-written digests checked by Python's hashlib).
+3. `python3 testing/static_check.py` → `ALL CHECKS PASSED`.
+
+What Tier −1 proves: the script parses and **executes** under real
+Jython 2.7 (not just a Python-3 compile proxy), the java interop
+(zip/digest) works, the SIMULATE/DESKTEST flows run every line to the
+final dialog, and non-ASCII operator input survives to a valid
+`meta.json`. What it cannot prove: the real TopSpin API objects and
+version quirks (Tier 0) and the hardware commands (Tier 1).
+
+---
+
 ## 1. Get a local TopSpin (processing-only, free academic license)
 
 1. Go to the Bruker website → *Service & Support → Software Downloads →

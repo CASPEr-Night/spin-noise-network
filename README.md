@@ -49,7 +49,7 @@ commands mocked — runnable on a free processing-only TopSpin install
 | `uploader/upload_bundle.py` | Python 3 stdlib-only uploader (+ `--selftest` bundle validator; accepts schema v1.0 and v1.1 bundles) |
 | `schema/meta.schema.json` | the metadata contract (JSON Schema, v1.1 — adds the `software` provenance object; v1.0 bundles remain valid) |
 | `server/` | Cloudflare Worker + R2 ingest endpoint (maintainer deploys once — `server/DEPLOY.md`) |
-| `testing/` | Tier-0 desk-test checklist (`tier0_desktest.md`) + `static_check.py` |
+| `testing/` | real-Jython harness (`run_jython_harness.sh`), Tier-0 desk-test checklist (`tier0_desktest.md`), `static_check.py` |
 | `VERSION` | repository release version (mirrored by `SCRIPT_VERSION` in the run script) |
 | `PROTOCOL.md` | the science, the operator questions, and why each exists |
 | `DATA_POLICY.md` | ownership, permitted uses, co-authorship, embargo, and withdrawal terms |
@@ -63,10 +63,12 @@ covers ~10 GB), set the shared token, and hand facilities the endpoint + token p
 
 ## Status and known caveats
 
-- **Not yet exercised on real hardware.** The Jython flow is desk-tested in simulate
-  mode and every TopSpin call is pinned to Bruker's *Python Programming in TopSpin*
-  manual, with operator-dialog fallbacks wherever versions differ — but the first run
-  at a pilot facility should be supervised. Known soft spots (all degrade to dialogs,
+- **Not yet exercised on real hardware.** The script has been executed end-to-end
+  under a real Jython 2.7 interpreter with a stubbed TopSpin API — both simulate and
+  desktest modes, bundle validated by the uploader (`testing/run_jython_harness.sh`) —
+  but it has not yet run inside TopSpin itself. Every TopSpin call is pinned to
+  Bruker's *Python Programming in TopSpin* manual, with operator-dialog fallbacks
+  wherever versions differ; the first run at a pilot facility should be supervised. Known soft spots (all degrade to dialogs,
   none fail silently): dataset creation requires a ¹H dataset open at start; 2D
   `PARMODE` switching may prompt on some versions; `pulsecal`/`atma`/`topshim`
   availability varies with TopSpin age.

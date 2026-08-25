@@ -303,11 +303,35 @@ def to_int(s, default=None):
         return default
 
 
+def to_text(v):
+    """String coercion that never raises UnicodeEncodeError.
+
+    TopSpin's Jython hands scripts java.lang.Strings, which arrive as
+    unicode -- and str() on a non-ASCII unicode raises under Jython /
+    Python 2 (an operator typing an umlaut in a dialog used to crash
+    slugify this way).  Strings pass through unchanged; anything else
+    goes through str(), with repr() as the last resort.
+    """
+    if isinstance(v, basestring):
+        return v
+    try:
+        return str(v)
+    except Exception:
+        try:
+            return repr(v)
+        except Exception:
+            return "(unprintable)"
+
+
 def slugify(text):
-    """Lowercase alnum + hyphens; used to auto-suggest the facility slug."""
+    """Lowercase alnum + hyphens; used to auto-suggest the facility slug.
+
+    Dialog answers are unicode under Jython, so no str() here (it raises
+    UnicodeEncodeError on non-ASCII input); non-alnum characters --
+    including all non-ASCII -- become hyphens anyway."""
     out = []
     prev_dash = 0
-    for ch in str(text).lower():
+    for ch in to_text(text).lower():
         if ("a" <= ch <= "z") or ("0" <= ch <= "9"):
             out.append(ch)
             prev_dash = 0
@@ -381,7 +405,7 @@ def json_dumps(obj, indent=0):
         parts = []
         for k in obj.keys():
             parts.append('%s"%s": %s'
-                         % (pad2, _json_escape(str(k)),
+                         % (pad2, _json_escape(to_text(k)),
                             json_dumps(obj[k], indent + 1)))
         return "{\n" + ",\n".join(parts) + "\n" + pad + "}"
     if t is list or t is tuple:
@@ -391,8 +415,9 @@ def json_dumps(obj, indent=0):
         for v in obj:
             parts.append(pad2 + json_dumps(v, indent + 1))
         return "[\n" + ",\n".join(parts) + "\n" + pad + "]"
-    # everything else -> string
-    return '"' + _json_escape(str(obj)) + '"'
+    # everything else -> string.  to_text, NOT str: dialog answers are
+    # unicode under Jython and str() raises on non-ASCII operator input.
+    return '"' + _json_escape(to_text(obj)) + '"'
 
 
 # ----------------------------------------------------------------------------
@@ -683,10 +708,13 @@ def ds_path(curd):
     """
     if curd is None:
         return None
+    # to_text, not str: CURDATA() elements are java.lang.Strings (unicode
+    # in Jython) and a non-ASCII data path or user name would make str()
+    # raise UnicodeEncodeError.
     if len(curd) >= 5:
-        return os.path.join(str(curd[3]), "data", str(curd[4]), "nmr",
-                            str(curd[0]), str(curd[1]))
-    return os.path.join(str(curd[3]), str(curd[0]), str(curd[1]))
+        return os.path.join(to_text(curd[3]), "data", to_text(curd[4]),
+                            "nmr", to_text(curd[0]), to_text(curd[1]))
+    return os.path.join(to_text(curd[3]), to_text(curd[0]), to_text(curd[1]))
 
 
 def open_expno(template_curd, name, expno):
