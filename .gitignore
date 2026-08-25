@@ -1,0 +1,22 @@
+# OS cruft
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Local bundles and test artifacts (never commit measurement data)
+*.zip
+testing/synthetic_bundles/
+
+# Facility uploader config carries the live ingest token -- never commit it
+uploader/config.json
+
+# Server (Cloudflare Worker) local state
+server/node_modules/
+node_modules/
+.wrangler/
+server/.dev.vars

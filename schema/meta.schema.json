@@ -1,0 +1,205 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://spin-noise-network.org/schema/meta.schema.json",
+  "title": "spin-noise network bundle metadata (meta.json), schema version 1.1",
+  "description": "Metadata record placed at the root of every spin-noise bundle zip. Written by topspin/spin_noise_run.py, validated by uploader/upload_bundle.py --selftest. This file describes schema version 1.1 (adds the required 'software' object); the uploader still accepts bundles declaring schema_version 1.0 by relaxing exactly those two points. NOTE: the uploader ships a deliberately minimal built-in validator (type / required / enum / const / pattern / items only) so this schema intentionally avoids $ref, allOf, conditionals, and other advanced keywords.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "program_version",
+    "software",
+    "created_utc",
+    "local_timezone_offset_min",
+    "facility",
+    "spectrometer",
+    "sample",
+    "environment",
+    "calibration",
+    "experiments",
+    "checksums"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.1",
+      "description": "Version of this metadata schema. Bump only with coordinated uploader/server changes. History: 1.0 = initial contract; 1.1 = added the required 'software' object."
+    },
+    "program_version": {
+      "type": "string",
+      "description": "Version string of spin_noise_run.py that produced this bundle (kept for 1.0 continuity; duplicates software.script_version)."
+    },
+    "software": {
+      "type": "object",
+      "required": ["script_version", "schema_version"],
+      "properties": {
+        "script_version": {
+          "type": "string",
+          "description": "SCRIPT_VERSION constant of the spin_noise_run.py that wrote this bundle; matches the repository VERSION file for released code."
+        },
+        "schema_version": {
+          "type": "string",
+          "description": "Schema version the writing script targeted; duplicates the top-level schema_version for self-contained provenance."
+        },
+        "script_sha256": {
+          "type": "string",
+          "pattern": "^(sha256:[0-9a-f]{64}|unavailable)$",
+          "description": "SHA-256 of the running spin_noise_run.py file, computed at runtime (works without git on facility machines); 'unavailable' if it could not be determined. Optional."
+        },
+        "run_mode": {
+          "type": "string",
+          "enum": ["live", "simulate", "desktest"],
+          "description": "How the script ran: 'live' = real acquisition; 'simulate'/'desktest' = hardware commands mocked, bundle is a plumbing test, NOT data. Optional."
+        }
+      },
+      "description": "Provenance of the software that produced the bundle. Required from schema 1.1 onward."
+    },
+    "created_utc": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+      "description": "UTC timestamp of bundle creation, ISO 8601 with trailing Z, e.g. 2026-08-18T14:03:22Z."
+    },
+    "local_timezone_offset_min": {
+      "type": "integer",
+      "description": "Local timezone offset from UTC in minutes at creation time (e.g. +120 for CEST). Lets us reconstruct local time-of-day for environmental-noise correlation."
+    },
+    "facility": {
+      "type": "object",
+      "required": ["institution", "city", "country", "facility_slug", "contact_email", "contact_consent"],
+      "properties": {
+        "institution": { "type": "string" },
+        "city": { "type": "string" },
+        "country": { "type": "string" },
+        "facility_slug": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$",
+          "description": "Short lowercase identifier assigned by the maintainer; also appears in the bundle filename."
+        },
+        "contact_email": {
+          "type": "string",
+          "description": "Optional contact address; empty string if not provided. Only stored when contact_consent is true."
+        },
+        "contact_consent": {
+          "type": "boolean",
+          "description": "True only if the operator explicitly consented to storing contact_email."
+        }
+      }
+    },
+    "spectrometer": {
+      "type": "object",
+      "required": ["topspin_version", "h1_freq_mhz", "field_tesla", "console", "probe_string", "probe_type", "coil_temp_k", "preamp_temp_k"],
+      "properties": {
+        "topspin_version": { "type": "string" },
+        "h1_freq_mhz": { "type": "number", "exclusiveMinimum": 0 },
+        "field_tesla": { "type": "number", "exclusiveMinimum": 0 },
+        "console": { "type": "string", "description": "e.g. Avance III HD, Avance NEO, as reported by uxnmr.info or the operator." },
+        "probe_string": { "type": "string", "description": "Verbatim probe identification string (PROBHD / current probe)." },
+        "probe_type": {
+          "type": "string",
+          "enum": ["RT", "N2-cryo", "He-cryo", "unknown"],
+          "description": "RT = room-temperature probe (expect Gueron absorption dip); cryoprobes expect emission bump."
+        },
+        "coil_temp_k": {
+          "type": ["number", "null"],
+          "description": "RF coil temperature in kelvin if the console reports it; null otherwise."
+        },
+        "preamp_temp_k": {
+          "type": ["number", "null"],
+          "description": "Preamplifier temperature in kelvin if known; null otherwise."
+        }
+      }
+    },
+    "sample": {
+      "type": "object",
+      "required": ["description", "h2o_fraction_pct", "d2o_pct", "additives", "tube_od_mm", "sample_volume_ul", "vt_setpoint_k"],
+      "properties": {
+        "description": { "type": "string", "description": "Free text, e.g. 'tap water', 'distilled water + 10% D2O'." },
+        "h2o_fraction_pct": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Protonated-water fraction in percent. Critical: the spin-noise feature scales with proton density (the 2022 lesson)."
+        },
+        "d2o_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+        "additives": { "type": "string", "description": "e.g. 'none', 'CuSO4 0.1 mM'. Empty string allowed." },
+        "tube_od_mm": { "type": "number", "exclusiveMinimum": 0 },
+        "sample_volume_ul": { "type": "number", "exclusiveMinimum": 0 },
+        "vt_setpoint_k": { "type": "number", "exclusiveMinimum": 0, "description": "Variable-temperature unit setpoint in kelvin; sample temperature enters the noise-power law via Ts." }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "required": ["locked", "lock_sweep_confirmed_off", "operator_notes"],
+      "properties": {
+        "locked": { "type": "boolean", "description": "Whether the deuterium lock was engaged during the noise acquisition." },
+        "lock_sweep_confirmed_off": {
+          "type": "boolean",
+          "description": "Operator explicitly confirmed the BSMS field sweep was OFF. A running sweep smears the noise feature by kHz and ruins the record."
+        },
+        "operator_notes": { "type": "string", "description": "Free text: construction nearby, elevator, He fill that morning, etc. Empty string allowed." }
+      }
+    },
+    "calibration": {
+      "type": "object",
+      "required": ["p90_us", "p90_power_db_or_w", "rg_ladder", "topshim_ok"],
+      "properties": {
+        "p90_us": { "type": "number", "exclusiveMinimum": 0, "description": "Calibrated (or operator-entered) 1H 90-degree pulse length in microseconds." },
+        "p90_power_db_or_w": {
+          "type": ["number", "string"],
+          "description": "Power level at which p90_us applies. Number in dB (Avance III+) or watts; string allowed for legacy consoles that report e.g. '-6 dB PLW1'."
+        },
+        "rg_ladder": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["expno", "rg", "tip_deg"],
+            "properties": {
+              "expno": { "type": "integer", "minimum": 1 },
+              "rg": { "type": "number", "exclusiveMinimum": 0 },
+              "tip_deg": { "type": "number", "exclusiveMinimum": 0 }
+            }
+          },
+          "description": "Small-flip 1D acquisitions at increasing receiver gain, used offline to check receiver linearity."
+        },
+        "topshim_ok": { "type": "boolean", "description": "True if topshim ran and converged; false if unavailable or skipped." }
+      }
+    },
+    "experiments": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["expno", "role", "pulprog", "td", "td1_rows", "sw_hz", "o1_hz", "rg", "ns", "aq_s_per_row", "started_local", "finished_local"],
+        "properties": {
+          "expno": { "type": "integer", "minimum": 1 },
+          "role": {
+            "type": "string",
+            "enum": ["setup", "rg_ladder", "reference_open", "noise", "reference_close"]
+          },
+          "pulprog": { "type": "string", "description": "Pulse program name, e.g. 'zgnoise2d' for the noise block." },
+          "td": { "type": "integer", "minimum": 1, "description": "Points per row (direct dimension)." },
+          "td1_rows": { "type": "integer", "minimum": 1, "description": "Number of pseudo-2D rows (1 for plain 1Ds)." },
+          "sw_hz": { "type": "number", "exclusiveMinimum": 0 },
+          "o1_hz": { "type": "number" },
+          "rg": { "type": "number", "exclusiveMinimum": 0 },
+          "ns": { "type": "integer", "minimum": 1 },
+          "aq_s_per_row": { "type": "number", "exclusiveMinimum": 0 },
+          "started_local": { "type": "string", "description": "Local wall-clock start, ISO 8601 without zone (zone given by local_timezone_offset_min)." },
+          "finished_local": { "type": "string" }
+        }
+      }
+    },
+    "checksums": {
+      "type": "object",
+      "description": "Map from in-zip path (always under data/) to its SHA-256, e.g. {\"data/12/ser\": \"sha256:ab12...\"}.",
+      "patternProperties": {
+        "^data/": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false,
+      "minProperties": 1
+    }
+  }
+}

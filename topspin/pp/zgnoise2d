@@ -1,0 +1,30 @@
+;zgnoise2d
+;spin-noise network -- pseudo-2D pure-noise acquisition
+;
+;Bruker zg2d with the excitation pulse line DELETED: the receiver
+;simply opens td1 times and records thermal + spin noise.  There is
+;NO rf pulse statement anywhere in this sequence (and none hidden in
+;an include), so the sample magnetization is never touched.
+;
+;Plain syntax only -- compiles on TopSpin 2.x through 4.x.
+;If <Avance.incl> is missing on a very old system, comment it out:
+;this sequence uses none of its macros.
+
+#include <Avance.incl>
+
+;d1 : loop delay, keep short (e.g. 50 ms) -- there is nothing to relax
+;ns : MUST be 1 (one transient per row; averaging would defeat the
+;     noise-statistics analysis)
+;td1: number of rows = number of noise records
+
+1 ze
+2 d1
+  go=2 ph31
+  d1 wr #0 if #0 ze
+  lo to 2 times td1
+exit
+
+ph31=0
+
+;aq per row = td/(2*swh); the run script sizes td1 so that
+;td1*(aq+2*d1) fills the requested wall-clock duration.

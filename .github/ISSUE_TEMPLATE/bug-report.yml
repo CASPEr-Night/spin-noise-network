@@ -1,0 +1,63 @@
+name: Bug report
+description: A defect in the code, schema, or docs (facility run problems have their own template)
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If a **measurement run failed at your spectrometer**, please use the
+        *Facility support* template instead — it asks for the instrument details
+        we need. This template is for everything else.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - "topspin/spin_noise_run.py (acquisition script)"
+        - "uploader/upload_bundle.py"
+        - "schema/meta.schema.json"
+        - "server/ (Worker + R2 ingest)"
+        - "testing/"
+        - "Documentation"
+        - "Other"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "Contents of the `VERSION` file (or `SCRIPT_VERSION` / `UPLOADER_VERSION` in the file you ran)."
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: "What you did, what you expected, what happened instead."
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / output
+      description: "Relevant terminal output, tracebacks, or validator messages."
+      render: text
+    validations:
+      required: false
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: "e.g. Python 3.8 on CentOS 7; TopSpin 4.1.4 on Windows 10"
+    validations:
+      required: false

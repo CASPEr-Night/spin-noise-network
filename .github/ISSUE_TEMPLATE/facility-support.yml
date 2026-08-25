@@ -1,0 +1,96 @@
+name: Facility support
+description: The spin-noise protocol failed (or behaved oddly) at your facility
+title: "[facility] "
+labels: ["facility-support"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for running the protocol — a stuck run reported well is worth almost
+        as much as a clean one. Fill in what you can; **"don't know" is always an
+        acceptable answer.** Paste error text verbatim rather than paraphrasing.
+  - type: input
+    id: topspin-version
+    attributes:
+      label: TopSpin version
+      placeholder: "e.g. 4.1.4, 3.6.5, 2.1"
+    validations:
+      required: true
+  - type: input
+    id: console
+    attributes:
+      label: Console type
+      description: "From `uxnmr.info` or the script's hardware-check dialog."
+      placeholder: "e.g. Avance III HD, Avance NEO"
+    validations:
+      required: true
+  - type: input
+    id: probe
+    attributes:
+      label: Probe
+      description: "Probe string plus type: RT / N2-cryo / He-cryo."
+      placeholder: "e.g. 5 mm CryoProbe Prodigy BBO (N2-cryo)"
+    validations:
+      required: false
+  - type: dropdown
+    id: workstation-os
+    attributes:
+      label: Workstation OS
+      options:
+        - "Windows"
+        - "Linux (CentOS / RHEL)"
+        - "Linux (other)"
+        - "macOS"
+        - "Other / don't know"
+    validations:
+      required: true
+  - type: dropdown
+    id: failed-step
+    attributes:
+      label: Which step failed?
+      description: "Steps follow the expno map in `topspin/INSTALL.md`."
+      options:
+        - "Install — copying the files / xpy cannot find spin_noise_run"
+        - "Operator dialogs — before anything runs"
+        - "Pulse-program install — zgnoise2d not found"
+        - "expno 1 — setup (tune/match, shim, P90 calibration)"
+        - "expnos 10, 14-16 — RG ladder"
+        - "expno 11 — reference_open"
+        - "expno 12 — noise block (zgnoise2d)"
+        - "expno 13 — reference_close"
+        - "Bundling — checksums / meta.json / zip"
+        - "Upload — upload_bundle.py"
+        - "Other / not sure"
+    validations:
+      required: true
+  - type: textarea
+    id: error-text
+    attributes:
+      label: Error text
+      description: "Exact dialog text or TopSpin terminal output, verbatim."
+      render: text
+    validations:
+      required: false
+  - type: dropdown
+    id: simulate-result
+    attributes:
+      label: SIMULATE-mode result
+      description: "What happens with `xpy spin_noise_run simulate` (no hardware is touched)?"
+      options:
+        - "Not tried yet"
+        - "SIMULATE completes cleanly"
+        - "SIMULATE fails at the same step"
+        - "SIMULATE fails at a different step (paste details in the error text)"
+    validations:
+      required: true
+  - type: dropdown
+    id: bundle-produced
+    attributes:
+      label: Was a bundle zip produced?
+      options:
+        - "Yes — a spinnoise_*.zip exists"
+        - "No"
+        - "Partial — bundle_stage/ exists but no zip"
+        - "Don't know"
+    validations:
+      required: true

@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  checks:
+    name: "static + selftest (py${{ matrix.python-version }})"
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.8 is the oldest version still installable in CI (the uploader
+        # itself targets 3.6, which facility workstations run but GitHub
+        # runners no longer provide); 3.12 covers current installs.
+        # 3.8 is pinned to ubuntu-22.04 because setup-python has no 3.8
+        # builds for newer runner images.
+        include:
+          - python-version: "3.8"
+            os: ubuntu-22.04
+          - python-version: "3.12"
+            os: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Static checks (syntax, version sync, hardware guards)
+        run: python3 testing/static_check.py
+
+      - name: Construct and validate a synthetic v1.1 bundle
+        run: |
+          BUNDLE=$(python3 testing/make_synthetic_bundle.py --schema-version 1.1 --out-dir "${{ runner.temp }}")
+          python3 uploader/upload_bundle.py "$BUNDLE" --selftest
+
+      - name: Construct and validate a synthetic v1.0 bundle (back-compat)
+        run: |
+          BUNDLE=$(python3 testing/make_synthetic_bundle.py --schema-version 1.0 --out-dir "${{ runner.temp }}")
+          python3 uploader/upload_bundle.py "$BUNDLE" --selftest

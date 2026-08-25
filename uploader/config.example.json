@@ -1,0 +1,7 @@
+{
+  "_comment": "Copy this file to config.json in the same directory, then fill in the three values below with what the network maintainer sent your facility. config.json is read by upload_bundle.py and never uploaded.",
+  "endpoint_url": "https://spin-noise-ingest.YOUR-SUBDOMAIN.workers.dev/ingest",
+  "token": "PASTE-THE-BEARER-TOKEN-FROM-THE-MAINTAINER-HERE",
+  "facility_slug": "your-facility-slug",
+  "maintainer_email": "spin-noise-maintainer@example.org"
+}

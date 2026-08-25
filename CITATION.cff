@@ -1,0 +1,36 @@
+# Citation metadata for this repository (Citation File Format 1.2.0).
+# GitHub renders this as a "Cite this repository" button.
+cff-version: 1.2.0
+type: software
+title: "spin-noise-network (CASPEr@night acquisition and ingest stack)"
+version: 0.1.0
+date-released: "2026-08-25"
+license: MIT
+message: "If you use this software, please cite it as below."
+authors:
+  - family-names: Blanchard
+    given-names: John W.
+    email: jwbquantum@gmail.com
+    orcid: "https://orcid.org/0000-0002-1621-6637"
+  - family-names: Ebadi
+    given-names: Reza
+    # orcid: "https://orcid.org/0000-0000-0000-0000"   # TODO(Reza): fill in and uncomment
+  - name: Claude
+    affiliation: "Anthropic, San Francisco, California, USA"
+repository-code: "https://github.com/CASPEr-Night/spin-noise-network"
+abstract: >-
+  Acquisition and ingest software for the spin-noise network: a TopSpin
+  2.x-4.x Jython orchestrator that records pulse-free nuclear spin-noise
+  bundles on any Bruker spectrometer, a stdlib-only Python 3 uploader with
+  a built-in bundle validator, a JSON-Schema metadata contract, and a
+  Cloudflare Worker + R2 ingest endpoint. Collected bundles map the
+  temperature-contrast law of circuit-spin coupling across the community's
+  probe fleet and bank spin-noise-limited records for fundamental-sensitivity
+  and dark-matter (CASPEr-style) analyses.
+keywords:
+  - NMR
+  - spin noise
+  - radiation damping
+  - fundamental sensitivity
+  - axion dark matter
+  - TopSpin

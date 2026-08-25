@@ -1,0 +1,26 @@
+// Wrangler configuration for the spin-noise network ingest Worker.
+// Docs: https://developers.cloudflare.com/workers/wrangler/configuration/
+{
+  "name": "spin-noise-ingest",
+  "main": "worker.js",
+  "compatibility_date": "2026-08-01",
+
+  // R2 bucket that holds the uploaded bundles.
+  // Create it once with:  npx wrangler r2 bucket create spin-noise-network
+  "r2_buckets": [
+    {
+      "binding": "SPIN_NOISE",
+      "bucket_name": "spin-noise-network"
+    }
+  ],
+
+  // Structured logs in the dashboard (free tier includes these) — handy for
+  // seeing which facility uploaded what and any 4xx rejections.
+  "observability": {
+    "enabled": true
+  }
+
+  // The shared ingest token is a SECRET, not a var — set it with:
+  //   npx wrangler secret put INGEST_TOKEN
+  // Never put the token value in this file.
+}
