@@ -1,5 +1,7 @@
 # Spin-Noise Network
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22100871.svg)](https://doi.org/10.5281/zenodo.22100871)
+
 A community measurement program for nuclear spin noise. Any NMR facility with a Bruker
 spectrometer can contribute a data point with one sample tube and one command: the
 protocol measures the spin-noise feature of water (the Guéron absorption dip on

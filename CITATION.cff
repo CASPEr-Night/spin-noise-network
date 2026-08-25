@@ -18,6 +18,7 @@ authors:
   - name: Claude
     affiliation: "Anthropic, San Francisco, California, USA"
 repository-code: "https://github.com/CASPEr-Night/spin-noise-network"
+doi: 10.5281/zenodo.22100871
 abstract: >-
   Acquisition and ingest software for the spin-noise network: a TopSpin
   2.x-4.x Jython orchestrator that records pulse-free nuclear spin-noise
