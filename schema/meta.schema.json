@@ -47,8 +47,8 @@
         },
         "run_mode": {
           "type": "string",
-          "enum": ["live", "simulate", "desktest"],
-          "description": "How the script ran: 'live' = real acquisition; 'simulate'/'desktest' = hardware commands mocked, bundle is a plumbing test, NOT data. Optional."
+          "enum": ["live", "simulate", "desktest", "archival-repackage", "synthetic-injection"],
+          "description": "How the script ran: 'live' = real acquisition; 'simulate'/'desktest' = hardware commands mocked, bundle is a plumbing test, NOT data; 'archival-repackage' = real historical spectrometer data repackaged into the bundle format by testing/repackage_epfl.py or similar (science data, but not produced by the live orchestrator); 'synthetic-injection' = numerically synthesized data with a known injected feature, used to validate the analysis pipeline (never a science result). Optional; enum extension is backward compatible (bundles written before this change carry only the original three values)."
         }
       },
       "description": "Provenance of the software that produced the bundle. Required from schema 1.1 onward."
