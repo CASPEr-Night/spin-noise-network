@@ -115,9 +115,10 @@ At the end, the script zips the complete Bruker experiment directories
 `meta.json` describing the instrument (TopSpin version, field, console,
 probe string and type, coil/preamp temperatures if reported), the sample,
 your dialog answers, and SHA-256 checksums of every data file. The
-`meta.json` follows schema version 1.1, which also records a `software`
+`meta.json` follows schema version 1.2, which also records a `software`
 block — script version and a runtime SHA-256 of the script file itself —
-so every bundle is traceable to the exact code that produced it. Then
+and the clock-audit timestamps described below, so every bundle is
+traceable to the exact code that produced it. Then
 `uploader/upload_bundle.py` sends the zip to the network's repository.
 
 **Privacy:** the bundle contains instrument and sample metadata only. The
@@ -126,6 +127,37 @@ if you answered yes to the consent question. No usernames, no other
 datasets from your spectrometer, nothing outside the `SPINNOISE_*` dataset
 is read or uploaded. You keep the local copy; if the upload fails for any
 reason the zip stays on disk with printed instructions for manual transfer.
+
+## Frequency accuracy and the clock audit
+
+A dark-matter line sits at an absolute frequency set by physics, not by your
+console, so the network needs to know how far each console's master clock is
+from true — a question chemistry never asks, because chemical shifts are
+internally referenced ratios. Your console's master clock is a quartz
+oscillator (OCXO) whose absolute accuracy is typically somewhere between one
+part in 10⁸ and one part in 10⁷. That is entirely fine for this protocol —
+nothing needs adjusting — but the network analysis wants the actual offset
+measured, and the run measures it for free. Acquisition durations are timed
+by the console's clock, while your workstation's wall clock is normally
+disciplined by internet time servers (NTP). The script records wall-clock
+timestamps immediately before and after each acquisition block, and comparing
+the wall-clock elapsed time against the console-implied block duration gives
+the fractional offset of your console clock. No hardware is attached and
+nothing on your spectrometer is touched or reconfigured — the audit is
+bookkeeping on timestamps the run produces anyway.
+
+Two things help. First, please make sure NTP time synchronization is enabled
+on the TopSpin workstation — it usually is by default, and if your
+workstation is air-gapped, just mention that when you upload. Second, longer
+runs sharpen the number: a default ~45-minute run pins the offset to a few
+parts per million, an overnight run to a few parts in 10⁷, and repeated runs
+over a week to about one part in 10⁸.
+
+The number in your facility report labeled **console clock offset** is that
+measured fractional offset. An offset of, say, +2×10⁻⁷ means every frequency
+your console reports is high by 0.2 ppm — 120 Hz at 600 MHz — and the network
+analysis corrects for it. It is not a fault, it requires no service call, and
+no action is needed on your side.
 
 ## Quickstart
 

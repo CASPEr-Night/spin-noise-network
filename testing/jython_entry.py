@@ -20,7 +20,11 @@
 #   3. after the run, verifies: no unscripted dialogs, no hardware-guard
 #      breaches, no ERRMSG/abort, the full expno tree, meta.json (twice,
 #      with run_mode == MODE and a real sha256 self-fingerprint), the
-#      installed pulse program, and a java-zip-readable bundle.
+#      installed pulse program, a java-zip-readable bundle, and the
+#      schema-1.2 clock_audit object (8 blocks whose wall durations track
+#      the stub's virtual clock, which carries a deliberate 3e-7 injected
+#      fractional offset for the offline fit to recover -- see
+#      topspin_stub.INJECTED_CLOCK_OFFSET and run_jython_harness.sh).
 #
 # The template parameter values are plausible reals taken from the 2020
 # archival 600 MHz cryoprobe dataset that motivated this project
@@ -151,7 +155,10 @@ DIALOG_ANSWERS = {
 SELECT_ANSWERS = {
     "spin-noise network": 0,                            # greeting: Start
     "spin-noise network: contact consent": 0,           # yes
-    "spin-noise network 5/5: noise-block duration": 0,  # 30 min
+    # 60 min, not the 30-min default: the clock audit needs a session
+    # span over 1 h to escape the report's 'inconclusive (short session)'
+    # flag, and the harness clock is virtual so this costs nothing.
+    "spin-noise network 5/5: noise-block duration": 1,
     "spin-noise run: lock": 0,                          # lock OFF
     "spin-noise run: BSMS FIELD SWEEP -- IMPORTANT": 0, # sweep OFF
     "spin-noise run: probe type": 1,                    # N2-cryo (Prodigy)
@@ -255,8 +262,8 @@ def main():
         f.close()
     check("meta.json run_mode == '%s' (bundle cannot pass as data)" % mode,
           '"run_mode": "%s"' % mode in meta_text)
-    check("meta.json schema_version == '1.1'",
-          '"schema_version": "1.1"' in meta_text)
+    check("meta.json schema_version == '1.2'",
+          '"schema_version": "1.2"' in meta_text)
     check("meta.json script_sha256 is a real java-computed digest",
           re.search(r'"script_sha256": "sha256:[0-9a-f]{64}"',
                     meta_text) is not None)
@@ -266,6 +273,62 @@ def main():
           'harness run \\u2014 synthetic operator input' in meta_text)
     check("meta.json facility_slug from dialog answer",
           '"facility_slug": "harness-lab"' in meta_text)
+
+    # ---- clock audit (schema 1.2).  Jython 2.7 ships json, so the
+    # harness can parse what the script's hand-rolled writer emitted.
+    ca = None
+    try:
+        import json
+        ca = json.loads(meta_text).get("clock_audit")
+    except Exception:
+        ca = None
+    check("meta.json carries a clock_audit object", isinstance(ca, dict))
+    blocks = []
+    if isinstance(ca, dict):
+        blocks = ca.get("blocks", [])
+        check("clock_audit records the NTP status probe (raw string)",
+              isinstance(ca.get("ntp_status_raw"), basestring)
+              and len(ca.get("ntp_status_raw")) > 0)
+        check("clock_audit names the workstation time source",
+              isinstance(ca.get("workstation_time_source"), basestring))
+    check("clock_audit has 8 blocks (setup + 4 ladder + refs + noise)",
+          len(blocks) == 8, "found %d" % len(blocks))
+    roles = [b.get("role") for b in blocks]
+    check("clock_audit block roles cover the session",
+          roles == ["setup", "rg_ladder", "rg_ladder", "rg_ladder",
+                    "rg_ladder", "reference_open", "noise",
+                    "reference_close"], str(roles))
+    setup_ok = bool(blocks) and blocks[0].get("ocxo_expected_s") is None
+    check("setup block has ocxo_expected_s null (not OCXO-predictable)",
+          setup_ok)
+    consistent = bool(blocks)
+    detail = []
+    for b in blocks:
+        try:
+            wall_s = (b["wall_end_ms"] - b["wall_start_ms"]) / 1000.0
+        except Exception:
+            consistent = False
+            detail.append("block %s: bad wall times" % b.get("expno"))
+            continue
+        if wall_s < 0:
+            consistent = False
+            detail.append("block %s: negative duration" % b.get("expno"))
+        exp = b.get("ocxo_expected_s")
+        # Blocks with a meaningful OCXO prediction must show a wall
+        # duration consistent with it (stub advances the virtual clock by
+        # expected*(1 + 3e-7) + ~0.2 s overhead), i.e. within 1 percent.
+        if exp is not None and exp > 10.0:
+            if abs(wall_s / exp - 1.0) > 0.01:
+                consistent = False
+                detail.append("block %s: wall %.3f s vs ocxo %.3f s"
+                              % (b.get("expno"), wall_s, exp))
+    check("clock_audit wall durations consistent with OCXO predictions "
+          "(virtual clock, injected offset %.1e)"
+          % topspin_stub.INJECTED_CLOCK_OFFSET,
+          consistent, "; ".join(detail))
+    # For the wrapper: the recovery check (facility_report must refit the
+    # injected offset within its stated uncertainty) runs in python3.
+    print "INJECTED_CLOCK_OFFSET: %.6e" % topspin_stub.INJECTED_CLOCK_OFFSET
 
     bundles = []
     if os.path.isdir(name_dir):

@@ -1,8 +1,8 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://spin-noise-network.org/schema/meta.schema.json",
-  "title": "spin-noise network bundle metadata (meta.json), schema version 1.1",
-  "description": "Metadata record placed at the root of every spin-noise bundle zip. Written by topspin/spin_noise_run.py, validated by uploader/upload_bundle.py --selftest. This file describes schema version 1.1 (adds the required 'software' object); the uploader still accepts bundles declaring schema_version 1.0 by relaxing exactly those two points. NOTE: the uploader ships a deliberately minimal built-in validator (type / required / enum / const / pattern / items only) so this schema intentionally avoids $ref, allOf, conditionals, and other advanced keywords.",
+  "title": "spin-noise network bundle metadata (meta.json), schema version 1.2",
+  "description": "Metadata record placed at the root of every spin-noise bundle zip. Written by topspin/spin_noise_run.py, validated by uploader/upload_bundle.py --selftest. This file describes schema version 1.2 (adds the OPTIONAL 'clock_audit' object; 1.1 added the required 'software' object). The uploader still accepts bundles declaring 1.1 (schema_version const relaxed to '1.1') and 1.0 (additionally, 'software' dropped from required). NOTE: the uploader ships a deliberately minimal built-in validator (type / required / enum / const / pattern / items only) so this schema intentionally avoids $ref, allOf, conditionals, and other advanced keywords.",
   "type": "object",
   "required": [
     "schema_version",
@@ -21,8 +21,8 @@
   "properties": {
     "schema_version": {
       "type": "string",
-      "const": "1.1",
-      "description": "Version of this metadata schema. Bump only with coordinated uploader/server changes. History: 1.0 = initial contract; 1.1 = added the required 'software' object."
+      "const": "1.2",
+      "description": "Version of this metadata schema. Bump only with coordinated uploader/server changes. History: 1.0 = initial contract; 1.1 = added the required 'software' object; 1.2 = added the optional 'clock_audit' object (backward compatible: 1.1 and 1.0 bundles remain valid)."
     },
     "program_version": {
       "type": "string",
@@ -186,6 +186,49 @@
           "aq_s_per_row": { "type": "number", "exclusiveMinimum": 0 },
           "started_local": { "type": "string", "description": "Local wall-clock start, ISO 8601 without zone (zone given by local_timezone_offset_min)." },
           "finished_local": { "type": "string" }
+        }
+      }
+    },
+    "clock_audit": {
+      "type": "object",
+      "required": ["blocks", "ntp_status_raw", "workstation_time_source"],
+      "description": "OPTIONAL (new in schema 1.2; absent from 1.0/1.1 bundles, no penalty). Software-only console-clock audit: spectrometer acquisition durations derive from the console's OCXO master clock, while the workstation wall clock is normally NTP-disciplined, so comparing OCXO-implied and wall-clock elapsed time across blocks measures the fractional console-clock offset (precision ~ NTP timestamp jitter / time span). Written by spin_noise_run.py v0.2+; analyzed by analysis/facility_report.py.",
+      "properties": {
+        "blocks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["expno", "role", "wall_start_ms", "wall_end_ms", "ocxo_expected_s"],
+            "properties": {
+              "expno": { "type": "integer", "minimum": 1 },
+              "role": {
+                "type": "string",
+                "enum": ["setup", "rg_ladder", "reference_open", "noise", "reference_close"]
+              },
+              "wall_start_ms": {
+                "type": "integer",
+                "description": "Workstation wall-clock milliseconds since the Unix epoch, recorded immediately before the block's acquisition started."
+              },
+              "wall_end_ms": {
+                "type": "integer",
+                "description": "Workstation wall-clock milliseconds recorded immediately after the block's acquisition completed."
+              },
+              "ocxo_expected_s": {
+                "type": ["number", "null"],
+                "description": "OCXO-implied block duration in seconds, computed from the acquisition parameters (rows * ns * (TD/(2*SW_h) + delays)). Null for blocks whose duration is not OCXO-predictable (the setup block: tune/shim/pulsecal plus operator dialogs); such blocks are excluded from the offset fit."
+              }
+            }
+          },
+          "description": "One entry per acquisition block, in session order. TopSpin's script layer cannot see individual rows of a pseudo-2D acquisition, so the audit is block-level by construction."
+        },
+        "ntp_status_raw": {
+          "type": "string",
+          "description": "Raw output of the first time-sync status probe that answered (chronyc tracking / ntpq -pn / timedatectl / w32tm), captured once per session; 'unavailable' if none did."
+        },
+        "workstation_time_source": {
+          "type": "string",
+          "description": "Short label of the tool that answered the time-sync probe (e.g. 'chrony', 'ntpd (ntpq)', 'w32time'); 'unknown' if none did."
         }
       }
     },

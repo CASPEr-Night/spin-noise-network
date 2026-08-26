@@ -63,13 +63,14 @@ except ImportError:  # pragma: no cover - cannot happen on py3, but stay polite
 # Kept in sync with the repository VERSION file (a literal, not a file
 # read, because this script is copied standalone to facility machines);
 # testing/static_check.py enforces the sync.
-UPLOADER_VERSION = "0.1.0"
+UPLOADER_VERSION = "0.2.0"
 
 # Metadata schema versions this uploader understands.  The shipped
-# schema/meta.schema.json describes the CURRENT version (1.1, which added
-# the required 'software' provenance object); bundles declaring 1.0 are
-# still accepted -- see adapt_schema_for_version().
-SUPPORTED_SCHEMA_VERSIONS = ("1.0", "1.1")
+# schema/meta.schema.json describes the CURRENT version (1.2, which added
+# the optional 'clock_audit' object; 1.1 added the required 'software'
+# provenance object); bundles declaring 1.1 or 1.0 are still accepted --
+# see adapt_schema_for_version().
+SUPPORTED_SCHEMA_VERSIONS = ("1.0", "1.1", "1.2")
 
 # Bundle filename convention (see project spec):
 #   spinnoise_<facility_slug>_<YYYYMMDD_HHMMSSZ>_<4hex>.zip
@@ -270,23 +271,26 @@ def validate_against_schema(instance, schema, path="$"):
 
 
 def adapt_schema_for_version(schema, declared_version):
-    """Return a copy of the shipped (current, 1.1) schema adjusted to the
+    """Return a copy of the shipped (current, 1.2) schema adjusted to the
     schema_version a bundle declares.
 
-    v1.1 bundles: schema used as-is ('software' object required).
-    v1.0 bundles: written before the 'software' object existed -- relax
-    exactly two points: the schema_version const becomes '1.0', and
-    'software' is dropped from the required list (if an old bundle somehow
-    carries one anyway, it is still validated against the 1.1 shape).
-    Anything else is unchanged, so 1.0 bundles keep full validation.
+    v1.2 bundles: schema used as-is ('software' required; 'clock_audit'
+    optional -- it was never required in any version).
+    v1.1 bundles: written before 'clock_audit' existed -- relax exactly one
+    point: the schema_version const becomes '1.1' (if an old bundle somehow
+    carries a clock_audit anyway, it is still validated against the 1.2
+    shape).
+    v1.0 bundles: written before the 'software' object existed --
+    additionally drop 'software' from the required list.
+    Anything else is unchanged, so old bundles keep full validation.
     """
-    if declared_version == "1.1":
+    if declared_version == "1.2":
         return schema
     adapted = copy.deepcopy(schema)
+    props = adapted.get("properties", {})
+    if isinstance(props.get("schema_version"), dict):
+        props["schema_version"]["const"] = declared_version
     if declared_version == "1.0":
-        props = adapted.get("properties", {})
-        if isinstance(props.get("schema_version"), dict):
-            props["schema_version"]["const"] = "1.0"
         adapted["required"] = [k for k in adapted.get("required", [])
                                if k != "software"]
     return adapted

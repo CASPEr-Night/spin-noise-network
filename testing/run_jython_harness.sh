@@ -15,8 +15,22 @@
 #      real java.security SHA-256, real jarray buffers;
 #   2. validates the produced bundle with the repository's own validator:
 #      python3 uploader/upload_bundle.py <bundle> --selftest
-# and finishes with python3 testing/static_check.py.
+#   3. generates the facility report on the bundle and asserts the
+#      clock-audit fit recovered the stub's injected 3e-7 fractional
+#      offset within its stated 1-sigma uncertainty, with the audit
+#      marked conclusive (REALISM check -- the ~1 h virtual session
+#      cannot resolve 3e-7, so this is a coverage assertion).
+# Then a POWERED clock-recovery matrix on synthetic physics bundles
+# (testing/make_physics_bundle.py), where coverage alone would not catch
+# a fit that always returns 0:
+#   * --clock-offset 1e-3 (~9 sigma vs the ~1.1e-4 fit precision):
+#     require recovery within 3 sigma AND a >= 5-sigma detection;
+#   * --clock-offset 0 (null): require a fit consistent with zero (3 sigma).
+# And finishes with python3 testing/static_check.py.
 # Exit code 0 iff every step passed.
+#
+# The report/recovery steps need numpy + matplotlib in python3
+# (analysis/facility_report.py's only dependencies).
 # ============================================================================
 set -euo pipefail
 
@@ -42,6 +56,43 @@ for MODE in simulate desktest; do
     echo ""
     echo "--- uploader --selftest on the $MODE bundle ---"
     python3 "$REPO/uploader/upload_bundle.py" "$BUNDLE" --selftest
+
+    # Clock-audit REALISM check: the stub's virtual clock carries a
+    # deliberate injected fractional offset (printed by jython_entry.py);
+    # the offline fit must recover it within its stated uncertainty.
+    INJECTED="$(grep '^INJECTED_CLOCK_OFFSET: ' "$LOGF" | tail -1 \
+        | sed 's/^INJECTED_CLOCK_OFFSET: //')"
+    if [ -z "$INJECTED" ]; then
+        echo "ERROR: $MODE log carries no INJECTED_CLOCK_OFFSET line"
+        exit 1
+    fi
+    echo ""
+    echo "--- facility report + clock-offset recovery ($MODE bundle) ---"
+    python3 "$REPO/analysis/facility_report.py" "$BUNDLE" \
+        --out "$WORK/report"
+    python3 "$TESTING/check_clock_recovery.py" "$WORK/report/report.json" \
+        --injected "$INJECTED" --within-nsigma 1 --require-conclusive
+done
+
+# Powered clock-recovery matrix: synthetic physics bundles with (a) an
+# offset ~9 sigma above the fit precision -- must be RESOLVED, not just
+# covered -- and (b) a zero-offset null. See the header for why the
+# realism check alone has no statistical power against a dead fit.
+echo ""
+echo "=== Powered clock-offset recovery (make_physics_bundle) ==="
+CLOCKWORK="$(mktemp -d "${TMPDIR:-/tmp}/spin_noise_harness_clock.XXXXXX")"
+for CASE in "1e-3 --within-nsigma 3 --detect-nsigma 5" \
+            "0 --within-nsigma 3"; do
+    set -- $CASE
+    OFFSET="$1"; shift
+    echo ""
+    echo "--- injected offset $OFFSET ---"
+    PBUNDLE="$(python3 "$TESTING/make_physics_bundle.py" --feature none \
+        --clock-offset "$OFFSET" --out-dir "$CLOCKWORK")"
+    python3 "$REPO/analysis/facility_report.py" "$PBUNDLE" \
+        --out "$CLOCKWORK/report_$OFFSET"
+    python3 "$TESTING/check_clock_recovery.py" \
+        "$CLOCKWORK/report_$OFFSET/report.json" --injected "$OFFSET" "$@"
 done
 
 echo ""
@@ -49,4 +100,6 @@ echo "--- static checks ---"
 python3 "$TESTING/static_check.py"
 
 echo ""
-echo "JYTHON HARNESS: ALL PASS (simulate + desktest + selftest + static)"
+echo "JYTHON HARNESS: ALL PASS (simulate + desktest + selftest"
+echo "                + clock-offset recovery: realism, powered, null"
+echo "                + static)"

@@ -50,7 +50,15 @@ Pass criteria (the wrapper enforces all of them; exit code 0 = pass):
    `python3 uploader/upload_bundle.py <bundle.zip> --selftest`
    → `RESULT: PASS` (schema validation + SHA-256 verification of every
    data file — java-written digests checked by Python's hashlib).
-3. `python3 testing/static_check.py` → `ALL CHECKS PASSED`.
+3. Clock-offset recovery (needs numpy + matplotlib in `python3`): for
+   each mode bundle, `analysis/facility_report.py` runs and
+   `testing/check_clock_recovery.py` asserts the clock-audit fit
+   recovered the stub's injected 3e-7 fractional offset within its
+   stated 1-sigma uncertainty, audit marked conclusive. Then the
+   powered matrix on `testing/make_physics_bundle.py` bundles: injected
+   1e-3 must be recovered within 3 sigma AND detected at ≥ 5 sigma;
+   the zero-offset null must fit consistent with zero (3 sigma).
+4. `python3 testing/static_check.py` → `ALL CHECKS PASSED`.
 
 What Tier −1 proves: the script parses and **executes** under real
 Jython 2.7 (not just a Python-3 compile proxy), the java interop
@@ -160,24 +168,33 @@ java-zip bundling — and mocks **only** the hardware commands, inside
    mocked acquisitions is expected and correct).
 2. **meta.json written twice**: once in the `SPINNOISE_<date>` dataset
    directory, once inside the bundle staging dir — and it contains a
-   `software` object with `"script_version": "0.1.0"`,
-   `"schema_version": "1.1"`, `"script_sha256"` equal to either
-   `sha256:<64 hex>` or `"unavailable"`, and `"run_mode": "desktest"`.
-3. **Bundle zip produced**:
+   `software` object with `"script_version"` equal to the repository
+   `VERSION` file (currently `"0.2.0"`), `"schema_version"` equal to
+   the current schema (currently `"1.2"`), `"script_sha256"` equal to
+   either `sha256:<64 hex>` or `"unavailable"`, and
+   `"run_mode": "desktest"`.
+3. **Clock audit recorded** (schema 1.2): `meta.json` contains a
+   `clock_audit` object with a `blocks` array — one entry per
+   acquisition block (setup, the four RG-ladder rungs,
+   `reference_open`, `noise`, `reference_close`), each carrying
+   `wall_start_ms`, `wall_end_ms`, and `ocxo_expected_s` (null for
+   setup) — plus `ntp_status_raw` and `workstation_time_source` from
+   the NTP status probe.
+4. **Bundle zip produced**:
    `SPINNOISE_<date>/spinnoise_desktest-lab_<YYYYMMDD_HHMMSS>Z_<4hex>.zip`,
    openable by any zip tool, with `meta.json` at the zip root and the
    expno directories under `data/`.
-4. **Selftest validator passes.** Copy the zip to any machine with
+5. **Selftest validator passes.** Copy the zip to any machine with
    Python 3 and run, from the repo root:
 
    ```
    python3 uploader/upload_bundle.py <bundle.zip> --selftest
    ```
 
-   Required output: `OK   : meta.json (schema_version 1.1) validates
-   against meta.schema.json`, `OK   : verified sha256 of N data
-   file(s).` and `RESULT: PASS`.
-5. **Static checks green** (no TopSpin needed):
+   Required output: `OK   : meta.json (schema_version 1.2) validates
+   against meta.schema.json` (the current schema version), `OK   :
+   verified sha256 of N data file(s).` and `RESULT: PASS`.
+6. **Static checks green** (no TopSpin needed):
 
    ```
    python3 testing/static_check.py

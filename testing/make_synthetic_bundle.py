@@ -4,7 +4,8 @@
 make_synthetic_bundle.py -- construct a synthetic spin-noise bundle zip for
 testing uploader/upload_bundle.py --selftest without a spectrometer.
 
-    python3 testing/make_synthetic_bundle.py                     # v1.1 bundle
+    python3 testing/make_synthetic_bundle.py                     # v1.2 bundle
+    python3 testing/make_synthetic_bundle.py --schema-version 1.1
     python3 testing/make_synthetic_bundle.py --schema-version 1.0
     python3 testing/make_synthetic_bundle.py --out-dir /tmp
 
@@ -134,12 +135,30 @@ def build_meta(schema_version, version):
         ],
         "checksums": {},  # filled in below
     }
-    if schema_version == "1.1":
+    if schema_version in ("1.1", "1.2"):
         meta["software"] = {
             "script_version": version,
-            "schema_version": "1.1",
+            "schema_version": schema_version,
             "script_sha256": "unavailable",
             "run_mode": "desktest",
+        }
+    if schema_version == "1.2":
+        # Minimal clock_audit (the 1.2 addition): two blocks bracketing
+        # the two experiments above, wall == OCXO (zero offset), plus the
+        # NTP-status fields. Exercises the uploader's 1.2 validation path.
+        meta["clock_audit"] = {
+            "blocks": [
+                {"expno": 11, "role": "reference_open",
+                 "wall_start_ms": 1787000000000,
+                 "wall_end_ms": 1787000010880,
+                 "ocxo_expected_s": 8 * 1.36},
+                {"expno": 12, "role": "noise",
+                 "wall_start_ms": 1787000013000,
+                 "wall_end_ms": 1787000018440,
+                 "ocxo_expected_s": 4 * 1.36},
+            ],
+            "ntp_status_raw": "synthetic CI bundle (no NTP daemon queried)",
+            "workstation_time_source": "synthetic",
         }
     return meta
 
@@ -174,11 +193,12 @@ def fake_data_files(ser_mib=None):
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Build a synthetic spin-noise bundle zip for selftest.")
-    parser.add_argument("--schema-version", choices=("1.0", "1.1"),
-                        default="1.1",
-                        help="schema_version the bundle declares (default 1.1; "
-                             "1.0 omits the 'software' object, as real 1.0 "
-                             "bundles did)")
+    parser.add_argument("--schema-version", choices=("1.0", "1.1", "1.2"),
+                        default="1.2",
+                        help="schema_version the bundle declares (default 1.2; "
+                             "1.1 omits the 'clock_audit' object and 1.0 "
+                             "additionally omits 'software', as real bundles "
+                             "of those vintages did)")
     parser.add_argument("--out-dir", default=None,
                         help="directory for the zip (default: a fresh "
                              "'synthetic_bundles' dir under testing/)")

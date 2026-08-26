@@ -29,7 +29,9 @@ Python 3, and is checked, in order:
        - every command named in HW_COMMANDS has at least one callsite
          routed via safe_hw_cmd(...) or xcmd_or_dialog(...).
   4. META STAMPING: the meta.json writer emits the schema-1.1 "software"
-     object with script_version/schema_version/script_sha256.
+     object with script_version/schema_version/script_sha256, and the
+     schema-1.2 "clock_audit" object (blocks + NTP status), with every
+     audited acquisition wrapped in clock_block_begin/_end.
 
 Usage:  python3 testing/static_check.py     (exit 0 iff all green)
 """
@@ -242,6 +244,29 @@ check("meta: software object emitted with script_version/schema_version/sha256",
 
 check("meta: schema requires the software object (v1.1)",
       "software" in schema.get("required", []))
+
+check("meta: clock_audit object emitted with blocks + NTP status (v1.2)",
+      '"clock_audit": {' in SRC
+      and '"blocks": CLOCK_BLOCKS' in SRC
+      and '"ntp_status_raw": ntp_raw' in SRC
+      and '"workstation_time_source": ntp_source' in SRC)
+
+check("meta: schema keeps clock_audit OPTIONAL (backward compatible)",
+      "clock_audit" in schema.get("properties", {})
+      and "clock_audit" not in schema.get("required", []))
+
+n_begin = len(re.findall(r"clock_block_begin\(", SRC))
+n_end = len(re.findall(r"clock_block_end\(", SRC))
+# 5 call sites for each (setup, ladder loop, ref_open, noise, ref_close)
+# plus the two function definitions themselves.
+check("clock audit: every audited block has a begin AND an end "
+      "(%d/%d call sites)" % (n_begin - 1, n_end - 1),
+      n_begin == n_end and n_begin >= 6)
+
+check("clock audit: mocked acquisitions feed the harness clock "
+      "(harness_clock_advance wired into run_zg_and_wait)",
+      "harness_clock_advance(ocxo_s)"
+      in "\n".join(function_body("run_zg_and_wait")[0]))
 
 
 # --------------------------------------------------------------------------

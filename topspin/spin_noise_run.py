@@ -93,9 +93,9 @@ DESKTEST = False          # True: Tier-0 desk test.  Like SIMULATE, but it
 
 # Single source of truth for the script version.  KEEP IN SYNC with the
 # repository VERSION file (testing/static_check.py enforces the match).
-SCRIPT_VERSION  = "0.1.0"
+SCRIPT_VERSION  = "0.2.0"
 PROGRAM_VERSION = SCRIPT_VERSION  # alias kept for meta.json 'program_version'
-SCHEMA_VERSION  = "1.1"
+SCHEMA_VERSION  = "1.2"
 PP_NAME         = "zgnoise2d"     # pulse program used for the noise block
 
 # Experiment numbers (see PROTOCOL.md).  The RG ladder starts at 10; its
@@ -277,6 +277,145 @@ def tz_offset_min():
         return int(-time.timezone / 60)
     except Exception:
         return 0
+
+
+# ----------------------------------------------------------------------------
+# Clock audit (schema 1.2).
+#
+# WHY: stock spectrometers have no GPS discipline -- the console master
+# clock is an OCXO (absolute accuracy typically 1e-8 to 1e-7 depending on
+# aging and calibration history; chemistry never needed better, because
+# chemical shifts are internally-referenced ratios).  Cross-site work on
+# absolute frequencies does need better, and there is a free, software-only
+# measurement of the offset: acquisition durations are OCXO-derived, while
+# the workstation wall clock is normally NTP-disciplined.  Recording
+# wall-clock milliseconds immediately before and after each acquisition
+# block, together with the OCXO-implied expected duration computed from
+# that block's parameters, lets the analysis fit the fractional clock
+# offset across the session (precision ~ NTP timestamp jitter / time span;
+# an 8 h session reaches ~3e-7).
+#
+# CONSTRAINT: TopSpin's script layer cannot see individual rows during a
+# pseudo-2D acquisition (the console runs autonomously; the script waits),
+# so the audit works at BLOCK level: one wall-clock pair per acquisition
+# expno, many blocks per session, joint fit offline.
+# ----------------------------------------------------------------------------
+
+CLOCK_BLOCKS = []   # filled by clock_block_begin/_end; emitted into meta.json
+
+
+def wall_clock_ms():
+    """Workstation wall-clock time in milliseconds.
+
+    Under TopSpin this is java.lang.System.currentTimeMillis() (the
+    NTP-disciplined OS clock).  The Jython test harness injects a
+    HARNESS_WALL_MS builtin (a virtual clock with a known fractional
+    offset) so the audit math can be validated without hardware; the
+    NameError path below means production runs never notice the seam.
+    """
+    try:
+        return int(HARNESS_WALL_MS())      # test seam (harness only)
+    except NameError:
+        pass
+    except Exception:
+        pass
+    try:
+        if IN_TOPSPIN:
+            return int(java.lang.System.currentTimeMillis())
+    except Exception:
+        pass
+    try:
+        return int(time.time() * 1000)
+    except Exception:
+        return 0
+
+
+def harness_clock_advance(seconds):
+    """Test seam: in the Jython harness, mocked acquisitions advance the
+    virtual wall clock by their OCXO-implied duration (times one plus the
+    harness's injected fractional offset).  A no-op everywhere else."""
+    if seconds is None:
+        return
+    try:
+        HARNESS_ADVANCE_S(seconds)         # injected by testing/jython_entry
+    except NameError:
+        pass
+    except Exception:
+        pass
+
+
+def ocxo_expected_s(td, swh, ns, rows, d1_s, d1_per_row):
+    """OCXO-implied duration of one acquisition block, in seconds, from the
+    acquisition parameters alone: rows * ns * (AQ + d1_per_row * d1).
+    AQ = TD/(2*SWH).  zg/zg2d spend one d1 per transient; zgnoise2d spends
+    two (one before go, one before wr).  Disk/housekeeping overhead is NOT
+    included -- it is not OCXO-derived, and the offline fit's intercept
+    absorbs it."""
+    if not swh:
+        return None
+    aq = td / (2.0 * swh)
+    return rows * ns * (aq + d1_per_row * d1_s)
+
+
+def clock_block_begin(expno, role, expected_s):
+    """Open a clock-audit block: record the wall clock immediately before
+    the acquisition starts.  expected_s may be None for blocks whose
+    duration is not OCXO-predictable (the setup expno: tune/shim/pulsecal
+    plus operator dialogs); such blocks are recorded for the session
+    timeline but excluded from the offset fit."""
+    entry = {
+        "expno": expno,
+        "role": role,
+        "wall_start_ms": wall_clock_ms(),
+        "wall_end_ms": None,
+        "ocxo_expected_s": expected_s,
+    }
+    CLOCK_BLOCKS.append(entry)
+    return entry
+
+
+def clock_block_end(entry):
+    """Close a clock-audit block immediately after the acquisition ends."""
+    entry["wall_end_ms"] = wall_clock_ms()
+
+
+def _shell_capture(cmd):
+    """Run a shell command defensively; return its output as text, or None.
+    os.popen exists on every Jython/Python 2 build TopSpin ever shipped."""
+    try:
+        p = os.popen(cmd)
+        out = p.read()
+        rc = None
+        try:
+            rc = p.close()
+        except Exception:
+            rc = None
+        out = to_text(out).strip()
+        if out != "" and (rc is None or rc == 0):
+            return out[:2000]
+    except Exception:
+        pass
+    return None
+
+
+def capture_ntp_status():
+    """Best-effort snapshot of the workstation's time-sync state.
+
+    Tries the common tools in order (chrony, ntpd, systemd-timesyncd,
+    Windows w32time); the first that answers is recorded verbatim.  Every
+    call is wrapped -- a locked-down workstation records 'unavailable'
+    and the run continues.  Returns (raw_string, source_label)."""
+    probes = [
+        ("chronyc tracking", "chrony"),
+        ("ntpq -pn", "ntpd (ntpq)"),
+        ("timedatectl", "systemd-timesyncd (timedatectl)"),
+        ("w32tm /query /status", "w32time"),
+    ]
+    for cmd, label in probes:
+        out = _shell_capture(cmd)
+        if out is not None:
+            return (out, label)
+    return ("unavailable", "unknown")
 
 
 def rand4hex():
@@ -829,14 +968,17 @@ def set_common_acq(o1_hz, td, swh, ns, d1_s):
     putpar("RG", "1")
 
 
-def run_zg_and_wait(expno_dir, what):
+def run_zg_and_wait(expno_dir, what, ocxo_s=None):
     """Start acquisition and wait.  Both the per-command function ZG and
     the XCMD fallback block per the manual (default wait=WAIT_TILL_DONE).
     As belt-and-braces we verify a raw data file appeared; if not, the
     operator adjudicates.  SIMULATE/DESKTEST mock the acquisition (the
-    hw_skip() guard below is what testing/static_check.py verifies)."""
+    hw_skip() guard below is what testing/static_check.py verifies).
+    ocxo_s is the block's OCXO-implied duration; the mocked path hands it
+    to the harness's virtual clock so the clock audit can be tested."""
     if hw_skip():
         say("%s: zg mocked (%s)" % (hw_mode_name(), what))
+        harness_clock_advance(ocxo_s)
         return
     ok = 0
     try:
@@ -1246,6 +1388,11 @@ def main():
     # Install pulse program, create the dataset.
     pp_where = install_pulse_program()
 
+    # Workstation time-sync snapshot for the clock audit (once per
+    # session; every probe is wrapped, worst case records 'unavailable').
+    say("checking workstation time-sync (NTP) status")
+    ntp_raw, ntp_source = capture_ntp_status()
+
     dsname = "SPINNOISE_" + time.strftime("%Y%m%d", time.localtime())
     meta = {
         "schema_version": SCHEMA_VERSION,
@@ -1297,6 +1444,13 @@ def main():
             "topshim_ok": False,
         },
         "experiments": [],
+        # Clock audit (schema 1.2): blocks is the SAME list object as
+        # CLOCK_BLOCKS, so entries appended during the run land here.
+        "clock_audit": {
+            "blocks": CLOCK_BLOCKS,
+            "ntp_status_raw": ntp_raw,
+            "workstation_time_source": ntp_source,
+        },
         "checksums": {},
     }
 
@@ -1310,6 +1464,11 @@ def main():
     putpar("PULPROG", "zg")
     set_common_acq(o1_hz, TD_LADDER, SWH_HZ, 1, D1_REF_S)
     t0 = now_local()
+    # Clock-audit block for setup: wall times only.  The setup expno's
+    # duration (tune, shim, pulsecal, operator dialogs) is not
+    # OCXO-predictable, so ocxo_expected_s is null and the offline fit
+    # skips this block; the timestamps still anchor the session timeline.
+    cb = clock_block_begin(EXP_SETUP, "setup", None)
 
     if not SIMULATE:
         # Tune & match: atma if fitted, else operator wobb.
@@ -1370,6 +1529,7 @@ def main():
         meta["calibration"]["p90_power_db_or_w"] = "unknown"
     else:
         meta["calibration"]["p90_power_db_or_w"] = p90_db
+    clock_block_end(cb)
     record_experiment(meta, EXP_SETUP, "setup", t0, now_local(), 1)
 
     # ---------------------------------------------------------------- 8
@@ -1393,8 +1553,11 @@ def main():
         else:
             putpar("RG", str(rung))
         t0 = now_local()
+        ocxo_s = ocxo_expected_s(TD_LADDER, SWH_HZ, 1, 1, D1_REF_S, 1)
+        cb = clock_block_begin(expno, "rg_ladder", ocxo_s)
         run_zg_and_wait(ds_path(cd), "RG ladder rung %d (RG=%s)"
-                        % (i + 1, rung))
+                        % (i + 1, rung), ocxo_s)
+        clock_block_end(cb)
         record_experiment(meta, expno, "rg_ladder", t0, now_local(), 1)
         meta["calibration"]["rg_ladder"].append(
             {"expno": expno, "rg": rung, "tip_deg": 1.0})
@@ -1418,7 +1581,10 @@ def main():
     set_small_flip(p90_us, p90_db, db_par)
     putpar("RG", str(moderate_rg))
     t0 = now_local()
-    run_zg_and_wait(ds_path(cd), "reference_open")
+    ocxo_s = ocxo_expected_s(TD_ROW, SWH_HZ, 1, REF_ROWS, D1_REF_S, 1)
+    cb = clock_block_begin(EXP_REF_OPEN, "reference_open", ocxo_s)
+    run_zg_and_wait(ds_path(cd), "reference_open", ocxo_s)
+    clock_block_end(cb)
     record_experiment(meta, EXP_REF_OPEN, "reference_open",
                       t0, now_local(), REF_ROWS)
 
@@ -1451,7 +1617,11 @@ def main():
         "bundle zip is ready." % (n_rows, row_secs,
                                   n_rows * row_secs / 60.0, noise_rg),
         "spin-noise run: noise block starting")
-    run_zg_and_wait(ds_path(cd), "noise block (%d rows)" % n_rows)
+    # zgnoise2d spends TWO d1 delays per row (before go, before wr).
+    ocxo_s = ocxo_expected_s(TD_ROW, SWH_HZ, 1, n_rows, D1_NOISE_S, 2)
+    cb = clock_block_begin(EXP_NOISE, "noise", ocxo_s)
+    run_zg_and_wait(ds_path(cd), "noise block (%d rows)" % n_rows, ocxo_s)
+    clock_block_end(cb)
     record_experiment(meta, EXP_NOISE, "noise", t0, now_local(), n_rows)
 
     # ---------------------------------------------------------------- 11
@@ -1464,7 +1634,10 @@ def main():
     set_small_flip(p90_us, p90_db, db_par)
     putpar("RG", str(moderate_rg))
     t0 = now_local()
-    run_zg_and_wait(ds_path(cd), "reference_close")
+    ocxo_s = ocxo_expected_s(TD_ROW, SWH_HZ, 1, REF_ROWS, D1_REF_S, 1)
+    cb = clock_block_begin(EXP_REF_CLOSE, "reference_close", ocxo_s)
+    run_zg_and_wait(ds_path(cd), "reference_close", ocxo_s)
+    clock_block_end(cb)
     record_experiment(meta, EXP_REF_CLOSE, "reference_close",
                       t0, now_local(), REF_ROWS)
 
