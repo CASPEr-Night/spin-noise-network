@@ -30,18 +30,26 @@ STATUS / HONESTY:
         [owner, format, version, dataType, xDim, yDim, zDim, qDim], then
         IEEE float32 LE payload; a 1D of N complex points carries 3N
         floats (N x-axis values, then interleaved re/im).
-    UNVERIFIED: the meaning of the header magic/dataType values (nmrglue
-    reads past them without decoding). This reader checks STRUCTURAL
-    consistency (payload length vs xDim) instead of magic values, and
-    records the raw header in the packing report.
-  * UNVERIFIED (bench-session items, see vendors/magritek/README.md
-    checklist): acqu.par parameter spelling/units as written by a REAL
-    Spinsolve (`b1Freq` MHz, `dwellTime` us, `nrPnts`, `nrScans`,
-    `rxGain` dB are the Prospa-ecosystem names and are parsed leniently),
-    and every answers.json field (operator/macro supplied).
-  * This adapter has NEVER seen real Spinsolve data. Real sessions are
-    stamped run_mode "external-acquisition"; the synthetic generator
-    stamps "desktest" via answers.json run_mode_hint so a test bundle can
+    2026-08-26 documentation pass (README.md "Documentation verification
+    log"): both formats were checked against REAL Spinsolve output
+    (SpinsolveExpert V2.02.27, 80 MHz system, July 2026, public repo
+    fionnf/Nmr-simple-plotter). This reader's `inspect` reports
+    structure_ok on the real data.1d; the header magic words decode as
+    ASCII "PROS", "DATA", "V1.1" with dataType 504 for a 1D complex FID
+    (observed, not vendor-documented); the reader still checks
+    STRUCTURAL consistency (payload length vs xDim) rather than magic
+    values. acqu.par names/units confirmed from the real file plus the
+    SpinsolveExpert Pulse Programming Guide V1.40 (dwellTime in us,
+    acqTime in ms, bandwidth in kHz, b1Freq in MHz, rxGain in dB).
+    Real acqu.par files can repeat keys (e.g. `duration`); last value
+    wins here, matching a plain sequential read.
+  * Still bench-only: every answers.json field (operator/macro
+    supplied), and acqu.par/data.1d as written by THIS macro's save
+    path (README checklist item 6).
+  * This adapter's pack path has never run against a real SESSION (only
+    a real single experiment folder). Real sessions are stamped
+    run_mode "external-acquisition"; the synthetic generator stamps
+    "desktest" via answers.json run_mode_hint so a test bundle can
     never masquerade as data.
 
 Schema: emits schema 2.0 by default (vendor "magritek" + the
@@ -138,9 +146,11 @@ def parse_acqu_par(path):
 def read_1d(path):
     """Read a Prospa .1d file; return dict with header, counts, raw size.
 
-    Structural checks only -- the header magic/dataType meanings are
-    UNVERIFIED (see module docstring), so nothing is asserted about them
-    beyond internal consistency of the payload length:
+    Structural checks only. On a real Spinsolve file the first three
+    header words decode as ASCII "PROS", "DATA", "V1.1" and dataType is
+    504 for a 1D complex FID (observed 2026-08-26 on V2.02.27 output;
+    meanings observed, not vendor-documented), so nothing is asserted
+    about them beyond internal consistency of the payload length:
       expected payload = 3 * xDim float32 (x axis + interleaved re/im).
     """
     size = os.path.getsize(path)
@@ -324,7 +334,10 @@ def _clock_audit(answers, experiments):
     for blk in answers.get("blocks", []):
         t0, t1 = blk.get("wall_start_ms"), blk.get("wall_end_ms")
         exp = by_expno.get(blk.get("expno"))
-        if exp is None or not isinstance(t0, int) or not isinstance(t1, int):
+        # Accept ints or floats: the Prospa macro interpolates numbers
+        # into JSON and float formatting cannot be guaranteed from there.
+        if exp is None or not isinstance(t0, (int, float)) \
+                or not isinstance(t1, (int, float)):
             continue
         if t0 <= 0 or t1 <= t0:
             continue
@@ -408,8 +421,18 @@ def build_meta(session, schema_version="2.0"):
                  "blocks: %s." % lock_state)
     operator_notes = (notes + " " + lock_note).strip()
 
-    sw_version = str(answers.get("spinsolve_software_version",
-                                 "unknown (pending bench validation)"))
+    # Software version: prefer the instrument's own acqu.par field
+    # (`softwareVersion`, confirmed machine-readable in real V2.02.27
+    # output), fall back to the macro/operator answers value.
+    sw_version = None
+    for exp in experiments:
+        v = exp["acqu"].get("softwareVersion")
+        if isinstance(v, str) and v:
+            sw_version = v
+            break
+    if sw_version is None:
+        sw_version = str(answers.get("spinsolve_software_version",
+                                     "unknown (pending bench validation)"))
 
     meta = {
         "schema_version": schema_version,
@@ -465,9 +488,10 @@ def build_meta(session, schema_version="2.0"):
             "operator_notes": operator_notes,
         },
         "calibration": {
-            # p90 is not separately calibrated on a stock benchtop run;
-            # the macro records the small-flip reference tip instead.
-            # Placeholder pulse length pending bench item 6.
+            # The macro records the instrument's calibrated 90-degree
+            # pulse (gData channel parameters) as answers.json p90_us,
+            # plus the achieved small-flip reference tip. 10.0 is the
+            # fallback when answers.json predates that (bench item 8).
             "p90_us": float(answers.get("p90_us", 10.0)),
             "p90_power_db_or_w": "n/a (Spinsolve internal amplitude units)",
             "rg_ladder": [
