@@ -144,8 +144,11 @@ def build_meta(schema_version, version):
     return meta
 
 
-def fake_data_files():
-    """(in-zip path, bytes) pairs standing in for Bruker experiment dirs."""
+def fake_data_files(ser_mib=None):
+    """(in-zip path, bytes) pairs standing in for Bruker experiment dirs.
+    With ser_mib set, the 'ser' payload is that many MiB of incompressible
+    random bytes -- used by testing/test_upload_integration.sh to exercise
+    the uploader's chunked multipart path with a realistically large bundle."""
     acqus = (
         "##TITLE= Parameter file, synthetic\n"
         "##$PULPROG= <zgnoise2d>\n"
@@ -153,10 +156,14 @@ def fake_data_files():
         "##$NS= 1\n"
         "##END=\n"
     ).encode("ascii")
-    # Deterministic pseudo-noise 'ser' payload (content is irrelevant; the
-    # selftest only checks that the sha256 in meta.json matches the bytes).
-    rng = random.Random(20260825)
-    ser = bytes(bytearray(rng.getrandbits(8) for _ in range(4096)))
+    if ser_mib:
+        # os.urandom is incompressible, so the zip lands at ~ser_mib MiB.
+        ser = b"".join(os.urandom(1024 * 1024) for _ in range(ser_mib))
+    else:
+        # Deterministic pseudo-noise 'ser' payload (content is irrelevant; the
+        # selftest only checks that the sha256 in meta.json matches the bytes).
+        rng = random.Random(20260825)
+        ser = bytes(bytearray(rng.getrandbits(8) for _ in range(4096)))
     return [
         ("data/11/acqus", acqus),
         ("data/12/acqus", acqus),
@@ -175,6 +182,10 @@ def main(argv=None):
     parser.add_argument("--out-dir", default=None,
                         help="directory for the zip (default: a fresh "
                              "'synthetic_bundles' dir under testing/)")
+    parser.add_argument("--ser-mib", type=int, default=None,
+                        help="size of the synthetic ser payload in MiB "
+                             "(random, incompressible) -- for exercising the "
+                             "uploader's chunked path; default: tiny")
     args = parser.parse_args(argv)
 
     out_dir = args.out_dir or os.path.join(REPO, "testing", "synthetic_bundles")
@@ -184,7 +195,7 @@ def main(argv=None):
     version = repo_version()
     meta = build_meta(args.schema_version, version)
 
-    files = fake_data_files()
+    files = fake_data_files(args.ser_mib)
     for arc_name, payload in files:
         meta["checksums"][arc_name] = "sha256:" + hashlib.sha256(payload).hexdigest()
 

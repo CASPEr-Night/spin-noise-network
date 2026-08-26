@@ -37,6 +37,9 @@ console. Contact for everything: John W. Blanchard, jwbquantum@gmail.com.
       fraction** (tap or distilled is fine; if D₂O-doped, they must know the
       percentage — the H₂O-fraction dialog is the measurement, per
       PROTOCOL.md).
+- [ ] Ingest endpoint deployed (HANDOFF step 6, ~10 min) and the endpoint +
+      token sent to the facility **privately** (not in the install-kit email)
+      so step 11's automatic upload works on the day.
 
 ### 1.2 Ask the facility (answers back before the call)
 
@@ -128,14 +131,19 @@ console. Contact for everything: John W. Blanchard, jwbquantum@gmail.com.
 10. **Selftest validation on their machine** (any box with Python ≥3.6):
     `python3 upload_bundle.py <bundle.zip> --selftest`
     → must end `RESULT: PASS` (schema 1.1 validates, all sha256 verified).
-11. **Upload — or email fallback.** If the ingest Worker is deployed and the
-    facility has a `config.json` with endpoint + token:
-    `python3 upload_bundle.py <bundle.zip>`. **For the pilot the ingest
-    endpoint is likely not yet deployed — say so up front** and use the
-    fallback: email or file-transfer the zip directly to
-    jwbquantum@gmail.com (or a share link if it exceeds mail limits). The
-    uploader never deletes the bundle; the local copy stays with the
-    facility either way.
+11. **Upload (primary).** With the ingest Worker deployed (see HANDOFF step
+    6 — deploy it BEFORE the pilot) and the facility's `config.json` filled
+    with the endpoint + token sent privately beforehand:
+    `python3 upload_bundle.py <bundle.zip>`. Size is a non-issue: bundles
+    over 50 MB automatically take the chunked path (50 MiB parts, up to
+    5 GiB) and **resume after any interruption** — if the transfer drops,
+    just rerun the same command. Success ends with `RECEIPT: <id>`; note it
+    in the pilot log. The uploader never deletes the bundle; the local copy
+    stays with the facility either way.
+    *No-internet contingency only:* if the workstation (and every nearby
+    machine, via USB stick) truly cannot reach the endpoint, email or
+    file-transfer the zip to jwbquantum@gmail.com (share link if it exceeds
+    mail limits).
 12. **Wrap (5 min).** Thank L, confirm what happens next (§5), ask for the
     two-minute "anything that felt wrong?" debrief while it is fresh.
 
@@ -156,6 +164,7 @@ console. Contact for everything: John W. Blanchard, jwbquantum@gmail.com.
 | Reference (13) | line position within ~Hz of expno 11 (drift check) | |
 | Bundle | zip at printed path; meta.json at zip root; run_mode "live" | |
 | Selftest | `RESULT: PASS` on the facility machine | |
+| Upload | `UPLOAD OK` + `RECEIPT: <id>` from upload_bundle.py | |
 
 ---
 
@@ -230,9 +239,10 @@ directory of the template dataset they had open. Nothing else was written.
   selftest and upload from any other machine — copy the zip on a stick;
   the spectrometer host never needs internet. The uploader is stdlib-only
   by design; do not pip-install anything on their box.
-- **Ingest not deployed / no token:** expected for the pilot — use the
-  email fallback in step 11. Zenodo remains the zero-infrastructure
-  archive fallback (`server/` docs).
+- **Ingest not deployed / no token:** should not happen — deploying the
+  Worker before the pilot is a T−1 item (HANDOFF step 6; ~10 minutes). If
+  it slipped anyway, use the email fallback in step 11. Zenodo remains the
+  zero-infrastructure archive fallback (`server/` docs).
 - **Mid-run Jython error dialog:** the run stops but running acquisitions
   finish and all data stays in `SPINNOISE_<date>`; photograph/copy the
   error text — it is pilot gold — and decide with L whether to bundle
