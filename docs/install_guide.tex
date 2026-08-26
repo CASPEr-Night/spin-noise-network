@@ -1,0 +1,479 @@
+% =============================================================================
+% CASPEr@night --- Installation and First-Run Guide (Bruker / TopSpin)
+% Facility-facing install guide. Everything in here is re-presented from the
+% repository sources (topspin/INSTALL.md, README.md, PROTOCOL.md,
+% testing/tier0_desktest.md, testing/pilot_runbook.md, uploader/, and
+% topspin/spin_noise_run.py itself). Build: pdflatex x2.
+% =============================================================================
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage[margin=2.4cm]{geometry}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{listings}
+\usepackage{tcolorbox}
+\usepackage[hidelinks]{hyperref}
+
+\definecolor{cmdbg}{gray}{0.955}
+\definecolor{cmdframe}{gray}{0.70}
+\definecolor{boxframe}{rgb}{0.15,0.30,0.45}
+\definecolor{boxbg}{rgb}{0.945,0.965,0.98}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{cmdbg},
+  frame=single,
+  rulecolor=\color{cmdframe},
+  framesep=4pt,
+  xleftmargin=6pt,
+  xrightmargin=6pt,
+  breaklines=true,
+  breakatwhitespace=true,
+  postbreak=\mbox{\space\space},
+  columns=fullflexible,
+  keepspaces=true,
+  aboveskip=6pt,
+  belowskip=6pt,
+  literate={~}{\textasciitilde}{1}
+}
+
+\newcommand{\hnmr}{\textsuperscript{1}H}
+\newcommand{\dtwo}{D\textsubscript{2}O}
+\newcommand{\htwo}{H\textsubscript{2}O}
+\newcommand{\ts}{TopSpin}
+\newcommand{\file}[1]{\texttt{#1}}
+\newcommand{\dialog}[1]{\textbf{#1}}
+
+\setlist[itemize]{topsep=3pt, itemsep=2pt, parsep=0pt}
+\setlist[enumerate]{topsep=3pt, itemsep=3pt, parsep=0pt}
+
+\emergencystretch=1.5em
+
+\title{\textbf{CASPEr@night --- Installation and First-Run Guide}\\
+\large (Bruker / TopSpin)}
+\author{John W. Blanchard (\href{mailto:jwbquantum@gmail.com}{jwbquantum@gmail.com})
+\and Reza Ebadi \and Claude (Anthropic)}
+\date{Software v0.3.0 --- August 2026}
+
+\begin{document}
+\maketitle
+
+\section{What this is}
+
+CASPEr@night is a community measurement program: any NMR facility with a
+Bruker spectrometer can contribute a data point with one 5\,mm tube of water
+and one \ts{} command, \texttt{xpy spin\_noise\_run}. The script records the
+spin-noise feature of water --- the Gu\'eron absorption dip on room-temperature
+probes, the emission bump on cryoprobes --- together with the receiver
+calibrations needed to interpret it absolutely, and packs everything into a
+single zip for upload. Across many facilities these bundles map the
+temperature-contrast law of circuit--spin coupling over the community's probe
+fleet, and they bank spin-noise-limited noise records for
+fundamental-sensitivity and dark-matter (CASPEr-style) analyses.
+
+The project page is
+\href{https://night.blanchard-science.com}{night.blanchard-science.com}. The
+data policy (\file{DATA\_POLICY.md} in the distribution) is short and worth the
+two minutes --- your raw data remain yours, and contributing facilities are
+co-authors on any network publication their data enter.
+
+\begin{tcolorbox}[colback=boxbg, colframe=boxframe,
+  title=\textbf{The five-minute version}, fonttitle=\bfseries]
+\begin{enumerate}[leftmargin=1.4em]
+\item Download the latest release zip:
+      \url{https://github.com/CASPEr-Night/spin-noise-network/releases/latest}
+\item Copy two files onto the spectrometer workstation:
+      \file{topspin/spin\_noise\_run.py} $\rightarrow$
+      \file{<TSHOME>/exp/stan/nmr/py/user/} and
+      \file{topspin/pp/zgnoise2d} $\rightarrow$
+      \file{<TSHOME>/exp/stan/nmr/lists/pp/user/}
+\item Fill a 5\,mm tube with ${\sim}550\,\mu$L of plain water (any water ---
+      you just have to know what it is), insert it, and open any existing
+      \hnmr{} dataset in \ts.
+\item Dry run first, no hardware touched:
+      \texttt{xpy spin\_noise\_run simulate}
+\item Real run: \texttt{xpy spin\_noise\_run} --- answer the dialogs,
+      \textbf{confirm the BSMS field sweep is OFF}, walk away
+      (${\sim}45$\,min default).
+\item Upload from any machine with Python~3:
+      \texttt{python3 uploader/upload\_bundle.py <bundle.zip>}
+      (first time: copy \file{config.example.json} to \file{config.json} and
+      paste the endpoint and token the coordinator sent you).
+\end{enumerate}
+\end{tcolorbox}
+
+\section{Requirements}
+
+\begin{itemize}
+\item \textbf{A Bruker spectrometer running \ts{} 2.x, 3.x, or 4.x.} The
+      script is written for \ts's embedded Jython interpreter and avoids
+      anything version-specific --- every optional command (\texttt{atma},
+      \texttt{topshim}, \texttt{pulsecal}, \texttt{rga}) degrades to an
+      operator dialog when missing, so old consoles work too.
+\item \textbf{Any \hnmr-capable probe} --- room-temperature, nitrogen-cooled,
+      or helium cryoprobe. The run asks which and records it.
+\item \textbf{One 5\,mm tube of plain water}, ${\sim}550\,\mu$L. Tap,
+      distilled, or \dtwo-doped all work --- \emph{as long as you know the
+      composition}. The \htwo-fraction question in the dialogs is the
+      measurement itself (the spin-noise feature scales with proton density),
+      so if the tube contains \dtwo, know the percentage.
+\item \textbf{Python 3.6 or newer on any machine that can reach the
+      internet}, for the upload step only. The spectrometer host itself needs
+      no internet access and no Python packages --- carry the zip on a USB
+      stick if needed. Check with:
+\begin{lstlisting}
+python3 --version
+\end{lstlisting}
+\item \textbf{NTP time synchronization enabled on the \ts{} workstation}
+      (it usually is by default). The run measures your console's master-clock
+      offset for free by comparing the NTP-disciplined workstation clock
+      against the console-timed acquisition durations --- the ``clock audit''
+      in the bundle. Nothing on the spectrometer is touched or reconfigured
+      --- if your workstation is air-gapped, just mention that when you
+      upload.
+\item \textbf{Disk and time:} the default run writes roughly 200\,MB
+      (${\geq}10$\,GB free is comfortable headroom for reruns and longer noise
+      blocks) and takes ${\sim}45$ minutes of magnet time, of which you are
+      needed for the first ${\sim}5$ (the dialogs).
+\end{itemize}
+
+\section{Download}
+
+Get the latest release zip from the GitHub releases page:
+\begin{lstlisting}
+https://github.com/CASPEr-Night/spin-noise-network/releases/latest
+\end{lstlisting}
+The zip is the complete \file{spin-noise-network} distribution: the \ts{}
+acquisition kit, the uploader, the metadata schema, the protocol and policy
+documents, and testing tools. Only two files go onto the spectrometer
+workstation (next section):
+\begin{itemize}
+\item \file{topspin/spin\_noise\_run.py} --- the acquisition script (Jython,
+      runs inside \ts).
+\item \file{topspin/pp/zgnoise2d} --- the no-pulse pseudo-2D pulse program
+      used for the noise blocks.
+\end{itemize}
+Keep the rest of the unpacked folder around on whatever machine will do the
+upload: the uploader, \file{uploader/upload\_bundle.py}, expects
+\file{schema/meta.schema.json} one level up from itself, as in the release
+layout. If you move the uploader out on its own, pass
+\texttt{-{}-schema <path>} explicitly --- otherwise its
+\texttt{-{}-selftest} skips schema validation with a WARN yet still prints
+\texttt{RESULT: PASS}.
+
+\section{Install (two file copies)}
+
+\begin{enumerate}
+\item Copy \file{spin\_noise\_run.py} to
+      \file{<TSHOME>/exp/stan/nmr/py/user/}.
+      Alternative: in \ts{} type \texttt{edpy}, use \emph{File
+      $\rightarrow$ Import\ldots} and pick the file --- that lands it in the
+      same place.
+\item Copy \file{pp/zgnoise2d} to
+      \file{<TSHOME>/exp/stan/nmr/lists/pp/user/}.
+\item There is no step 3. No Python packages, no licenses, no network access
+      is needed on the spectrometer.
+\end{enumerate}
+
+\file{<TSHOME>} is your \ts{} installation directory ---
+\file{/opt/topspin4.1.4} or \file{/opt/topspin3.6.5} on Linux,
+\file{C:\textbackslash Bruker\textbackslash TopSpin4.1.4} on Windows, etc.
+If you are unsure, type \texttt{set} inside \ts{} or look at the title bar of
+the \ts{} window.
+
+The script also installs \file{zgnoise2d} automatically on first run if it
+can find your \ts{} directory, so step 2 is a belt-and-braces copy --- do it
+anyway if you can.
+
+\textbf{Verify \ts{} sees the script:} type \texttt{edpy} and
+\file{spin\_noise\_run} should appear in the \emph{user} source directory
+listing. The pulse program is checked again at run time: if \texttt{zg}
+cannot find it, the script tells you and detects the file once you copy it in
+by hand (Section~\ref{sec:trouble}).
+
+\section{Verify without touching hardware}
+\label{sec:verify}
+
+Two test modes let you exercise the whole flow before the magnet is involved.
+Both are started from the \ts{} command line with any \hnmr{} dataset open (a
+PROTON demo set is fine --- it is only a parameter template).
+
+\subsection*{5.1\quad SIMULATE --- the pure dry run}
+
+\begin{lstlisting}
+xpy spin_noise_run simulate
+\end{lstlisting}
+
+SIMULATE skips all spectrometer commands (and the setup blocks that lead to
+them) while still running every dialog, the dataset bookkeeping, the
+\file{meta.json} writing, and the zip bundling. Answer the dialogs with test
+values (suggested: institution \texttt{Desk Test Lab}, slug
+\texttt{desktest-lab}, sample \texttt{distilled water}, \htwo{} \texttt{100},
+\dtwo{} \texttt{0}, duration \texttt{30 min}, lock \texttt{OFF}, sweep
+confirmed \texttt{OFF}). Success looks like:
+\begin{itemize}
+\item the greeting dialog shows \texttt{*** SIMULATE MODE ... ***}.
+\item all operator dialogs appear, in the order listed in
+      Section~\ref{sec:dialogs}.
+\item the terminal shows \texttt{SIMULATE -> ...} / \texttt{SIMULATE: zg
+      mocked ...} lines and no errors.
+\item the final dialog reports the bundle path, and the zip exists there.
+\end{itemize}
+
+\subsection*{5.2\quad DESKTEST --- the stronger check}
+
+\begin{lstlisting}
+xpy spin_noise_run desktest
+\end{lstlisting}
+
+DESKTEST drives the \emph{real} \ts{} API --- the full dialog chain,
+\texttt{GETPAR}/\texttt{PUTPAR} on live parameter sets, \texttt{WR}/\texttt{RE}
+dataset creation, \file{meta.json} writing, zip bundling --- and mocks only
+the five hardware commands (\texttt{atma}, \texttt{topshim},
+\texttt{pulsecal}, \texttt{zg}, \texttt{rga}). It runs fine on a
+processing-only \ts{} install (Bruker's free academic license), so you can do
+it at your desk. Pass criteria, from the release's desk-test checklist:
+\begin{itemize}
+\item terminal shows \texttt{DESKTEST -> mocked 'atma'}, \texttt{'topshim'},
+      \texttt{'pulsecal'}, \texttt{'rga'} --- and no manual-fallback dialog
+      appears for any of them, and no Jython traceback anywhere.
+\item a dataset \file{SPINNOISE\_<yyyymmdd>} exists with expnos
+      \textbf{1, 10, 14, 15, 16, 11, 12, 13}.
+\item \file{meta.json} is written twice (dataset directory and bundle) and
+      contains a \texttt{software} block with
+      \texttt{"script\_version": "0.3.0"} (this release),
+      \texttt{"schema\_version": "1.2"} (the orchestrator's Bruker-only
+      metadata vintage, accepted under the repository's vendor-neutral v2.0
+      schema), a \texttt{script\_sha256} fingerprint, and
+      \texttt{"run\_mode": "desktest"} --- plus a \texttt{clock\_audit} block
+      with one timing entry per acquisition.
+\item the bundle zip,
+      \file{SPINNOISE\_<date>/}\allowbreak\file{spinnoise\_<slug>\_<YYYYMMDD\_HHMMSS>Z\_<hex>.zip},
+      opens in any zip tool, and the validator passes on any Python-3 machine:
+\begin{lstlisting}
+python3 uploader/upload_bundle.py <bundle.zip> --selftest
+      -> RESULT: PASS
+\end{lstlisting}
+\end{itemize}
+\textbf{Never upload a SIMULATE or DESKTEST bundle} --- it contains copies of
+your demo dataset, not noise data. \file{meta.json} flags it, but do not rely
+on the flag --- just do not send it.
+
+\section{The real run}
+\label{sec:dialogs}
+
+One honest note before the first live run: as of v0.3.0 the script has been
+desk-tested end to end (a real Jython interpreter against a stubbed \ts{}
+API, plus the SIMULATE/DESKTEST modes above), but it has not yet run on real
+spectrometer hardware. We therefore treat the first live run at each facility
+as a supervised pilot --- write to
+\href{mailto:jwbquantum@gmail.com}{jwbquantum@gmail.com} and we will
+screen-share through it.
+
+\subsection*{6.1\quad Before you type the command}
+
+Insert the water tube (sample changer or manual --- the script never ejects
+or injects), set your usual VT setpoint, and let the sample equilibrate for a
+few minutes. Tune/match and shimming happen \emph{inside} the run:
+the script calls \texttt{atma} and \texttt{topshim} where your system has
+them and walks you through the manual equivalents (\texttt{wobb}, your usual
+shim routine) where it does not. Open any existing \hnmr{} dataset, then:
+\begin{lstlisting}
+xpy spin_noise_run
+\end{lstlisting}
+
+\subsection*{6.2\quad The dialogs, in order}
+
+\begin{enumerate}
+\item \dialog{Welcome} --- summarizes what the run will do (Start/Cancel).
+\item \dialog{Your facility (1/5)} --- institution, city, country, contact
+      e-mail, so the bundle is attributed correctly.
+\item \dialog{Facility slug (2/5)} --- short machine-readable ID
+      (auto-suggested), used in the bundle file name.
+\item \dialog{Contact consent} --- whether the maintainers may contact you at
+      that address. The e-mail is stored only if you answer yes.
+\item \dialog{The sample (3/5)} --- description, \htwo{} fraction (\%),
+      \dtwo{} fraction (\%), additives, tube OD, volume. Answer exactly as the
+      tube is. Tap water with a described history beats an undocumented
+      perfect sample.
+\item \dialog{Temperature (4/5)} --- VT setpoint in K (enter 298 if VT is off
+      and the bore is at room temperature).
+\item \dialog{Noise-block duration (5/5)} --- 30\,min (default), 60\,min,
+      180\,min, or overnight (10\,h). Setup and references add
+      ${\sim}15$\,min on top. Longer runs average down the spectrum, and
+      an overnight run on an idle weekend magnet is gold.
+\item \dialog{Lock state} --- turn the lock OFF for the noise block if you
+      can (\texttt{lock off} / BSMS LOCK key): lock rf leaks into the \hnmr{}
+      channel on some systems. Either answer is accepted and recorded.
+\item \dialog{BSMS field sweep --- the one that matters.} Open
+      \texttt{bsmsdisp} and \emph{physically verify} SWEEP is OFF before
+      answering. A sweeping field smears the spin-noise feature over several
+      kHz and leaves a perfectly healthy-looking flat noise floor --- this
+      silently contaminated an archival dataset in 2022, and the script
+      cannot verify the sweep state on all console generations, so the
+      confirmation is on you. If you cannot confirm, a follow-up dialog
+      offers proceed-flagged or abort. Prefer fixing it to proceeding flagged.
+\item \dialog{Hardware check} --- \ts{} version, console, probe string
+      (pre-filled where the script can detect them) --- correct as needed.
+\item \dialog{Probe type} --- room-temperature, nitrogen-cooled, helium
+      cryoprobe, or unknown (this sets which side of the temperature-contrast
+      law your point lands on).
+\item \dialog{Probe temperatures (optional)} --- coil and preamp temperatures
+      in K if you know them (\texttt{edte} / cryopanel). Blank is fine.
+\item \dialog{90-degree pulse} --- confirm P90 ($\mu$s) and its power (dB),
+      pre-filled from \texttt{pulsecal} or the current P1. Sanity-check it
+      (${\sim}$7--15\,$\mu$s is typical) before confirming.
+\item \dialog{Noise block starting} --- shows rows, seconds per row, total
+      time, and RG. The pulse-free block starts when you close it ---
+      \emph{this is the walk-away point}.
+\item \dialog{Final notes} --- anything unusual during the run (construction,
+      elevator, He fill, lock left on, \ldots). Blank if all was quiet.
+\item \dialog{Done} --- the bundle path and the one-line upload command.
+\end{enumerate}
+Two conditional extras: if the script cannot find your \ts{} directory it
+asks once for the user pulse-program path, and on systems missing
+\texttt{atma}/\texttt{topshim}/\texttt{pulsecal}/\texttt{rga} it asks you to
+perform that one step manually and press OK.
+
+\subsection*{6.3\quad What it does, and what it will not touch}
+
+The run creates one dataset, \file{SPINNOISE\_<date>}, in your current data
+directory:
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+expno & role \\
+\midrule
+1 & setup: tune/match, shim, P90 calibration \\
+10, 14, 15, 16 & RG ladder: quick $1^{\circ}$ 1Ds at RG $=$ 1, 8, 64, max \\
+11 & reference (open): $1^{\circ}$ pseudo-2D, 8 rows $\times$ ${\sim}19$\,s \\
+12 & \textbf{noise}: \file{zgnoise2d}, \emph{no pulse at all}, NS$=$1/row,
+     RG max stable \\
+13 & reference (close): same as 11 (drift check) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Pulsing is limited to the standard pulse calibration and ${\sim}1^{\circ}$
+tips at the calibrated observe power --- no long or repeated high-power
+irradiation. The script never changes instrument configuration, never touches
+your lock or sweep settings silently (it asks you and records your answer),
+and reads and writes nothing outside the \file{SPINNOISE\_<date>} dataset
+plus the two installed files. Complete removal, if you ever want everything
+gone:
+\begin{lstlisting}
+rm -rf <DATADIR>/SPINNOISE_<yyyymmdd>
+rm <TSHOME>/exp/stan/nmr/py/user/spin_noise_run.py
+rm <TSHOME>/exp/stan/nmr/lists/pp/user/zgnoise2d
+\end{lstlisting}
+(Windows: delete the same three paths in Explorer. \file{<DATADIR>} is the
+data directory of the template dataset you had open.)
+
+The final dialog prints the full path of the finished bundle, which lands
+inside the \file{SPINNOISE\_<date>} dataset directory as
+\file{spinnoise\_<slug>\_<timestamp>Z\_<hex>.zip}. You keep this local copy
+no matter what happens during upload.
+
+\section{Upload}
+
+\subsection*{7.1\quad One-time setup}
+
+On whichever machine will do the upload (Python $\geq$ 3.6, internet), go to
+the \file{uploader/} folder, copy \file{config.example.json} to
+\file{config.json}, and fill in the values \textbf{the coordinator sent your
+facility privately}:
+\begin{lstlisting}
+{
+  "endpoint_url": "https://...workers.dev/ingest",
+  "token":        "<from the coordinator>",
+  "facility_slug": "your-facility-slug"
+}
+\end{lstlisting}
+The endpoint and token arrive by a private channel, never in e-mail chains
+--- treat the token like a password. \file{config.json} is read locally and
+never uploaded.
+
+\subsection*{7.2\quad The upload}
+
+\begin{lstlisting}
+python3 uploader/upload_bundle.py /path/to/spinnoise_*.zip
+\end{lstlisting}
+
+Size never matters: bundles up to 50\,MiB go in one request, and anything
+larger (overnight runs, up to 5\,GiB) automatically switches to a chunked
+upload in 50\,MiB parts. Progress is checkpointed next to the zip
+(\file{<bundle>.upload-state.json}), so if the network drops or the machine
+reboots, \textbf{rerun the same command and it resumes where it left off}.
+The uploader never deletes your zip.
+
+Success ends with a line like:
+\begin{lstlisting}
+RECEIPT: <id>
+\end{lstlisting}
+That is the server confirming your bundle arrived intact (its SHA-256 was
+verified on arrival) and was recorded. Note the id --- it is the reference
+for any follow-up about this bundle.
+
+\subsection*{7.3\quad First test run, or no endpoint yet}
+
+If you have no \file{config.json} (or no internet path at all), the script
+prints exactly what to do: the zip stays where it is, and you can e-mail or
+file-transfer it to
+\href{mailto:jwbquantum@gmail.com}{jwbquantum@gmail.com} (a share link is
+fine if it exceeds mail limits). For a first test you can also validate
+locally without any network:
+\begin{lstlisting}
+python3 uploader/upload_bundle.py <bundle.zip> --selftest
+\end{lstlisting}
+
+\section{Troubleshooting}
+\label{sec:trouble}
+
+\begin{itemize}
+\item \textbf{``No dataset is open''} --- open any \hnmr{} dataset first (it
+      is only the parameter template).
+\item \textbf{Pulse program not found at \texttt{zg}} --- copy
+      \file{pp/zgnoise2d} into the user pulse-program directory
+      (\file{<TSHOME>/exp/stan/nmr/lists/pp/user/}) by hand and rerun ---
+      the script will detect it.
+\item \textbf{A \texttt{parmode} dialog appears} --- some \ts{} versions ask
+      before converting a dataset to 2D. Answer yes/OK --- the dataset is
+      fresh, there is nothing to lose.
+\item \textbf{Old \ts{} (2.x)} --- everything is written for Jython 2.2-level
+      syntax. If \file{Avance.incl} is missing, delete the \texttt{\#include}
+      line in \file{zgnoise2d} (it is not used).
+\item \textbf{No ATM probe / no \texttt{rga}} --- expected and handled: the
+      script asks you to tune/match with \texttt{wobb} (or set RG) manually
+      and confirm in a dialog.
+\item \textbf{A hardware command hangs with no progress for over 5 minutes}
+      --- kill the script window. Any acquisition already started finishes on
+      its own and all data stays in \file{SPINNOISE\_<date>}.
+\item \textbf{A Jython error dialog appears} --- the run stopped, but started
+      acquisitions finish and the data stays in \file{SPINNOISE\_<date>}.
+      Copy the error text verbatim into a support issue (below) --- a stuck
+      run reported well is worth almost as much as a clean one.
+\item \textbf{Facility Python 3 older than 3.6} --- run the selftest and
+      upload from any other machine (copy the zip on a stick). The uploader
+      is stdlib-only by design, so please do not pip-install anything on
+      the spectrometer workstation.
+\end{itemize}
+
+\textbf{Where to get help:} open a facility-support issue at
+\url{https://github.com/CASPEr-Night/spin-noise-network/issues/new?template=facility-support.yml}
+(``don't know'' is always an acceptable answer on that form), or write to
+\href{mailto:jwbquantum@gmail.com}{jwbquantum@gmail.com}.
+
+\vspace{1.5em}
+\noindent\rule{\textwidth}{0.4pt}\\[2pt]
+{\small Data policy: your raw data remain yours, and contributing facilities
+are co-authors on network publications their data enter --- full terms in
+\file{DATA\_POLICY.md} and at
+\href{https://night.blanchard-science.com}{night.blanchard-science.com}.}
+
+\end{document}

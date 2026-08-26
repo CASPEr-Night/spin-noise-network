@@ -93,7 +93,7 @@ DESKTEST = False          # True: Tier-0 desk test.  Like SIMULATE, but it
 
 # Single source of truth for the script version.  KEEP IN SYNC with the
 # repository VERSION file (testing/static_check.py enforces the match).
-SCRIPT_VERSION  = "0.3.0-dev"
+SCRIPT_VERSION  = "0.3.0"
 PROGRAM_VERSION = SCRIPT_VERSION  # alias kept for meta.json 'program_version'
 # This TopSpin orchestrator still writes schema 1.2 bundles (the last
 # Bruker-only schema).  The repository schema is 2.0 (vendor-neutral:
