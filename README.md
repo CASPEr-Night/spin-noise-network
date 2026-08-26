@@ -3,7 +3,10 @@
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22100871.svg)](https://doi.org/10.5281/zenodo.22100871)
 
 A community measurement program for nuclear spin noise. Any NMR facility with a Bruker
-spectrometer can contribute a data point with one sample tube and one command: the
+spectrometer can contribute a data point with one sample tube and one command — and the
+bundle contract is now vendor-neutral (schema v2.0), with a standalone packer so JEOL
+and Magritek data can join through converter/scripted paths (see the vendor-support
+matrix below): the
 protocol measures the spin-noise feature of water (the Guéron absorption dip on
 room-temperature probes, the emission bump on cryoprobes) together with the receiver
 calibrations needed to interpret it absolutely. Across many facilities this maps the
@@ -49,13 +52,32 @@ commands mocked — runnable on a free processing-only TopSpin install
 | `topspin/spin_noise_run.py` | Jython orchestrator, runs inside TopSpin 2.x–4.x |
 | `topspin/pp/zgnoise2d` | no-pulse pseudo-2D pulse program for the noise blocks |
 | `topspin/INSTALL.md` | install paths, expno map, troubleshooting |
-| `uploader/upload_bundle.py` | Python 3 stdlib-only uploader — auto-selects single-shot vs. chunked-resumable upload by size (+ `--selftest` bundle validator; accepts schema v1.0–v1.2 bundles) |
-| `schema/meta.schema.json` | the metadata contract (JSON Schema, v1.2 — adds the optional `clock_audit` object; v1.1/v1.0 bundles remain valid) |
+| `packer/pack_bundle.py` | Python 3 stdlib-only standalone packer: a directory of vendor data files + `answers.json` (the operator questionnaire) → a validated bundle zip, identical in layout to the orchestrator's. Pluggable vendor readers: Bruker implemented (round-trip tested); JEOL/Magritek adapter interface defined |
+| `packer/answers.example.json` | the questionnaire template for the packer (same questions as the TopSpin dialogs) |
+| `uploader/upload_bundle.py` | Python 3 stdlib-only uploader — auto-selects single-shot vs. chunked-resumable upload by size (+ `--selftest` bundle validator; accepts schema v1.0–v2.0 bundles) |
+| `schema/meta.schema.json` | the metadata contract (JSON Schema, v2.0 — vendor-neutral: required `vendor` enum + vendor-namespaced `instrument` blocks; v1.x bundles remain valid, absent vendor = Bruker) |
 | `server/` | Cloudflare Worker + R2 ingest endpoint, single-shot + chunked/resumable (maintainer deploys once — `server/DEPLOY.md`) |
 | `testing/` | real-Jython harness (`run_jython_harness.sh`), Tier-0 desk-test checklist (`tier0_desktest.md`), `static_check.py`, end-to-end upload test against a local Worker (`test_upload_integration.sh`) |
 | `VERSION` | repository release version (mirrored by `SCRIPT_VERSION` in the run script) |
 | `PROTOCOL.md` | the science, the operator questions, and why each exists |
 | `DATA_POLICY.md` | ownership, permitted uses, co-authorship, embargo, and withdrawal terms |
+
+## Vendor support
+
+| Vendor | Path | Status |
+|---|---|---|
+| **Bruker** (TopSpin 2.x–4.x) | full/automatic: the `topspin/spin_noise_run.py` orchestrator acquires, tags, and bundles everything itself; `packer/pack_bundle.py --vendor bruker` additionally repacks any existing TopSpin expno tree | Desk-tested end to end (real-Jython harness + packer round-trip); first supervised pilot pending |
+| **JEOL** (Delta) | converter path: acquire with Delta, then pack the exported data with `packer/pack_bundle.py --vendor jeol`; acquisition automation to be developed with a partner facility | Adapter interface + schema block defined; reader **draft pending partner-facility validation** (.jdf parsing to follow the MIT-licensed [jeolconverter v1.0.1](https://www.npmjs.com/package/jeolconverter) (cheminfo, npm), with attribution) |
+| **Magritek** (Spinsolve/SpinsolveExpert) | scripted path: a Prospa-driven acquisition plus `packer/pack_bundle.py --vendor magritek` | Adapter interface + schema block defined; reader **pending bench validation** (file conventions per [nmrglue's spinsolve reader](https://nmrglue.readthedocs.io/en/latest/reference/spinsolve.html)) |
+
+Every vendor lands in the same bundle contract: `meta.json` keeps the physics core
+(frequencies, sample, temperatures, timing/clock audit, checksums, software
+provenance) vendor-neutral, and everything instrument-specific lives in a
+vendor-namespaced `instrument` block. Anything in the JEOL/Magritek paths that could
+not be verified against real vendor documentation is explicitly marked UNVERIFIED in
+code and listed in the partner-session validation checklist at the top of
+`packer/pack_bundle.py` — draft vendor code is expected; guessed-but-authoritative
+vendor code is not.
 
 ## For the coordinator
 

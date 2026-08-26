@@ -3,7 +3,7 @@
 Operational script for the remote supervised pilot: we screen-share (or
 NoMachine) into the facility's TopSpin workstation while a local colleague
 sits at the console. This is the first time `topspin/spin_noise_run.py`
-(v0.2.0, the current `VERSION`) touches a real spectrometer; Tier −1 and Tier 0 are already green
+(v0.3.0-dev, the current `VERSION`) touches a real spectrometer; Tier −1 and Tier 0 are already green
 (`testing/tier0_desktest.md`).
 
 Roles below: **R** = remote operator (us), **L** = local colleague at the
@@ -130,8 +130,9 @@ console. Contact for everything: John W. Blanchard, jwbquantum@gmail.com.
    is nonzero.
 10. **Selftest validation on their machine** (any box with Python ≥3.6):
     `python3 upload_bundle.py <bundle.zip> --selftest`
-    → must end `RESULT: PASS` (the current schema — 1.2, which
-    includes the clock-audit block timestamps — validates, all sha256
+    → must end `RESULT: PASS` (the orchestrator writes schema 1.2,
+    which includes the clock-audit block timestamps and remains fully
+    valid under the current v2.0 vendor-neutral contract; all sha256
     verified).
 11. **Upload (primary).** With the ingest Worker deployed (see HANDOFF step
     6 — deploy it BEFORE the pilot) and the facility's `config.json` filled

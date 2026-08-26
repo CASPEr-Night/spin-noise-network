@@ -1,0 +1,346 @@
+########################################################################
+# spin_noise_run_spinsolve.mac
+#
+# spin-noise network acquisition orchestrator -- Magritek Spinsolve port
+# (SpinsolveExpert / Prospa macro language).
+#
+# *** STATUS: DRAFT PENDING BENCH VALIDATION -- HAS NEVER RUN ON A     ***
+# *** SPINSOLVE. Every construct that could not be verified against    ***
+# *** public Prospa documentation or published Prospa macros is marked ***
+# *** "UNVERIFIED" with a number referencing the validation checklist  ***
+# *** in vendors/magritek/README.md. A Prospa-literate operator is     ***
+# *** expected to fix syntax in minutes at the first bench session.    ***
+#
+# WHAT IS VERIFIED (against published Kea/Prospa macros and nmrglue's
+# Spinsolve reader): procedure/endproc structure, # comments, if/endif,
+# for..next, try/catch/endtry, message(), $var$ interpolation, list
+# literals, the parameter vocabulary (b1Freq, rxGain, rxPhase, nrPnts,
+# dwellTime, nrScans), and the on-disk products (per-experiment folder
+# with acqu.par + data.1d).
+#
+# WHAT IS NOT (the UNVERIFIED marks below): SpinsolveExpert's experiment
+# -execution entry points, pulse-program definition of a no-pulse
+# sequence, file-I/O and clock functions, rxGain legal range, lock
+# control, dialog primitives.
+#
+# PROTOCOL (identical block structure to the Bruker orchestrator
+# topspin/spin_noise_run.py): operator questions -> rxGain ladder ->
+# small-flip reference -> N no-pulse noise acquisitions -> closing
+# reference; every block saved to its own numbered folder under one
+# session directory; answers.json written for the packer
+# (vendors/magritek/magritek_reader.py).
+#
+# Session directory layout produced (expno = folder name, packer relies
+# on these numbers; keep in sync with magritek_reader.py):
+#     <session>/answers.json
+#     <session>/10, 14, 15, 16   rxGain ladder rungs
+#     <session>/11               reference_open (small flip)
+#     <session>/20 .. 20+N-1     noise blocks (NO PULSE)
+#     <session>/13               reference_close (small flip)
+#
+# Maintainer: John W. Blanchard, jwbquantum@gmail.com
+# Co-developed with Claude (Anthropic).
+########################################################################
+
+########################################################################
+# Main entry point.
+########################################################################
+procedure(spin_noise_run_spinsolve)
+
+# ---------------------------------------------------------------------
+# OPERATOR-EDITABLE CONSTANTS (the six questions, editable here so the
+# macro can also run fully unattended; the confirm dialog below shows
+# them before anything acquires).
+# ---------------------------------------------------------------------
+
+   version        = "0.1.0-draft"
+
+ # 1. facility
+   facilitySlug   = "changeme-facility"     # assigned by the maintainer
+   institution    = "CHANGE ME"
+   city           = "CHANGE ME"
+   country        = "CHANGE ME"
+   contactEmail   = ""                       # stored only if consent = "yes"
+   contactConsent = "no"
+
+ # 2. sample (the H2O fraction IS the measurement -- 2022 lesson)
+   sampleDesc     = "distilled water"
+   h2oFractionPct = 100.0
+   d2oPct         = 0.0
+   additives      = "none"
+   tubeOD_mm      = 5.0
+   sampleVol_ul   = 550.0
+
+ # 3. temperature (Spinsolve regulates magnet temperature; enter the
+ #    magnet/sample setpoint in kelvin as reported by the instrument)
+   sampleTemp_K   = 300.0
+
+ # 4. lock state during noise blocks ("on"/"off"/"unknown") -- Spinsolve
+ #    external hardware lock; whether it can be frozen is UNVERIFIED(5)
+   lockState      = "unknown"
+
+ # 5. run plan
+   nNoiseBlocks   = 12        # noise acquisitions (~ nrPnts*dwellTime each)
+   noisePnts      = 65536     # complex points per noise block
+   noiseDwell_us  = 100.0     # 10 kHz bandwidth   -> ~6.6 s per block
+                              # UNVERIFIED(4,6): legal dwell/points combos
+   rxGainNoise_dB = 60.0      # UNVERIFIED(4): legal range and max stable
+   rxGainRef_dB   = 20.0      # reference-block gain
+   refPnts        = 16384
+   refDwell_us    = 100.0
+   refPulse_deg   = 5.0       # small-flip reference tip
+   ladderGains_dB = [0.0, 20.0, 40.0, 60.0]   # linearity ladder
+
+ # 6. session directory (one per run; the packer consumes it)
+   sessionBase    = "C:/SpinNoiseNetwork"   # UNVERIFIED(2): path convention
+
+# ---------------------------------------------------------------------
+# Derived values and session folder.
+# ---------------------------------------------------------------------
+
+   b1 = :getB1Freq()                        # MHz; UNVERIFIED(6) source
+   stamp = :timeStamp()                     # "YYYYMMDD_HHMMSS"
+   session = "$sessionBase$/spinnoise_$facilitySlug$_$stamp$"
+   mkdir(session)                           # UNVERIFIED(2): mkdir name/args
+
+# ---------------------------------------------------------------------
+# Confirm with the operator before acquiring. message() with two
+# buttons is UNVERIFIED(2) on SpinsolveExpert; on plain Prospa,
+# message(title, text, "warning") is the verified 3-argument form.
+# ---------------------------------------------------------------------
+
+   txt = "spin-noise network run $version$\r"
+   txt = txt + "facility: $facilitySlug$   sample: $sampleDesc$ (H2O $h2oFractionPct$%)\r"
+   txt = txt + "b1Freq: $b1$ MHz   noise blocks: $nNoiseBlocks$\r"
+   txt = txt + "session: $session$\r\r"
+   txt = txt + "Edit the constants block of this macro if anything is wrong.\r"
+   txt = txt + "Continue?"
+   r = query("spin-noise run", txt, "yesno")   # UNVERIFIED(2): dialog primitive
+   if(r == "no")
+      return(0)
+   endif
+
+# ---------------------------------------------------------------------
+# Bookkeeping for answers.json: block records are appended as the run
+# proceeds, then flushed at the end (and after every block, so a crash
+# still leaves a packable session). Uses simple parallel lists.
+# ---------------------------------------------------------------------
+
+   blkExpno  = null
+   blkRole   = null
+   blkGain   = null
+   blkStart  = null
+   blkEnd    = null
+
+# ---------------------------------------------------------------------
+# 1) rxGain ladder: four small-flip 1Ds at increasing gain (receiver
+#    linearity check, mirrors the Bruker RG ladder at expnos 10/14/15/16)
+# ---------------------------------------------------------------------
+
+   ladderExpnos = [10, 14, 15, 16]
+   for(k = 0 to 3)
+      g = ladderGains_dB[k]
+      e = ladderExpnos[k]
+      t0 = :wallClockMs()
+      :runBlock(session, e, "pulse", refPulse_deg, g, refPnts, refDwell_us)
+      t1 = :wallClockMs()
+      (blkExpno,blkRole,blkGain,blkStart,blkEnd) =
+         :recordBlock(blkExpno,blkRole,blkGain,blkStart,blkEnd,
+                      e,"rg_ladder",g,t0,t1)
+      :writeAnswers(session, version, facilitySlug, institution, city,
+                    country, contactEmail, contactConsent, sampleDesc,
+                    h2oFractionPct, d2oPct, additives, tubeOD_mm,
+                    sampleVol_ul, sampleTemp_K, lockState, b1,
+                    refPulse_deg, blkExpno, blkRole, blkGain,
+                    blkStart, blkEnd)
+   next(k)
+
+# ---------------------------------------------------------------------
+# 2) opening reference: small-flip pulsed 1D (line position/width anchor)
+# ---------------------------------------------------------------------
+
+   t0 = :wallClockMs()
+   :runBlock(session, 11, "pulse", refPulse_deg, rxGainRef_dB, refPnts, refDwell_us)
+   t1 = :wallClockMs()
+   (blkExpno,blkRole,blkGain,blkStart,blkEnd) =
+      :recordBlock(blkExpno,blkRole,blkGain,blkStart,blkEnd,
+                   11,"reference_open",rxGainRef_dB,t0,t1)
+
+# ---------------------------------------------------------------------
+# 3) noise blocks: N acquisitions with NO PULSE, max stable gain.
+#    THE POINT OF THE ENTIRE RUN. See :runBlock for the no-pulse note.
+# ---------------------------------------------------------------------
+
+   for(b = 0 to nNoiseBlocks-1)
+      e = 20 + b
+      t0 = :wallClockMs()
+      :runBlock(session, e, "nopulse", 0.0, rxGainNoise_dB, noisePnts, noiseDwell_us)
+      t1 = :wallClockMs()
+      (blkExpno,blkRole,blkGain,blkStart,blkEnd) =
+         :recordBlock(blkExpno,blkRole,blkGain,blkStart,blkEnd,
+                      e,"noise",rxGainNoise_dB,t0,t1)
+      :writeAnswers(session, version, facilitySlug, institution, city,
+                    country, contactEmail, contactConsent, sampleDesc,
+                    h2oFractionPct, d2oPct, additives, tubeOD_mm,
+                    sampleVol_ul, sampleTemp_K, lockState, b1,
+                    refPulse_deg, blkExpno, blkRole, blkGain,
+                    blkStart, blkEnd)
+   next(b)
+
+# ---------------------------------------------------------------------
+# 4) closing reference (drift check against the opening one)
+# ---------------------------------------------------------------------
+
+   t0 = :wallClockMs()
+   :runBlock(session, 13, "pulse", refPulse_deg, rxGainRef_dB, refPnts, refDwell_us)
+   t1 = :wallClockMs()
+   (blkExpno,blkRole,blkGain,blkStart,blkEnd) =
+      :recordBlock(blkExpno,blkRole,blkGain,blkStart,blkEnd,
+                   13,"reference_close",rxGainRef_dB,t0,t1)
+
+   :writeAnswers(session, version, facilitySlug, institution, city,
+                 country, contactEmail, contactConsent, sampleDesc,
+                 h2oFractionPct, d2oPct, additives, tubeOD_mm,
+                 sampleVol_ul, sampleTemp_K, lockState, b1,
+                 refPulse_deg, blkExpno, blkRole, blkGain,
+                 blkStart, blkEnd)
+
+   message("spin-noise run",
+           "Done. Pack and upload from any Python 3 machine:\rpython3 vendors/magritek/magritek_reader.py pack $session$",
+           "info")
+
+endproc()
+
+
+########################################################################
+# runBlock(session, expno, mode, tip_deg, gain_dB, pnts, dwell_us)
+#
+# Acquire one block into <session>/<expno>/ (acqu.par + data.1d).
+#
+# *** UNVERIFIED(3): THE WHOLE BODY. *** SpinsolveExpert's programmatic
+# experiment execution is not publicly documented. Two candidate
+# implementations, in preference order -- the bench session picks one:
+#
+#   (a) custom pulse program: define a sequence whose event list contains
+#       ONLY an acquisition (no pulse event) for mode "nopulse", and a
+#       single small-flip pulse + acquire for mode "pulse". On Kea-style
+#       Prospa this is initpp()/acquire()/endpp() territory
+#       (UNVERIFIED(3): names) compiled once and run per block.
+#   (b) fallback: run the standard 1Pulse experiment with the pulse
+#       amplitude at its minimum legal setting for "nopulse". Only
+#       acceptable if (3) verifies the residual tip is negligible AND
+#       the residual pulse is logged in answers.json as a built-in
+#       micro-reference (the 2022 attenuator lesson).
+#
+# Parameter vocabulary (VERIFIED names from the Prospa ecosystem):
+#   rxGain (dB), nrPnts, dwellTime (us), nrScans, b1Freq (MHz), rxPhase.
+# Data landing as <expno>/acqu.par + <expno>/data.1d is VERIFIED as the
+# Spinsolve on-disk convention (nmrglue reads exactly that).
+########################################################################
+procedure(runBlock, session, expno, mode, tip_deg, gain_dB, pnts, dwell_us)
+
+   dest = "$session$/$expno$"
+   mkdir(dest)                              # UNVERIFIED(2)
+
+ # ---- UNVERIFIED(3) pseudo-implementation, path (a) ----
+ # par = ["rxGain = $gain_dB$",
+ #        "nrPnts = $pnts$",
+ #        "dwellTime = $dwell_us$",
+ #        "nrScans = 1"]
+ # if(mode == "nopulse")
+ #    seq = "spin_noise_nopulse"    # pulse program with acquire only
+ # else
+ #    seq = "spin_noise_smallflip"  # one pulse (tip_deg) + acquire
+ # endif
+ # expert:runExperiment(seq, par, dest)     # UNVERIFIED(3): entry point
+ # -------------------------------------------------------
+
+   message("runBlock DRAFT",
+           "UNVERIFIED(3): implement experiment execution here (expno $expno$, mode $mode$).",
+           "warning")
+
+endproc()
+
+
+########################################################################
+# recordBlock -- append one block record to the parallel lists.
+# List append syntax UNVERIFIED(2) (Prospa matrix/list concatenation).
+########################################################################
+procedure(recordBlock, ex, ro, ga, st, en, expno, role, gain, t0, t1)
+
+   ex = [ex, expno]     # UNVERIFIED(2): list append
+   ro = [ro, role]
+   ga = [ga, gain]
+   st = [st, t0]
+   en = [en, t1]
+
+endproc(ex, ro, ga, st, en)
+
+
+########################################################################
+# writeAnswers -- write/overwrite <session>/answers.json for the packer.
+#
+# JSON is emitted by string concatenation (no JSON library assumed in
+# Prospa). fopen/fprintf/fclose are UNVERIFIED(2) as Prospa file I/O;
+# if absent, Prospa's save/export text commands replace them.
+# The packer treats EVERYTHING here as operator-entered data.
+########################################################################
+procedure(writeAnswers, session, version, slug, inst, city, country,
+          email, consent, sampleDesc, h2o, d2o, additives, tube, vol,
+          temp, lock, b1, refTip, ex, ro, ga, st, en)
+
+   f = fopen("$session$/answers.json", "w")      # UNVERIFIED(2)
+
+   fprintf(f, "{\n")                             # UNVERIFIED(2)
+   fprintf(f, "  \"writer\": \"spin_noise_run_spinsolve.mac $version$\",\n")
+   fprintf(f, "  \"facility_slug\": \"$slug$\",\n")
+   fprintf(f, "  \"institution\": \"$inst$\",\n")
+   fprintf(f, "  \"city\": \"$city$\",\n")
+   fprintf(f, "  \"country\": \"$country$\",\n")
+   fprintf(f, "  \"contact_email\": \"$email$\",\n")
+   fprintf(f, "  \"contact_consent\": \"$consent$\",\n")
+   fprintf(f, "  \"sample_description\": \"$sampleDesc$\",\n")
+   fprintf(f, "  \"h2o_fraction_pct\": $h2o$,\n")
+   fprintf(f, "  \"d2o_pct\": $d2o$,\n")
+   fprintf(f, "  \"additives\": \"$additives$\",\n")
+   fprintf(f, "  \"tube_od_mm\": $tube$,\n")
+   fprintf(f, "  \"sample_volume_ul\": $vol$,\n")
+   fprintf(f, "  \"vt_setpoint_k\": $temp$,\n")
+   fprintf(f, "  \"lock_state\": \"$lock$\",\n")
+   fprintf(f, "  \"b1_freq_mhz\": $b1$,\n")
+   fprintf(f, "  \"ref_tip_deg\": $refTip$,\n")
+   fprintf(f, "  \"spinsolve_software_version\": \"UNVERIFIED-enter-at-bench\",\n")
+   fprintf(f, "  \"blocks\": [\n")
+   n = size(ex)                                  # UNVERIFIED(2): size() on lists
+   for(i = 0 to n-1)
+      sep = ","
+      if(i == n-1)
+         sep = ""
+      endif
+      fprintf(f, "    {\"expno\": $ex[i]$, \"role\": \"$ro[i]$\", \"rx_gain_db\": $ga[i]$, \"wall_start_ms\": $st[i]$, \"wall_end_ms\": $en[i]$}$sep$\n")
+   next(i)
+   fprintf(f, "  ]\n")
+   fprintf(f, "}\n")
+   fclose(f)                                     # UNVERIFIED(2)
+
+endproc()
+
+
+########################################################################
+# Small helpers -- all UNVERIFIED(2,6,8): exact Prospa function names.
+########################################################################
+procedure(getB1Freq)
+ # UNVERIFIED(6): read the instrument's 1H frequency (MHz). Candidates:
+ # a system parameter, or acqu.par b1Freq of any prior experiment.
+   b1 = 60.0    # placeholder; MUST be replaced at the bench session
+endproc(b1)
+
+procedure(timeStamp)
+ # UNVERIFIED(8): timestring formatting; Prospa has time/date functions.
+   s = "19700101_000000"   # placeholder
+endproc(s)
+
+procedure(wallClockMs)
+ # UNVERIFIED(8): milliseconds since epoch for the clock audit.
+   t = 0                   # placeholder
+endproc(t)

@@ -15,9 +15,14 @@ Python 3, and is checked, in order:
      compile(), so a pass means "valid Python apart from py2 prints" --
      the closest available proxy for Jython syntax without a Jython.
   2. VERSION SYNC: SCRIPT_VERSION in the script equals the repository
-     VERSION file, UPLOADER_VERSION in uploader/upload_bundle.py equals
-     the VERSION file, and SCHEMA_VERSION equals the const in
-     schema/meta.schema.json.
+     VERSION file, UPLOADER_VERSION in uploader/upload_bundle.py and
+     PACKER_VERSION in packer/pack_bundle.py equal the VERSION file.
+     SCHEMA SYNC: the shipped schema const is the current schema (2.0,
+     vendor-neutral, written by the packer); the TopSpin orchestrator
+     still writes 1.2 (the last Bruker-only schema), so its
+     SCHEMA_VERSION must be a member of the uploader's
+     SUPPORTED_SCHEMA_VERSIONS, and the packer's SCHEMA_VERSION must
+     equal the schema const.
   3. HARDWARE GUARDING: every spectrometer-hardware command goes through
      the guarded wrapper (safe_hw_cmd / the hw_skip()-guarded ZG() in
      run_zg_and_wait), so SIMULATE and DESKTEST can never touch hardware:
@@ -46,6 +51,7 @@ SCRIPT_PATH = os.path.join(REPO, "topspin", "spin_noise_run.py")
 VERSION_PATH = os.path.join(REPO, "VERSION")
 SCHEMA_PATH = os.path.join(REPO, "schema", "meta.schema.json")
 UPLOADER_PATH = os.path.join(REPO, "uploader", "upload_bundle.py")
+PACKER_PATH = os.path.join(REPO, "packer", "pack_bundle.py")
 
 FAILURES = []
 
@@ -135,14 +141,45 @@ check("version: uploader UPLOADER_VERSION (%r) == VERSION file (%r)"
       % (uploader_version, version_file),
       uploader_version == version_file and uploader_version is not None)
 
-m = re.search(r'^SCHEMA_VERSION\s*=\s*"([^"]+)"', SRC, re.M)
-script_schema = m.group(1) if m else None
+with open(PACKER_PATH, "r", encoding="utf-8") as fh:
+    PACKER_SRC = fh.read()
+m = re.search(r'^PACKER_VERSION\s*=\s*"([^"]+)"', PACKER_SRC, re.M)
+packer_version = m.group(1) if m else None
+check("version: packer PACKER_VERSION (%r) == VERSION file (%r)"
+      % (packer_version, version_file),
+      packer_version == version_file and packer_version is not None)
+
 with open(SCHEMA_PATH, "r", encoding="utf-8") as fh:
     schema = json.load(fh)
 schema_const = schema.get("properties", {}).get("schema_version", {}).get("const")
-check("version: SCHEMA_VERSION (%r) == schema const (%r)"
-      % (script_schema, schema_const),
-      script_schema == schema_const and script_schema is not None)
+check("schema: shipped schema const is the current schema ('2.0', got %r)"
+      % schema_const, schema_const == "2.0")
+
+m = re.search(r'^SCHEMA_VERSION\s*=\s*"([^"]+)"', PACKER_SRC, re.M)
+packer_schema = m.group(1) if m else None
+check("schema: packer SCHEMA_VERSION (%r) == schema const (%r)"
+      % (packer_schema, schema_const),
+      packer_schema == schema_const and packer_schema is not None)
+
+# The TopSpin orchestrator deliberately still writes 1.2 (the last
+# Bruker-only schema; a vendor-less bundle IS a Bruker bundle) -- it must
+# stay within the uploader's supported set so its bundles keep validating.
+m = re.search(r'^SUPPORTED_SCHEMA_VERSIONS\s*=\s*\(([^)]*)\)', UPLOADER_SRC, re.M)
+supported = re.findall(r'"([^"]+)"', m.group(1)) if m else []
+check("schema: uploader supports the current schema (%r in %r)"
+      % (schema_const, supported), schema_const in supported)
+
+m = re.search(r'^SCHEMA_VERSION\s*=\s*"([^"]+)"', SRC, re.M)
+script_schema = m.group(1) if m else None
+check("schema: orchestrator SCHEMA_VERSION (%r) is uploader-supported (%r)"
+      % (script_schema, supported),
+      script_schema in supported and script_schema is not None)
+
+check("schema: vendor enum required with bruker/jeol/magritek (v2.0)",
+      "vendor" in schema.get("required", [])
+      and schema.get("properties", {}).get("vendor", {}).get("enum")
+      == ["bruker", "jeol", "magritek"]
+      and "instrument" in schema.get("required", []))
 
 
 # --------------------------------------------------------------------------

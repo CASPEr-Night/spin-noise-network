@@ -169,8 +169,10 @@ java-zip bundling — and mocks **only** the hardware commands, inside
 2. **meta.json written twice**: once in the `SPINNOISE_<date>` dataset
    directory, once inside the bundle staging dir — and it contains a
    `software` object with `"script_version"` equal to the repository
-   `VERSION` file (currently `"0.2.0"`), `"schema_version"` equal to
-   the current schema (currently `"1.2"`), `"script_sha256"` equal to
+   `VERSION` file (currently `"0.3.0-dev"`), `"schema_version"` equal
+   to the schema the orchestrator writes (`"1.2"`, the last Bruker-only
+   vintage — still accepted under the current v2.0 vendor-neutral
+   schema), `"script_sha256"` equal to
    either `sha256:<64 hex>` or `"unavailable"`, and
    `"run_mode": "desktest"`.
 3. **Clock audit recorded** (schema 1.2): `meta.json` contains a
@@ -192,7 +194,8 @@ java-zip bundling — and mocks **only** the hardware commands, inside
    ```
 
    Required output: `OK   : meta.json (schema_version 1.2) validates
-   against meta.schema.json` (the current schema version), `OK   :
+   against meta.schema.json` (the orchestrator's schema vintage,
+   accepted under the current v2.0 contract), `OK   :
    verified sha256 of N data file(s).` and `RESULT: PASS`.
 6. **Static checks green** (no TopSpin needed):
 

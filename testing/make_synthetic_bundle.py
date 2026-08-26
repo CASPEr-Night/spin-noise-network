@@ -4,7 +4,8 @@
 make_synthetic_bundle.py -- construct a synthetic spin-noise bundle zip for
 testing uploader/upload_bundle.py --selftest without a spectrometer.
 
-    python3 testing/make_synthetic_bundle.py                     # v1.2 bundle
+    python3 testing/make_synthetic_bundle.py                     # v2.0 bundle
+    python3 testing/make_synthetic_bundle.py --schema-version 1.2
     python3 testing/make_synthetic_bundle.py --schema-version 1.1
     python3 testing/make_synthetic_bundle.py --schema-version 1.0
     python3 testing/make_synthetic_bundle.py --out-dir /tmp
@@ -135,14 +136,27 @@ def build_meta(schema_version, version):
         ],
         "checksums": {},  # filled in below
     }
-    if schema_version in ("1.1", "1.2"):
+    if schema_version in ("1.1", "1.2", "2.0"):
         meta["software"] = {
             "script_version": version,
             "schema_version": schema_version,
             "script_sha256": "unavailable",
             "run_mode": "desktest",
         }
-    if schema_version == "1.2":
+    if schema_version == "2.0":
+        # The vendor-neutral schema: required vendor enum + instrument
+        # block (the Bruker fields moved out of the 1.x common core; the
+        # deprecated aliases above are left in place on purpose -- the
+        # schema keeps them optional and old tooling reads them).
+        meta["vendor"] = "bruker"
+        meta["instrument"] = {
+            "bruker": {
+                "topspin_version": meta["spectrometer"]["topspin_version"],
+                "bsms_field_sweep_confirmed_off":
+                    meta["environment"]["lock_sweep_confirmed_off"],
+            }
+        }
+    if schema_version in ("1.2", "2.0"):
         # Minimal clock_audit (the 1.2 addition): two blocks bracketing
         # the two experiments above, wall == OCXO (zero offset), plus the
         # NTP-status fields. Exercises the uploader's 1.2 validation path.
@@ -193,12 +207,17 @@ def fake_data_files(ser_mib=None):
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Build a synthetic spin-noise bundle zip for selftest.")
-    parser.add_argument("--schema-version", choices=("1.0", "1.1", "1.2"),
-                        default="1.2",
-                        help="schema_version the bundle declares (default 1.2; "
-                             "1.1 omits the 'clock_audit' object and 1.0 "
-                             "additionally omits 'software', as real bundles "
-                             "of those vintages did)")
+    parser.add_argument("--schema-version",
+                        choices=("1.0", "1.1", "1.2", "2.0"),
+                        default="2.0",
+                        help="schema_version the bundle declares (default "
+                             "2.0, the current vendor-neutral contract with "
+                             "vendor + instrument blocks; 1.2 is the last "
+                             "Bruker-only vintage that the TopSpin "
+                             "orchestrator still writes; 1.1 omits the "
+                             "'clock_audit' object and 1.0 additionally "
+                             "omits 'software', as real bundles of those "
+                             "vintages did)")
     parser.add_argument("--out-dir", default=None,
                         help="directory for the zip (default: a fresh "
                              "'synthetic_bundles' dir under testing/)")

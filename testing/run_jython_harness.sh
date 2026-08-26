@@ -72,6 +72,16 @@ for MODE in simulate desktest; do
         --out "$WORK/report"
     python3 "$TESTING/check_clock_recovery.py" "$WORK/report/report.json" \
         --injected "$INJECTED" --within-nsigma 1 --require-conclusive
+
+    # Packer round-trip on the desktest bundle (the real-Jython product):
+    # unpack its expno tree, re-pack with packer/pack_bundle.py's Bruker
+    # reader, require bit-identical data payload + a valid schema-2.0
+    # meta.json.  See testing/test_pack_roundtrip.py.
+    if [ "$MODE" = "desktest" ]; then
+        echo ""
+        echo "--- packer round-trip (desktest bundle) ---"
+        python3 "$TESTING/test_pack_roundtrip.py" "$BUNDLE"
+    fi
 done
 
 # Powered clock-recovery matrix: synthetic physics bundles with (a) an
@@ -101,5 +111,6 @@ python3 "$TESTING/static_check.py"
 
 echo ""
 echo "JYTHON HARNESS: ALL PASS (simulate + desktest + selftest"
+echo "                + packer round-trip"
 echo "                + clock-offset recovery: realism, powered, null"
 echo "                + static)"
