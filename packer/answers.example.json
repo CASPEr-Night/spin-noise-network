@@ -1,0 +1,67 @@
+{
+  "_comment": "Operator questionnaire for packer/pack_bundle.py -- the same information the TopSpin dialogs collect, as one JSON file. Copy to answers.json, edit, then run: python3 packer/pack_bundle.py <data_dir> --answers answers.json. Keys starting with _ are ignored.",
+
+  "vendor": "bruker",
+
+  "run_mode": "external-acquisition",
+  "_run_mode_choices": "external-acquisition (real data acquired with the vendor's own software) | archival-repackage (historical data) | desktest / simulate (plumbing tests, never science data)",
+
+  "facility": {
+    "institution": "Example Institution NMR Facility",
+    "city": "Example City",
+    "country": "Exampleland",
+    "facility_slug": "example-institution",
+    "contact_email": "nmr@example.edu",
+    "contact_consent": true
+  },
+
+  "sample": {
+    "description": "distilled water",
+    "h2o_fraction_pct": 100,
+    "d2o_pct": 0,
+    "additives": "none",
+    "tube_od_mm": 5,
+    "sample_volume_ul": 550,
+    "vt_setpoint_k": 298
+  },
+
+  "environment": {
+    "locked": false,
+    "field_sweep_confirmed_off": true,
+    "_field_sweep_note": "Bruker: did you verify on the BSMS display that the FIELD SWEEP was OFF during the noise block? A running sweep smears the noise feature by kHz and ruins the record.",
+    "operator_notes": ""
+  },
+
+  "spectrometer": {
+    "probe_type": "RT",
+    "_probe_type_choices": "RT | N2-cryo | He-cryo | permanent-magnet-benchtop | unknown",
+    "console": "Avance III HD",
+    "probe_string": "5 mm BBO",
+    "coil_temp_k": null,
+    "preamp_temp_k": null,
+    "_h1_freq_mhz": "usually read from the vendor files (Bruker acqus BF1); uncomment to override",
+    "_field_tesla": "computed from h1_freq_mhz if omitted"
+  },
+
+  "instrument": {
+    "topspin_version": "4.1.4",
+    "_note": "vendor-specific answers; for vendor=jeol supply delta_version, for vendor=magritek supply spinsolve_software_version (those readers are drafts pending partner/bench validation)"
+  },
+
+  "calibration": {
+    "p90_us": 10.0,
+    "p90_power_db_or_w": "unknown",
+    "topshim_ok": false,
+    "rg_ladder": [
+      { "expno": 10, "rg": 1.0, "tip_deg": 1.0 }
+    ],
+    "_rg_ladder_note": "omit rg_ladder entirely if you acquired none; the packer records a single-entry ladder from a reference experiment and flags the limitation"
+  },
+
+  "experiments": [
+    { "expno": 11, "role": "reference_open" },
+    { "expno": 12, "role": "noise" },
+    { "expno": 13, "role": "reference_close" }
+  ],
+  "_experiments_note": "one entry per expno: 'role' is required (setup | rg_ladder | reference_open | noise | reference_close). Acquisition parameters (td, td1_rows, sw_hz, o1_hz, rg, ns, started_local, finished_local) are read from the vendor files where possible; anything the files lack must be added here."
+}

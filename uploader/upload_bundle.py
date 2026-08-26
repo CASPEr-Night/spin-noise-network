@@ -63,14 +63,17 @@ except ImportError:  # pragma: no cover - cannot happen on py3, but stay polite
 # Kept in sync with the repository VERSION file (a literal, not a file
 # read, because this script is copied standalone to facility machines);
 # testing/static_check.py enforces the sync.
-UPLOADER_VERSION = "0.2.0"
+UPLOADER_VERSION = "0.3.0-dev"
 
 # Metadata schema versions this uploader understands.  The shipped
-# schema/meta.schema.json describes the CURRENT version (1.2, which added
-# the optional 'clock_audit' object; 1.1 added the required 'software'
-# provenance object); bundles declaring 1.1 or 1.0 are still accepted --
-# see adapt_schema_for_version().
-SUPPORTED_SCHEMA_VERSIONS = ("1.0", "1.1", "1.2")
+# schema/meta.schema.json describes the CURRENT version (2.0, which made
+# the contract vendor-neutral: required 'vendor' enum + vendor-namespaced
+# 'instrument' blocks; 1.2 added the optional 'clock_audit' object; 1.1
+# added the required 'software' provenance object); bundles declaring
+# 1.2, 1.1 or 1.0 are still accepted -- see adapt_schema_for_version().
+# A 1.x bundle carries no 'vendor' field: it is treated as 'bruker'
+# (every 1.x writer was the TopSpin orchestrator).
+SUPPORTED_SCHEMA_VERSIONS = ("1.0", "1.1", "1.2", "2.0")
 
 # Bundle filename convention (see project spec):
 #   spinnoise_<facility_slug>_<YYYYMMDD_HHMMSSZ>_<4hex>.zip
@@ -271,25 +274,41 @@ def validate_against_schema(instance, schema, path="$"):
 
 
 def adapt_schema_for_version(schema, declared_version):
-    """Return a copy of the shipped (current, 1.2) schema adjusted to the
+    """Return a copy of the shipped (current, 2.0) schema adjusted to the
     schema_version a bundle declares.
 
-    v1.2 bundles: schema used as-is ('software' required; 'clock_audit'
-    optional -- it was never required in any version).
-    v1.1 bundles: written before 'clock_audit' existed -- relax exactly one
-    point: the schema_version const becomes '1.1' (if an old bundle somehow
-    carries a clock_audit anyway, it is still validated against the 1.2
-    shape).
-    v1.0 bundles: written before the 'software' object existed --
-    additionally drop 'software' from the required list.
-    Anything else is unchanged, so old bundles keep full validation.
+    v2.0 bundles: schema used as-is ('vendor' + 'instrument' required;
+    'clock_audit' optional -- it was never required in any version).
+    v1.x bundles: written before the vendor split -- the schema_version
+    const becomes the declared version, 'vendor' and 'instrument' drop out
+    of the required list (absent vendor = 'bruker'), and the two fields
+    that MOVED into instrument.bruker in 2.0 are re-tightened back to
+    their 1.x homes: 'topspin_version' required in spectrometer,
+    'lock_sweep_confirmed_off' required in environment.  So old bundles
+    keep exactly their original validation.
+    v1.0 bundles: additionally drop 'software' from the required list
+    (it arrived in 1.1).
     """
-    if declared_version == "1.2":
+    if declared_version == "2.0":
         return schema
     adapted = copy.deepcopy(schema)
     props = adapted.get("properties", {})
     if isinstance(props.get("schema_version"), dict):
         props["schema_version"]["const"] = declared_version
+    adapted["required"] = [k for k in adapted.get("required", [])
+                           if k not in ("vendor", "instrument")]
+    spec = props.get("spectrometer", {})
+    if isinstance(spec, dict):
+        req = list(spec.get("required", []))
+        if "topspin_version" not in req:
+            req.insert(0, "topspin_version")
+        spec["required"] = req
+    env = props.get("environment", {})
+    if isinstance(env, dict):
+        req = list(env.get("required", []))
+        if "lock_sweep_confirmed_off" not in req:
+            req.insert(1, "lock_sweep_confirmed_off")
+        env["required"] = req
     if declared_version == "1.0":
         adapted["required"] = [k for k in adapted.get("required", [])
                                if k != "software"]
@@ -386,6 +405,31 @@ def verify_bundle(bundle_path, schema_path, check_data_hashes=True):
         else:
             msgs.append("WARN : schema file not found at %s; skipping schema "
                         "validation (structure checks still ran)." % schema_path)
+
+        # Vendor / instrument consistency (schema 2.0).  The minimal
+        # validator subset cannot express "instrument must contain the
+        # block named by vendor", so that rule lives here in code.  1.x
+        # bundles carry no vendor field and are 'bruker' by construction
+        # (every 1.x writer was the TopSpin orchestrator).
+        if isinstance(meta, dict):
+            vendor = meta.get("vendor")
+            if meta.get("schema_version") == "2.0" and isinstance(vendor, str):
+                inst = meta.get("instrument")
+                if not (isinstance(inst, dict)
+                        and isinstance(inst.get(vendor), dict)):
+                    msgs.append("ERROR: meta.json declares vendor '%s' but "
+                                "instrument carries no '%s' block -- the "
+                                "vendor-specific fields are missing." %
+                                (vendor, vendor))
+                    fatal = True
+                else:
+                    msgs.append("OK   : vendor '%s' with a matching "
+                                "instrument.%s block." % (vendor, vendor))
+            elif vendor is None and isinstance(
+                    meta.get("schema_version"), str) \
+                    and meta.get("schema_version").startswith("1."):
+                msgs.append("OK   : pre-2.0 bundle without a vendor field -- "
+                            "treated as vendor 'bruker'.")
 
         # There must be at least one data/<expno>/ entry.
         data_files = [n for n in names if n.startswith("data/") and not n.endswith("/")]

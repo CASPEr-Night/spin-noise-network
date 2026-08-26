@@ -115,11 +115,18 @@ At the end, the script zips the complete Bruker experiment directories
 `meta.json` describing the instrument (TopSpin version, field, console,
 probe string and type, coil/preamp temperatures if reported), the sample,
 your dialog answers, and SHA-256 checksums of every data file. The
-`meta.json` follows schema version 1.2, which also records a `software`
-block — script version and a runtime SHA-256 of the script file itself —
-and the clock-audit timestamps described below, so every bundle is
-traceable to the exact code that produced it. Then
+`meta.json` follows schema version 1.2 (the last Bruker-only vintage —
+still fully valid under the repository's current vendor-neutral schema
+v2.0, where an absent vendor field means Bruker), which also records a
+`software` block — script version and a runtime SHA-256 of the script
+file itself — and the clock-audit timestamps described below, so every
+bundle is traceable to the exact code that produced it. Then
 `uploader/upload_bundle.py` sends the zip to the network's repository.
+Data acquired with the vendor's own tooling (or on non-Bruker
+instruments, as those reader paths mature) can instead be packed with
+the standalone `packer/pack_bundle.py`, which writes schema-2.0 bundles
+from a data directory plus an `answers.json` questionnaire carrying the
+same answers as the dialogs.
 
 **Privacy:** the bundle contains instrument and sample metadata only. The
 sole item of personal information is the optional contact email, stored only

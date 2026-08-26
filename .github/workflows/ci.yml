@@ -32,9 +32,17 @@ jobs:
       - name: Static checks (syntax, version sync, hardware guards)
         run: python3 testing/static_check.py
 
-      - name: Construct and validate a synthetic v1.2 bundle (current schema, incl. clock_audit)
+      - name: Construct and validate a synthetic v2.0 bundle (current schema, vendor + instrument blocks)
         run: |
           BUNDLE=$(python3 testing/make_synthetic_bundle.py --out-dir "${{ runner.temp }}")
+          python3 uploader/upload_bundle.py "$BUNDLE" --selftest
+
+      - name: Packer round-trip (unpack a desktest bundle's expno tree, re-pack, require bit-identical data + valid v2.0 meta)
+        run: python3 testing/test_pack_roundtrip.py
+
+      - name: Construct and validate a synthetic v1.2 bundle (back-compat; what the TopSpin orchestrator writes)
+        run: |
+          BUNDLE=$(python3 testing/make_synthetic_bundle.py --schema-version 1.2 --out-dir "${{ runner.temp }}")
           python3 uploader/upload_bundle.py "$BUNDLE" --selftest
 
       - name: Construct and validate a synthetic v1.1 bundle (back-compat)
