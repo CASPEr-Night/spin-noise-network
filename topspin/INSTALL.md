@@ -21,6 +21,8 @@ embedded Jython interpreter and avoids anything version-specific; every
 optional command — `atma`, `topshim`, `pulsecal`, `rga` — degrades to an
 operator dialog when missing).
 
+**A note on TopSpin 5.0** (released 2026): TopSpin 5.0 (released 2026, Avance Neo / Fourier 80) has not yet been tested: Bruker documents the Jython layer our script runs in as a standard component alongside the newer CPython interface, so it is expected to work, but we have not verified it — if your console runs TopSpin 5, please tell us what happens (you would be our first).
+
 ## Install
 
 1. Copy `spin_noise_run.py` to `<TSHOME>/exp/stan/nmr/py/user/`.

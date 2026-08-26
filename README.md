@@ -49,7 +49,7 @@ commands mocked — runnable on a free processing-only TopSpin install
 
 | Path | What it is |
 |---|---|
-| `topspin/spin_noise_run.py` | Jython orchestrator, runs inside TopSpin 2.x–4.x |
+| `topspin/spin_noise_run.py` | Jython orchestrator, runs inside TopSpin 2.x–4.x (5.0 untested — reports welcome) |
 | `topspin/pp/zgnoise2d` | no-pulse pseudo-2D pulse program for the noise blocks |
 | `topspin/INSTALL.md` | install paths, expno map, troubleshooting |
 | `packer/pack_bundle.py` | Python 3 stdlib-only standalone packer: a directory of vendor data files + `answers.json` (the operator questionnaire) → a validated bundle zip, identical in layout to the orchestrator's. Pluggable vendor readers: Bruker implemented (round-trip tested); JEOL/Magritek adapter interface defined |
@@ -66,7 +66,7 @@ commands mocked — runnable on a free processing-only TopSpin install
 
 | Vendor | Path | Status |
 |---|---|---|
-| **Bruker** (TopSpin 2.x–4.x) | full/automatic: the `topspin/spin_noise_run.py` orchestrator acquires, tags, and bundles everything itself; `packer/pack_bundle.py --vendor bruker` additionally repacks any existing TopSpin expno tree | Desk-tested end to end (real-Jython harness + packer round-trip); first supervised pilot pending |
+| **Bruker** (TopSpin 2.x–4.x; 5.0 untested — reports welcome) | full/automatic: the `topspin/spin_noise_run.py` orchestrator acquires, tags, and bundles everything itself; `packer/pack_bundle.py --vendor bruker` additionally repacks any existing TopSpin expno tree | Desk-tested end to end (real-Jython harness + packer round-trip); first supervised pilot pending |
 | **JEOL** (Delta) | converter path: acquire with Delta, then pack the exported data with `packer/pack_bundle.py --vendor jeol`; acquisition automation to be developed with a partner facility | Adapter interface + schema block defined; reader **draft pending partner-facility validation** (.jdf parsing to follow the MIT-licensed [jeolconverter v1.0.1](https://www.npmjs.com/package/jeolconverter) (cheminfo, npm), with attribution) |
 | **Magritek** (Spinsolve/SpinsolveExpert) | scripted path: a Prospa-driven acquisition plus `packer/pack_bundle.py --vendor magritek` | Adapter interface + schema block defined; reader **pending bench validation** (file conventions per [nmrglue's spinsolve reader](https://nmrglue.readthedocs.io/en/latest/reference/spinsolve.html)) |
 

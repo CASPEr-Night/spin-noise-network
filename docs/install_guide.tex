@@ -110,7 +110,7 @@ co-authors on any network publication their data enter.
 \section{Requirements}
 
 \begin{itemize}
-\item \textbf{A Bruker spectrometer running \ts{} 2.x, 3.x, or 4.x.} The
+\item \textbf{A Bruker spectrometer running \ts{} 2.x, 3.x, or 4.x.} (\ts{} 5.0, released 2026, is untested: Bruker documents the Jython layer this software runs in as a standard component alongside the newer CPython interface, so it is expected to work --- but we have not verified it. If your console runs \ts{} 5, please tell us what happens: you would be our first.) The
       script is written for \ts's embedded Jython interpreter and avoids
       anything version-specific --- every optional command (\texttt{atma},
       \texttt{topshim}, \texttt{pulsecal}, \texttt{rga}) degrades to an
