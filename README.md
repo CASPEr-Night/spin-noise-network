@@ -49,8 +49,8 @@ commands mocked — runnable on a free processing-only TopSpin install
 | `topspin/spin_noise_run.py` | Jython orchestrator, runs inside TopSpin 2.x–4.x |
 | `topspin/pp/zgnoise2d` | no-pulse pseudo-2D pulse program for the noise blocks |
 | `topspin/INSTALL.md` | install paths, expno map, troubleshooting |
-| `uploader/upload_bundle.py` | Python 3 stdlib-only uploader — auto-selects single-shot vs. chunked-resumable upload by size (+ `--selftest` bundle validator; accepts schema v1.0 and v1.1 bundles) |
-| `schema/meta.schema.json` | the metadata contract (JSON Schema, v1.1 — adds the `software` provenance object; v1.0 bundles remain valid) |
+| `uploader/upload_bundle.py` | Python 3 stdlib-only uploader — auto-selects single-shot vs. chunked-resumable upload by size (+ `--selftest` bundle validator; accepts schema v1.0–v1.2 bundles) |
+| `schema/meta.schema.json` | the metadata contract (JSON Schema, v1.2 — adds the optional `clock_audit` object; v1.1/v1.0 bundles remain valid) |
 | `server/` | Cloudflare Worker + R2 ingest endpoint, single-shot + chunked/resumable (maintainer deploys once — `server/DEPLOY.md`) |
 | `testing/` | real-Jython harness (`run_jython_harness.sh`), Tier-0 desk-test checklist (`tier0_desktest.md`), `static_check.py`, end-to-end upload test against a local Worker (`test_upload_integration.sh`) |
 | `VERSION` | repository release version (mirrored by `SCRIPT_VERSION` in the run script) |

@@ -32,7 +32,12 @@ jobs:
       - name: Static checks (syntax, version sync, hardware guards)
         run: python3 testing/static_check.py
 
-      - name: Construct and validate a synthetic v1.1 bundle
+      - name: Construct and validate a synthetic v1.2 bundle (current schema, incl. clock_audit)
+        run: |
+          BUNDLE=$(python3 testing/make_synthetic_bundle.py --out-dir "${{ runner.temp }}")
+          python3 uploader/upload_bundle.py "$BUNDLE" --selftest
+
+      - name: Construct and validate a synthetic v1.1 bundle (back-compat)
         run: |
           BUNDLE=$(python3 testing/make_synthetic_bundle.py --schema-version 1.1 --out-dir "${{ runner.temp }}")
           python3 uploader/upload_bundle.py "$BUNDLE" --selftest

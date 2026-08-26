@@ -40,11 +40,16 @@ import os
 
 # Names exported to the script via `from TopCmds import *` (and injected
 # into __builtin__ by jython_entry.py).  Exactly the documented TopSpin
-# API surface spin_noise_run.py touches, plus close neighbours it names.
+# API surface spin_noise_run.py touches, plus close neighbours it names --
+# plus the two HARNESS_* clock hooks, which are NOT TopSpin API: they are
+# the harness's virtual wall clock (see the clock-audit section below).
+# In production TopSpin they do not exist and the script's NameError
+# guards skip them.
 __all__ = [
     "MSG", "ERRMSG", "CONFIRM", "SELECT", "INPUT_DIALOG", "VIEWTEXT",
     "SHOW_STATUS", "XCMD", "WAIT_TILL_DONE", "GETPAR", "GETPARSTAT",
     "PUTPAR", "CURDATA", "RE", "WR", "RE_PATH", "EXIT", "SLEEP", "ZG",
+    "HARNESS_WALL_MS", "HARNESS_ADVANCE_S",
 ]
 
 WAIT_TILL_DONE = 0            # sentinel; value irrelevant, only the name
@@ -287,6 +292,50 @@ def RE_PATH(path):
 # ---------------------------------------------------------------------------
 # Commands / control flow
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Virtual wall clock (clock-audit test fixture)
+# ---------------------------------------------------------------------------
+# The script's clock audit compares OCXO-implied acquisition durations
+# against workstation wall-clock timestamps.  Under the harness no real
+# time passes (acquisitions are mocked), so the stub provides a virtual
+# clock with a DELIBERATE injected fractional offset:
+#   * HARNESS_WALL_MS()      -> current virtual time in ms; each read also
+#     advances the clock a few ms (code between timestamps takes time);
+#   * HARNESS_ADVANCE_S(s)   -> a mocked acquisition of OCXO-implied
+#     duration s advances the wall clock by s*(1+INJECTED_CLOCK_OFFSET)
+#     plus a small per-block overhead (disk writes etc.), plus
+#     deterministic ms-scale jitter (NTP timestamp granularity).
+# The offline fit in analysis/facility_report.py must recover
+# INJECTED_CLOCK_OFFSET within its stated uncertainty -- the harness
+# wrapper (run_jython_harness.sh) enforces that.
+
+INJECTED_CLOCK_OFFSET = 3.0e-7   # deliberate console-clock error to recover
+_VCLOCK_MS = [1787000000000L]    # virtual epoch (arbitrary, 2026-ish)
+_LCG = [20260826L]               # deterministic jitter source
+
+
+def _jitter_ms(spread):
+    """Deterministic pseudo-random integer in [-spread, +spread]."""
+    _LCG[0] = (_LCG[0] * 6364136223846793005L + 1442695040888963407L) \
+        & 0xFFFFFFFFFFFFFFFFL
+    return int((_LCG[0] >> 33) % (2 * spread + 1)) - spread
+
+
+def HARNESS_WALL_MS():
+    """Virtual System.currentTimeMillis(); reading it costs a few ms."""
+    t = _VCLOCK_MS[0]
+    _VCLOCK_MS[0] = _VCLOCK_MS[0] + 5 + _jitter_ms(3)
+    return t
+
+
+def HARNESS_ADVANCE_S(seconds):
+    """Advance the virtual clock across a mocked acquisition: OCXO-implied
+    duration scaled by the injected offset, plus per-block overhead."""
+    LOG.append(("HARNESS_ADVANCE_S", _u(seconds)))
+    ms = seconds * 1000.0 * (1.0 + INJECTED_CLOCK_OFFSET)
+    _VCLOCK_MS[0] = _VCLOCK_MS[0] + long(round(ms)) + 200 + _jitter_ms(8)
+
 
 class _CmdThread:
     def getResult(self):

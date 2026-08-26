@@ -8,6 +8,7 @@ analysis/facility_report.py.
     python3 testing/make_physics_bundle.py --feature bump --amp 1.5 --fwhm 12
     python3 testing/make_physics_bundle.py --feature dip  --amp 0.35
     python3 testing/make_physics_bundle.py --feature none            # null case
+    python3 testing/make_physics_bundle.py --clock-offset 3e-7       # + clock audit
 
 Prints exactly one line on stdout: the bundle path (progress on stderr).
 
@@ -26,9 +27,18 @@ the injected amplitude/width/asymmetry are known to numerical precision.
 Data are written as little-endian int32 Bruker ser/fid files with real
 acqus/acqu2s parameter files (GRPDLY transient included in the references).
 
-meta.json declares run_mode 'synthetic-injection' (schema enum, v1.1):
+meta.json declares run_mode 'synthetic-injection' (schema enum, v1.2):
 the report generator runs its full science path on such bundles but
 watermarks the report as validation, never as a measurement.
+
+With --clock-offset F the bundle also carries a schema-1.2 clock_audit
+object whose block wall-clock durations equal the OCXO-implied durations
+times (1 + F), plus a constant per-block overhead and ms-scale jitter --
+so the report's clock-audit fit must recover F within its stated
+uncertainty. The default session is short (~10 min of audited time), so
+the report correctly flags the audit 'inconclusive (short session)' while
+still reporting the fitted offset; that flag is part of what this bundle
+validates.
 
 Validation record (rerun 2026-08-25 at the committed DEFAULT SEED 20260825;
 these supersede the numbers quoted in the message of commit 350907b, which
@@ -152,6 +162,39 @@ def synth_reference_row(rng, n, fs, a0, f0, fwhm, decay_s, floor_c2hz):
     return x
 
 
+def build_clock_audit(offset, rng):
+    """Schema-1.2 clock_audit object with a KNOWN injected fractional
+    clock offset: each acquisition block's wall duration is its OCXO-implied
+    duration times (1 + offset), plus a constant 0.18 s per-block overhead
+    (disk writes; the fit's intercept must absorb it) and +/-4 ms jitter
+    (NTP timestamp granularity). A setup block with no OCXO prediction is
+    included to exercise the fit's exclusion path."""
+    aq_lad = TD_LADDER / 2 / SW_HZ
+    aq_row = TD_ROW / 2 / SW_HZ
+    plan = [(1, "setup", None)]
+    plan += [(e, "rg_ladder", aq_lad) for e, _rg in RG_LADDER]
+    plan += [(11, "reference_open", REF_ROWS * aq_row),
+             (12, "noise", N_NOISE_ROWS * aq_row),
+             (13, "reference_close", REF_ROWS * aq_row)]
+    t_ms = 1787000000000            # arbitrary 2026-ish epoch
+    blocks = []
+    for expno, role, ocxo_s in plan:
+        if ocxo_s is None:
+            dur_ms = 120000         # setup: tune/shim/dialogs, wall only
+        else:
+            dur_ms = int(round(ocxo_s * 1000.0 * (1.0 + offset)
+                               + 180.0 + rng.integers(-4, 5)))
+        blocks.append({"expno": expno, "role": role,
+                       "wall_start_ms": t_ms,
+                       "wall_end_ms": t_ms + dur_ms,
+                       "ocxo_expected_s": ocxo_s})
+        t_ms += dur_ms + 2500       # inter-block gap (dataset switching)
+    return {"blocks": blocks,
+            "ntp_status_raw": "synthetic clock-audit fixture (no NTP "
+                              "daemon was queried)",
+            "workstation_time_source": "synthetic"}
+
+
 def build_bundle(args):
     rng = np.random.default_rng(args.seed)
     sign = {"bump": 1.0, "dip": -1.0, "none": 0.0}[args.feature]
@@ -219,9 +262,9 @@ def build_bundle(args):
                 "started_local": t0, "finished_local": t0}
 
     meta = {
-        "schema_version": "1.1",
+        "schema_version": "1.2",
         "program_version": version,
-        "software": {"script_version": version, "schema_version": "1.1",
+        "software": {"script_version": version, "schema_version": "1.2",
                      "script_sha256": "unavailable",
                      "run_mode": "synthetic-injection"},
         "created_utc": created,
@@ -261,8 +304,15 @@ def build_bundle(args):
             "feature": args.feature, "amp_norm": a_inj,
             "b_over_a": args.b_over_a, "f0_hz": F0_HZ,
             "fwhm_hz": args.fwhm, "floor_counts2perhz": FLOOR_C2HZ,
-            "ref_a0_counts": REF_A0, "seed": args.seed},
+            "ref_a0_counts": REF_A0, "seed": args.seed,
+            "clock_fractional_offset": args.clock_offset},
     }
+
+    # ---- optional clock audit with a known injected fractional offset
+    if args.clock_offset is not None:
+        meta["clock_audit"] = build_clock_audit(args.clock_offset, rng)
+        info("clock audit injected: fractional offset %.3e over %d blocks"
+             % (args.clock_offset, len(meta["clock_audit"]["blocks"])))
     for arc, payload in files:
         meta["checksums"][arc] = "sha256:" + hashlib.sha256(payload).hexdigest()
 
@@ -293,6 +343,11 @@ def main(argv=None):
     ap.add_argument("--b-over-a", type=float, default=0.3,
                     help="dispersive fraction of the injected line")
     ap.add_argument("--seed", type=int, default=20260825)
+    ap.add_argument("--clock-offset", type=float, default=None,
+                    help="include a schema-1.2 clock_audit whose blocks "
+                         "carry this KNOWN fractional console-clock offset "
+                         "(e.g. 3e-7); omit for no clock_audit (pre-1.2 "
+                         "behavior)")
     ap.add_argument("--out-dir", default=None)
     args = ap.parse_args(argv)
     if args.feature == "dip" and abs(args.amp) >= 1.0:

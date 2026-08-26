@@ -39,6 +39,11 @@ matplotlib):
      (2020 methodology: pairing factor, back-action).
   7. QA flags: sweep state, lock state, ADC clipping, spike counts,
      timestamp sanity, software provenance.
+  8. Clock audit (schema 1.2 bundles): fits the fractional console-clock
+     offset from wall-clock vs OCXO-implied elapsed time across blocks,
+     states which absolute-frequency requirement tiers the offset
+     satisfies, and flags short sessions as inconclusive. Older bundles
+     without the audit are reported as such, without penalty.
 
 Spin-noise master formula (FDT-verified; see the project fact brief):
   S_V(Delta)/S_floor = 1 + f_c*lambda_r*[(Ts/Tc - 2)*lambda - lambda_r]
@@ -100,6 +105,34 @@ BACKACTION_RANGE_2020 = (2.7, 3.7)  # cold-circuit back-action suppression range
 RG_POWER_ENVELOPE_UNTESTED = 0.20   # +/-20% in power if the RG ladder is absent
 
 SOFTWARE_TEST_MODES = ("simulate", "desktest")
+
+# Clock audit (schema 1.2). Acquisition durations derive from the console's
+# OCXO master clock; the workstation wall clock is normally NTP-disciplined.
+# Fitting wall-clock elapsed vs OCXO-implied elapsed across the session's
+# blocks measures the fractional console-clock offset for free.
+NTP_JITTER_S = 0.010          # assumed wall-clock timestamp jitter (5-10 ms typical)
+CLOCK_MIN_SPAN_S = 3600.0     # audits spanning less than 1 h are inconclusive
+CLOCK_CONSISTENCY_MAX = 0.05  # blocks whose wall/OCXO ratio is off by more than
+                              # this are overhead-dominated (dialogs, tune) and
+                              # useless at the 1e-7 level: excluded from the fit
+
+# Requirement tiers for absolute-frequency (axion-search) use of the data.
+# Each entry: (tier id, name, fractional requirement, note).
+CLOCK_TIERS = (
+    ("i", "detection + per-site exclusion", 6.0e-7,
+     "the axion virial linewidth (~6e-7 fractional, ~380 Hz at 600 MHz) "
+     "dominates; a stock OCXO is fine"),
+    ("ii", "mass-scale labeling", 1.0e-6,
+     "a 1 ppm clock error is a 1 ppm axion-mass error; a stock OCXO is "
+     "fine provided the offset is recorded -- which this audit does"),
+    ("iii", "cross-site coincidence", 1.0e-7,
+     "sites must agree to under ~1e-7; aged OCXOs can miss, which is "
+     "exactly what this audit screens for"),
+    ("iv", "sidereal-Doppler signature", 1.2e-9,
+     "~1.2e-9 fractional (~0.7 Hz at 600 MHz); beyond any software audit "
+     "of practical span -- needs disciplined or per-record-calibrated "
+     "clocks (GPSDO reference input, or a GPSDO-locked pilot tone)"),
+)
 
 
 # ============================================================================
@@ -634,6 +667,211 @@ def analyze_rg_ladder(bundle, meta, f0_guess, fs_default):
 
 
 # ============================================================================
+# Clock audit (schema 1.2): console-clock offset from wall-vs-OCXO elapsed
+# ============================================================================
+
+def analyze_clock_audit(meta):
+    """Fit the fractional console-clock offset from the bundle's clock_audit
+    blocks.
+
+    Model: wall_i = c + (1 + delta) * ocxo_i across usable blocks, where
+    ocxo_i is the OCXO-implied acquisition duration and wall_i the
+    NTP-disciplined wall-clock elapsed time. The intercept c absorbs the
+    constant per-block housekeeping overhead (disk writes etc., not
+    OCXO-derived); delta is the fractional clock offset. Per-point sigma is
+    sqrt(2)*NTP_JITTER_S (two timestamps per block). Blocks with no OCXO
+    prediction (setup) or with wall/OCXO mismatch beyond
+    CLOCK_CONSISTENCY_MAX (overhead-dominated) are excluded and listed.
+    """
+    out = {"available": False}
+    ca = meta.get("clock_audit")
+    if not isinstance(ca, dict) or not isinstance(ca.get("blocks"), list) \
+            or not ca.get("blocks"):
+        out["note"] = (
+            "no clock audit in this bundle -- it predates the audit "
+            "(recorded from script v0.2 / schema 1.2 onward). No penalty: "
+            "the absolute-clock tiers are simply unassessed for this "
+            "session.")
+        return out
+    out["available"] = True
+    out["workstation_time_source"] = str(
+        ca.get("workstation_time_source", "unknown"))
+    out["ntp_status_raw"] = str(ca.get("ntp_status_raw", ""))[:2000]
+
+    usable, rows = [], []
+    t0_ms, t1_ms = None, None
+    for b in ca["blocks"]:
+        try:
+            ws = int(b["wall_start_ms"])
+            we = int(b["wall_end_ms"])
+            wall_s = (we - ws) / 1000.0
+        except Exception:
+            rows.append({"expno": b.get("expno"), "role": b.get("role"),
+                         "used": False, "why": "unreadable wall times"})
+            continue
+        t0_ms = ws if t0_ms is None else min(t0_ms, ws)
+        t1_ms = we if t1_ms is None else max(t1_ms, we)
+        exp = b.get("ocxo_expected_s")
+        row = {"expno": b.get("expno"), "role": b.get("role"),
+               "wall_s": wall_s, "ocxo_expected_s": exp}
+        if exp is None:
+            row.update({"used": False,
+                        "why": "no OCXO prediction (tune/shim/dialog time)"})
+        elif not isinstance(exp, (int, float)) or exp <= 0 or wall_s <= 0:
+            row.update({"used": False, "why": "non-positive duration"})
+        elif abs(wall_s / exp - 1.0) > CLOCK_CONSISTENCY_MAX:
+            row.update({"used": False,
+                        "why": "wall/OCXO mismatch %.1f%% -- overhead-"
+                               "dominated, unusable at the 1e-7 level"
+                               % (100.0 * abs(wall_s / exp - 1.0))})
+        else:
+            row.update({"used": True,
+                        "block_offset": wall_s / exp - 1.0})
+            usable.append((float(exp), wall_s))
+        rows.append(row)
+    out["blocks"] = rows
+    out["n_blocks"] = len(rows)
+    out["n_usable"] = len(usable)
+    span_s = ((t1_ms - t0_ms) / 1000.0) if (t0_ms is not None) else 0.0
+    out["session_span_s"] = span_s
+    out["audited_ocxo_s"] = float(sum(x for x, _ in usable))
+
+    if not usable:
+        out["status"] = ("clock audit present but no usable blocks; no "
+                         "offset fit possible")
+        out["conclusive"] = False
+        return out
+
+    x = np.array([p[0] for p in usable])
+    y = np.array([p[1] for p in usable])
+    sigma_pt = math.sqrt(2.0) * NTP_JITTER_S     # two timestamps per block
+    if len(usable) >= 3 and float(np.ptp(x)) > 1.0:
+        # OLS with intercept; parameter errors from the KNOWN per-point
+        # sigma, not from residual scatter (few points, honest jitter model)
+        xb, yb = float(np.mean(x)), float(np.mean(y))
+        sxx = float(np.sum((x - xb) ** 2))
+        slope = float(np.sum((x - xb) * (y - yb)) / sxx)
+        delta = slope - 1.0
+        delta_err = sigma_pt / math.sqrt(sxx)
+        out["fit_model"] = ("wall = c + (1+delta)*ocxo, intercept absorbs "
+                            "constant per-block overhead")
+        out["overhead_intercept_s"] = yb - slope * xb
+    else:
+        # too few blocks for an intercept: inverse-variance mean of the
+        # per-block ratios (overhead then biases delta high -- flagged)
+        d = y / x - 1.0
+        w = (x / sigma_pt) ** 2
+        delta = float(np.sum(w * d) / np.sum(w))
+        delta_err = float(1.0 / math.sqrt(np.sum(w)))
+        out["fit_model"] = ("weighted mean of per-block ratios (too few "
+                            "blocks for an intercept; per-block overhead "
+                            "biases the offset high)")
+    out["fractional_offset"] = float(delta)
+    out["fractional_offset_err"] = float(delta_err)
+    out["assumed_timestamp_jitter_s"] = NTP_JITTER_S
+
+    out["conclusive"] = bool(span_s >= CLOCK_MIN_SPAN_S)
+    if not out["conclusive"]:
+        out["status"] = ("clock audit inconclusive (short session): span "
+                         "%.0f s < %.0f s; numbers below are reported but "
+                         "should not be used for tier claims"
+                         % (span_s, CLOCK_MIN_SPAN_S))
+    else:
+        out["status"] = ("fractional console-clock offset %.3g +/- %.3g "
+                         "over a %.2f h session span"
+                         % (delta, delta_err, span_s / 3600.0))
+
+    bound = abs(delta) + delta_err
+    out["offset_bound"] = float(bound)
+    tiers = []
+    for tid, name, req, note in CLOCK_TIERS:
+        t = {"tier": tid, "name": name, "requirement": req, "note": note}
+        if not out["conclusive"]:
+            t["verdict"] = "unassessed (audit inconclusive)"
+        elif delta_err > req:
+            t["verdict"] = ("audit precision insufficient (+/-%.1g > %.1g "
+                            "requirement) -- needs a longer session"
+                            % (delta_err, req))
+        elif bound <= req:
+            t["verdict"] = "satisfied (|offset|+err = %.2g <= %.1g)" \
+                % (bound, req)
+        else:
+            t["verdict"] = ("NOT satisfied: measured offset %.2g exceeds "
+                            "the %.1g requirement" % (bound, req))
+        tiers.append(t)
+    out["tiers"] = tiers
+    return out
+
+
+def render_clock_audit_html(clock):
+    """HTML fragment for the clock-audit section (used by both the science
+    and the software-test report paths)."""
+    parts = []
+    A = parts.append
+    A("<h2>Clock audit (console OCXO vs workstation NTP)</h2>"
+      "<div class='card'>")
+    if not clock.get("available"):
+        A("<p class='muted'>%s</p></div>" % esc(clock.get("note", "")))
+        return "".join(parts)
+    A("<p class='small'>Acquisition durations derive from the console's "
+      "OCXO master clock; the workstation wall clock is normally "
+      "NTP-disciplined. Fitting wall-clock elapsed against OCXO-implied "
+      "elapsed across the session's blocks measures the fractional "
+      "console-clock offset with zero extra hardware. Precision scales as "
+      "the %.0f ms timestamp jitter over the audited span.</p>"
+      % (1000 * clock.get("assumed_timestamp_jitter_s", NTP_JITTER_S)))
+    if clock.get("fractional_offset") is not None:
+        cls = "" if clock.get("conclusive") else " class='warn'"
+        A("<p%s><span class='big'>%+.3g &plusmn; %.2g</span> fractional "
+          "console-clock offset <span class='small'>(%s)</span></p>"
+          % (cls, clock["fractional_offset"], clock["fractional_offset_err"],
+             esc(clock.get("fit_model", ""))))
+    A("<p class='%s'>%s</p>" % ("small" if clock.get("conclusive")
+                                else "warn", esc(clock.get("status", ""))))
+    A("<p class='small'>session span %.2f h &middot; audited OCXO time "
+      "%.0f s &middot; %d of %d blocks usable &middot; time source: "
+      "<code>%s</code></p>"
+      % (clock.get("session_span_s", 0) / 3600.0,
+         clock.get("audited_ocxo_s", 0), clock.get("n_usable", 0),
+         clock.get("n_blocks", 0),
+         esc(clock.get("workstation_time_source", "unknown"))))
+    if clock.get("blocks"):
+        A("<table><tr><th>expno</th><th>role</th><th>wall (s)</th>"
+          "<th>OCXO expected (s)</th><th>used</th><th>per-block offset"
+          "</th></tr>")
+        for b in clock["blocks"]:
+            off = b.get("block_offset")
+            A("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
+              "<td>%s</td><td>%s</td></tr>"
+              % (fmt(b.get("expno")), esc(b.get("role", "?")),
+                 fmt(b.get("wall_s"), 6), fmt(b.get("ocxo_expected_s"), 6),
+                 "yes" if b.get("used") else
+                 "no &mdash; %s" % esc(b.get("why", "")),
+                 ("%+.2e" % off) if off is not None else "&mdash;"))
+        A("</table>")
+    if clock.get("tiers"):
+        A("<p class='small'><b>Requirement tiers</b> (absolute-frequency "
+          "use of this site's records):</p>")
+        A("<table><tr><th>tier</th><th>requirement</th><th>fractional"
+          "</th><th>verdict</th></tr>")
+        for t in clock["tiers"]:
+            v = t["verdict"]
+            cls = "ok" if v.startswith("satisfied") else (
+                "fail" if v.startswith("NOT") else "warn")
+            A("<tr><td>%s</td><td>%s <span class='small'>(%s)</span></td>"
+              "<td>%.1e</td><td class='%s'>%s</td></tr>"
+              % (esc(t["tier"]), esc(t["name"]), esc(t["note"]),
+                 t["requirement"], cls, esc(v)))
+        A("</table>")
+    if clock.get("ntp_status_raw"):
+        A("<p class='small'>NTP status probe (verbatim):</p>"
+          "<pre class='small' style='white-space:pre-wrap; overflow-x:auto'>"
+          "<code>%s</code></pre>" % esc(clock["ntp_status_raw"][:600]))
+    A("</div>")
+    return "".join(parts)
+
+
+# ============================================================================
 # Physics interpretation (master formula; every assumption stated)
 # ============================================================================
 
@@ -1062,6 +1300,12 @@ def render_html(ctx):
           "(dialog chain, dataset bookkeeping, meta.json, zip, checksums) "
           "was exercised end to end; that is all this report certifies."
           "</p></div>")
+        # The clock audit is timestamp plumbing, not spin physics, so it IS
+        # analyzed for software-test bundles -- the harness uses exactly
+        # this to validate the offset fit against a known injected offset.
+        # On a desk machine the recorded wall times are the desk's, so the
+        # numbers describe the test host, never a spectrometer.
+        A(render_clock_audit_html(ctx["clock"]))
         A(_footer())
         return "".join(parts)
 
@@ -1263,6 +1507,9 @@ def render_html(ctx):
           "calibration and line-position anchoring unavailable.</p>")
     A("</div>")
 
+    # ---- clock audit
+    A(render_clock_audit_html(ctx["clock"]))
+
     # ---- QA
     A("<h2>QA flags</h2><div class='card'><table>"
       "<tr><th>status</th><th>check</th><th>detail</th></tr>")
@@ -1353,6 +1600,11 @@ def main(argv=None):
         "validation": {"ok": val_ok, "messages": val_msgs},
     }
 
+    # ---- clock audit (both report types: it is timestamp plumbing, not
+    # spin physics, and the harness validates the fit on desktest bundles)
+    clock = analyze_clock_audit(meta)
+    report["clock_audit"] = strip_private(clock)
+
     # ---- 2. run-mode gate
     if run_mode in SOFTWARE_TEST_MODES:
         report["report_type"] = "software-test"
@@ -1361,7 +1613,8 @@ def main(argv=None):
                           "analysis refused by design" % run_mode)
         ctx = {"report_type": "software-test", "meta": meta,
                "bundle_path": bundle_path, "validation_msgs": val_msgs,
-               "validation_ok": val_ok, "names": sorted(bundle.names)}
+               "validation_ok": val_ok, "names": sorted(bundle.names),
+               "clock": clock}
         html = render_html(ctx)
         _write(out_dir, html, report)
         print("SOFTWARE-TEST report written to %s" % out_dir)
@@ -1538,7 +1791,7 @@ def main(argv=None):
            "ladder": ladder, "detection": detection, "headline": headline,
            "temp_contrast": temp_contrast, "floor_cal": floor_cal,
            "qa": qa, "figs": figs, "honesty": honesty,
-           "names": sorted(bundle.names)}
+           "names": sorted(bundle.names), "clock": clock}
     html = render_html(ctx)
 
     report["science"] = strip_private({

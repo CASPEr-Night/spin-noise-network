@@ -3,7 +3,7 @@
 Operational script for the remote supervised pilot: we screen-share (or
 NoMachine) into the facility's TopSpin workstation while a local colleague
 sits at the console. This is the first time `topspin/spin_noise_run.py`
-(v0.1.0) touches a real spectrometer; Tier −1 and Tier 0 are already green
+(v0.2.0, the current `VERSION`) touches a real spectrometer; Tier −1 and Tier 0 are already green
 (`testing/tier0_desktest.md`).
 
 Roles below: **R** = remote operator (us), **L** = local colleague at the
@@ -130,7 +130,9 @@ console. Contact for everything: John W. Blanchard, jwbquantum@gmail.com.
    is nonzero.
 10. **Selftest validation on their machine** (any box with Python ≥3.6):
     `python3 upload_bundle.py <bundle.zip> --selftest`
-    → must end `RESULT: PASS` (schema 1.1 validates, all sha256 verified).
+    → must end `RESULT: PASS` (the current schema — 1.2, which
+    includes the clock-audit block timestamps — validates, all sha256
+    verified).
 11. **Upload (primary).** With the ingest Worker deployed (see HANDOFF step
     6 — deploy it BEFORE the pilot) and the facility's `config.json` filled
     with the endpoint + token sent privately beforehand:
@@ -210,9 +212,9 @@ directory of the template dataset they had open. Nothing else was written.
       that confused L, every timing surprise, every quirk hit from §6, the
       exact TopSpin version string.
 - [ ] Any script fix arising from the pilot: bump `SCRIPT_VERSION` to the
-      next v0.1.x, keep the `VERSION` file in sync
+      next patch version, keep the `VERSION` file in sync
       (`testing/static_check.py` enforces it), re-run the Tier −1 harness
-      (`./testing/run_jython_harness.sh`), tag the commit `v0.1.x`.
+      (`./testing/run_jython_harness.sh`), tag the commit with the version.
 - [ ] Do not name the facility in anything public without their OK.
 
 ---
