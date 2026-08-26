@@ -8,7 +8,17 @@ upload_bundle.py -- ship a spin-noise bundle zip to the central repository.
     python3 upload_bundle.py <bundle.zip> --verify-only   # validate + sha256, no network
     python3 upload_bundle.py <bundle.zip> --selftest      # validate zip structure + meta.json
                                                           # against schema/meta.schema.json
+    python3 upload_bundle.py <bundle.zip> --abort         # abandon a stalled chunked upload
     python3 upload_bundle.py <bundle.zip> --config /path/to/config.json
+
+Upload paths (chosen automatically by size):
+  * <= 50 MiB : one POST to /ingest (single request, server verifies sha256).
+  * >  50 MiB : chunked multipart upload in 50 MiB parts via /upload/create,
+    /upload/part, /upload/complete — works up to 5 GiB on any Cloudflare plan.
+    RESUMABLE: progress is checkpointed to <bundle>.upload-state.json after
+    every part; rerunning the same command after a crash / network loss / kill
+    picks up where it left off. The state file is deleted on success. A stalled
+    upload can be abandoned with --abort (frees the server-side parts).
 
 Design constraints (do not "improve" these away):
   * Python 3 STANDARD LIBRARY ONLY. This runs on ancient CentOS boxes that sit
@@ -45,6 +55,7 @@ try:
     # Standard library on every Python 3.
     from urllib import request as urlrequest
     from urllib import error as urlerror
+    from urllib.parse import quote as urlquote
 except ImportError:  # pragma: no cover - cannot happen on py3, but stay polite
     print("ERROR: this script requires Python 3 (found %s)." % sys.version.split()[0])
     sys.exit(2)
@@ -67,12 +78,24 @@ BUNDLE_NAME_RE = re.compile(
 )
 
 # Retry schedule for transient failures (network unreachable, 5xx):
-# initial attempt, then 3 retries after these sleeps.
+# initial attempt, then 3 retries after these sleeps. Applied PER PART on the
+# chunked path, so one flaky part never restarts the whole transfer.
 RETRY_SLEEPS_S = [2, 8, 30]
 
 DEFAULT_MAINTAINER_EMAIL = "spin-noise-maintainer@example.org"
 
-CHUNK = 1024 * 1024  # 1 MiB read chunks for hashing
+CHUNK = 1024 * 1024  # 1 MiB read chunks for hashing / part streaming
+
+# Automatic path selection: bundles at or under this size go through the
+# single-request POST /ingest; larger ones use the chunked multipart path.
+SINGLE_SHOT_MAX_BYTES = 50 * 1024 * 1024
+
+# Chunked path geometry. 50 MiB parts sit comfortably under Cloudflare's
+# 100 MB free-plan request cap and over R2's 5 MiB multipart minimum.
+PART_BYTES = 50 * 1024 * 1024
+MULTIPART_MAX_BYTES = 5 * 1024 * 1024 * 1024  # server-enforced 5 GiB ceiling
+
+UPLOAD_TIMEOUT_S = 600  # per request (one bundle or one part)
 
 
 # --------------------------------------------------------------------------
@@ -410,16 +433,164 @@ def verify_bundle(bundle_path, schema_path, check_data_hashes=True):
 
 
 # --------------------------------------------------------------------------
-# Upload
+# Upload — shared plumbing
+# --------------------------------------------------------------------------
+
+def endpoint_base(url):
+    """config endpoint_url may be the full /ingest URL (historic configs) or
+    the bare Worker origin; return the bare origin either way."""
+    u = url.rstrip("/")
+    if u.endswith("/ingest"):
+        u = u[: -len("/ingest")]
+    return u
+
+
+def ingest_url(cfg):
+    return endpoint_base(cfg["endpoint_url"]) + "/ingest"
+
+
+def state_file_path(bundle_path):
+    return os.path.abspath(bundle_path) + ".upload-state.json"
+
+
+def load_upload_state(bundle_path, size, digest_hex):
+    """Return the saved resume state if it matches this bundle, else None."""
+    path = state_file_path(bundle_path)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r") as fh:
+            state = json.load(fh)
+    except (ValueError, OSError) as exc:
+        print("WARN : resume state file %s unreadable (%s); starting fresh." % (path, exc))
+        return None
+    if (state.get("total_bytes") != size or state.get("sha256") != digest_hex
+            or not state.get("key") or not state.get("upload_id")
+            or not isinstance(state.get("parts"), dict)):
+        print("WARN : resume state file does not match this bundle (file changed")
+        print("       since the interrupted upload?); starting a fresh upload.")
+        return None
+    return state
+
+
+def save_upload_state(bundle_path, state):
+    """Atomic write so a crash mid-save never corrupts the resume state."""
+    path = state_file_path(bundle_path)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(state, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+    os.replace(tmp, path)  # atomic on POSIX and Windows (py3.3+)
+
+
+def remove_upload_state(bundle_path):
+    try:
+        os.remove(state_file_path(bundle_path))
+    except OSError:
+        pass
+
+
+class _FilePartReader(object):
+    """File-like view of one part of an already-open file: read() streams at
+    most `length` bytes starting at `offset`. urllib sends file-like bodies in
+    small blocks, so a 50 MiB part goes over the wire without this script ever
+    holding the part (let alone the whole bundle) in memory."""
+
+    def __init__(self, fh, offset, length):
+        self._fh = fh
+        self._remaining = length
+        fh.seek(offset)
+
+    def read(self, n=-1):
+        if self._remaining <= 0:
+            return b""
+        if n is None or n < 0 or n > self._remaining:
+            n = self._remaining
+        block = self._fh.read(min(n, CHUNK))
+        self._remaining -= len(block)
+        return block
+
+
+def http_json_call(url, method, payload, token):
+    """Send a small JSON request; return (status_code, parsed_dict).
+    Transport-level failures (unreachable, TLS, timeout) raise OSError /
+    urlerror.URLError for the caller's retry loop; HTTP error statuses are
+    RETURNED, not raised."""
+    body = json.dumps(payload).encode("utf-8")
+    headers = {
+        "Authorization": "Bearer %s" % token,
+        "Content-Type": "application/json",
+        "Content-Length": str(len(body)),
+        "User-Agent": "spin-noise-uploader/%s" % UPLOADER_VERSION,
+    }
+    tls_ctx = ssl.create_default_context()
+    req = urlrequest.Request(url, data=body, headers=headers, method=method)
+    try:
+        resp = urlrequest.urlopen(req, context=tls_ctx, timeout=UPLOAD_TIMEOUT_S)
+        raw = resp.read().decode("utf-8", "replace")
+        code = resp.getcode()
+    except urlerror.HTTPError as exc:
+        code = exc.code
+        try:
+            raw = exc.read().decode("utf-8", "replace")
+        except Exception:
+            raw = ""
+    try:
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            parsed = {"raw": raw.strip()[:300]}
+    except ValueError:
+        parsed = {"raw": raw.strip()[:300]}
+    return code, parsed
+
+
+def json_call_with_retries(url, method, payload, token, what):
+    """http_json_call + the standard transient-retry schedule.
+    Returns (code, parsed) once a non-5xx HTTP answer arrives, or
+    (None, None) after all attempts failed at transport level / with 5xx."""
+    attempts = 1 + len(RETRY_SLEEPS_S)
+    for attempt in range(attempts):
+        if attempt > 0:
+            sleep_s = RETRY_SLEEPS_S[attempt - 1]
+            print("Retrying %s in %d s (attempt %d of %d)..."
+                  % (what, sleep_s, attempt + 1, attempts))
+            time.sleep(sleep_s)
+        try:
+            code, parsed = http_json_call(url, method, payload, token)
+        except (urlerror.URLError, ssl.SSLError, OSError) as exc:
+            reason = getattr(exc, "reason", exc)
+            print("WARN : could not reach server for %s (%s)." % (what, reason))
+            continue
+        if 500 <= code < 600:
+            print("WARN : HTTP %d from server on %s -- transient, will retry."
+                  % (code, what))
+            continue
+        return code, parsed
+    return None, None
+
+
+def explain_duplicate_409(bundle_name):
+    print("ERROR: HTTP 409 Conflict -- a bundle with this exact name already")
+    print("       exists on the server. If this is a genuine re-run, rename the")
+    print("       zip with a fresh 4-hex suffix and upload again, e.g.:")
+    stem = bundle_name[:-4]
+    new_name = re.sub(r"_[0-9a-f]{4}$", "_%04x" % (int(time.time()) & 0xFFFF), stem) + ".zip"
+    print("           mv %s %s" % (bundle_name, new_name))
+    print("       If you already uploaded this bundle, you are done -- the 409")
+    print("       simply means the server has it.")
+
+
+# --------------------------------------------------------------------------
+# Upload — single-shot path (bundles <= 50 MiB, one POST /ingest)
 # --------------------------------------------------------------------------
 
 def do_upload(bundle_path, cfg, digest_hex, dry_run):
     """
-    POST the bundle. Returns process exit code (0 on success).
+    POST the bundle in one request. Returns process exit code (0 on success).
     Retries transient failures per RETRY_SLEEPS_S; terminal HTTP errors
     (401/409/413/other 4xx) are explained and NOT retried.
     """
-    url = cfg["endpoint_url"]
+    url = ingest_url(cfg)
     maintainer = cfg.get("maintainer_email", DEFAULT_MAINTAINER_EMAIL)
     bundle_name = os.path.basename(bundle_path)
     size = os.path.getsize(bundle_path)
@@ -506,14 +677,7 @@ def do_upload(bundle_path, cfg, digest_hex, dry_run):
                 print(fallback_instructions(bundle_path, maintainer))
                 return 1
             if code == 409:
-                print("ERROR: HTTP 409 Conflict -- a bundle with this exact name already")
-                print("       exists on the server. If this is a genuine re-run, rename the")
-                print("       zip with a fresh 4-hex suffix and upload again, e.g.:")
-                stem = bundle_name[:-4]
-                new_name = re.sub(r"_[0-9a-f]{4}$", "_%04x" % (int(time.time()) & 0xFFFF), stem) + ".zip"
-                print("           mv %s %s" % (bundle_name, new_name))
-                print("       If you already uploaded this bundle, you are done -- the 409")
-                print("       simply means the server has it.")
+                explain_duplicate_409(bundle_name)
                 return 1
             if 400 <= code < 500:
                 print("ERROR: HTTP %d from server: %s" % (code, detail or exc.reason))
@@ -537,6 +701,270 @@ def do_upload(bundle_path, cfg, digest_hex, dry_run):
 
 
 # --------------------------------------------------------------------------
+# Upload — chunked resumable path (bundles > 50 MiB, up to 5 GiB)
+# --------------------------------------------------------------------------
+
+def _chunk_plan(size):
+    """Return (n_parts, last_part_bytes) for the fixed PART_BYTES chunking."""
+    n_parts = (size + PART_BYTES - 1) // PART_BYTES
+    last = size - (n_parts - 1) * PART_BYTES
+    return n_parts, last
+
+
+def _upload_one_part(base, token, key, upload_id, fh, part, n_parts, size):
+    """Upload part `part` (1-based) with the standard retry schedule.
+    Returns the part's etag string, or (None, http_code) style tuple —
+    concretely: (etag, None) on success, (None, code_or_None) on failure."""
+    offset = (part - 1) * PART_BYTES
+    length = min(PART_BYTES, size - offset)
+    final = "&final=1" if part == n_parts else ""
+    url = ("%s/upload/part?key=%s&upload_id=%s&part=%d%s"
+           % (base, urlquote(key, safe=""), urlquote(upload_id, safe=""), part, final))
+    headers = {
+        "Authorization": "Bearer %s" % token,
+        "Content-Type": "application/octet-stream",
+        "Content-Length": str(length),
+        "User-Agent": "spin-noise-uploader/%s" % UPLOADER_VERSION,
+    }
+    tls_ctx = ssl.create_default_context()
+
+    attempts = 1 + len(RETRY_SLEEPS_S)
+    for attempt in range(attempts):
+        if attempt > 0:
+            sleep_s = RETRY_SLEEPS_S[attempt - 1]
+            print("Retrying part %d in %d s (attempt %d of %d)..."
+                  % (part, sleep_s, attempt + 1, attempts))
+            time.sleep(sleep_s)
+        try:
+            body = _FilePartReader(fh, offset, length)
+            req = urlrequest.Request(url, data=body, headers=headers, method="PUT")
+            resp = urlrequest.urlopen(req, context=tls_ctx, timeout=UPLOAD_TIMEOUT_S)
+            raw = resp.read().decode("utf-8", "replace")
+            try:
+                etag = json.loads(raw).get("etag")
+            except ValueError:
+                etag = None
+            if not etag:
+                print("WARN : part %d stored but no etag in response -- will retry." % part)
+                continue
+            return etag, None
+        except urlerror.HTTPError as exc:
+            code = exc.code
+            detail = ""
+            try:
+                detail = exc.read().decode("utf-8", "replace").strip()[:200]
+            except Exception:
+                pass
+            if 500 <= code < 600:
+                print("WARN : HTTP %d on part %d (%s) -- transient, will retry."
+                      % (code, part, detail or exc.reason))
+                continue
+            return None, code  # 4xx: terminal, caller explains
+        except (urlerror.URLError, ssl.SSLError, OSError) as exc:
+            reason = getattr(exc, "reason", exc)
+            print("WARN : network error on part %d (%s)." % (part, reason))
+    return None, None
+
+
+def do_upload_chunked(bundle_path, cfg, digest_hex, dry_run):
+    """Chunked, resumable upload. Returns process exit code (0 on success)."""
+    base = endpoint_base(cfg["endpoint_url"])
+    token = cfg["token"]
+    maintainer = cfg.get("maintainer_email", DEFAULT_MAINTAINER_EMAIL)
+    bundle_name = os.path.basename(bundle_path)
+    size = os.path.getsize(bundle_path)
+    n_parts, last_part = _chunk_plan(size)
+
+    if size > MULTIPART_MAX_BYTES:
+        print("ERROR: bundle is %.2f GiB; the server accepts at most 5 GiB."
+              % (size / 1073741824.0))
+        print("       Contact the maintainer to arrange an alternative transfer.")
+        print(fallback_instructions(bundle_path, maintainer))
+        return 1
+
+    if dry_run:
+        print("DRY RUN -- nothing sent. Chunked upload plan:")
+        print("  Bundle        : %s (%.1f MiB)" % (bundle_name, size / 1048576.0))
+        print("  sha256        : %s" % digest_hex)
+        print("  Endpoint base : %s" % base)
+        print("  Parts         : %d x %.0f MiB (last part %.1f MiB)"
+              % (n_parts, PART_BYTES / 1048576.0, last_part / 1048576.0))
+        print("  Flow          : POST /upload/create -> PUT /upload/part x%d" % n_parts)
+        print("                  -> POST /upload/complete")
+        print("  Resume state  : %s" % state_file_path(bundle_path))
+        print("  Authorization : Bearer %s...(redacted)" % token[:4])
+        state = load_upload_state(bundle_path, size, digest_hex)
+        if state:
+            print("  NOTE          : resume state found -- %d of %d parts already done."
+                  % (len(state["parts"]), n_parts))
+        return 0
+
+    # ---- create (or resume) the multipart upload ---------------------------
+    state = load_upload_state(bundle_path, size, digest_hex)
+    if state is not None:
+        print("RESUME: found %s" % os.path.basename(state_file_path(bundle_path)))
+        print("        %d of %d parts already uploaded -- continuing."
+              % (len(state["parts"]), n_parts))
+    else:
+        print("Starting chunked upload: %s (%.1f MiB in %d parts of <= %.0f MiB)"
+              % (bundle_name, size / 1048576.0, n_parts, PART_BYTES / 1048576.0))
+        code, resp = json_call_with_retries(
+            base + "/upload/create", "POST",
+            {"bundle_name": bundle_name, "total_bytes": size,
+             "sha256": digest_hex, "n_parts": n_parts, "part_bytes": PART_BYTES},
+            token, "upload/create")
+        if code is None:
+            print("")
+            print("ERROR: could not start the upload; the network or server may be down.")
+            print(fallback_instructions(bundle_path, maintainer))
+            return 1
+        if code == 401:
+            print("ERROR: HTTP 401 Unauthorized -- the server rejected the token.")
+            print("       Check the 'token' value in your config.json against the one")
+            print("       the maintainer sent you (no extra spaces or line breaks).")
+            print(fallback_instructions(bundle_path, maintainer))
+            return 1
+        if code == 409:
+            explain_duplicate_409(bundle_name)
+            return 1
+        if code != 200 or not resp.get("upload_id"):
+            print("ERROR: HTTP %s starting upload: %s"
+                  % (code, resp.get("error", resp.get("raw", ""))))
+            print(fallback_instructions(bundle_path, maintainer))
+            return 1
+        state = {
+            "state_version": 1,
+            "bundle": bundle_name,
+            "endpoint_base": base,
+            "key": resp["key"],
+            "upload_id": resp["upload_id"],
+            "total_bytes": size,
+            "part_bytes": PART_BYTES,
+            "n_parts": n_parts,
+            "sha256": digest_hex,
+            "parts": {},  # "1": "<etag>", filled as parts land
+        }
+        save_upload_state(bundle_path, state)
+
+    key = state["key"]
+    upload_id = state["upload_id"]
+
+    # ---- upload the missing parts ------------------------------------------
+    with open(bundle_path, "rb") as fh:
+        for part in range(1, n_parts + 1):
+            if str(part) in state["parts"]:
+                continue
+            etag, err_code = _upload_one_part(
+                base, token, key, upload_id, fh, part, n_parts, size)
+            if etag is None:
+                print("")
+                if err_code == 404:
+                    print("ERROR: the server no longer knows this upload (uploads that sit")
+                    print("       incomplete for days are cleaned up). Removing the stale")
+                    print("       resume file -- rerun the same command to start over:")
+                    print("           python3 upload_bundle.py %s" % bundle_name)
+                    remove_upload_state(bundle_path)
+                elif err_code == 401:
+                    print("ERROR: HTTP 401 Unauthorized -- the server rejected the token.")
+                    print("       Check the 'token' value in your config.json.")
+                elif err_code is not None:
+                    print("ERROR: HTTP %d on part %d -- not transient; retrying will not help."
+                          % (err_code, part))
+                else:
+                    print("ERROR: part %d failed after all retries. The network or server" % part)
+                    print("       may be down; this happens and is not your fault.")
+                    print("       Your progress is saved -- rerun the SAME command later and")
+                    print("       the upload resumes from part %d:" % part)
+                    print("           python3 upload_bundle.py %s" % bundle_name)
+                print(fallback_instructions(bundle_path, maintainer))
+                return 1
+            state["parts"][str(part)] = etag
+            save_upload_state(bundle_path, state)
+            done_bytes = min(part * PART_BYTES, size)
+            print("part %d/%d uploaded (%.1f / %.1f MiB)"
+                  % (part, n_parts, done_bytes / 1048576.0, size / 1048576.0))
+
+    # ---- complete ------------------------------------------------------------
+    parts_list = [{"part": int(k), "etag": v}
+                  for k, v in sorted(state["parts"].items(), key=lambda kv: int(kv[0]))]
+    code, resp = json_call_with_retries(
+        base + "/upload/complete", "POST",
+        {"key": key, "upload_id": upload_id, "parts": parts_list, "sha256": digest_hex},
+        token, "upload/complete")
+    if code is None:
+        print("")
+        print("ERROR: all parts are uploaded but the final 'complete' call did not")
+        print("       get through. Nothing is lost -- rerun the SAME command later;")
+        print("       it will retry just this step.")
+        print(fallback_instructions(bundle_path, maintainer))
+        return 1
+    if code == 404:
+        print("ERROR: the server no longer knows this upload. Removing the stale")
+        print("       resume file -- rerun the same command to start over.")
+        remove_upload_state(bundle_path)
+        print(fallback_instructions(bundle_path, maintainer))
+        return 1
+    if code == 409:
+        explain_duplicate_409(bundle_name)
+        return 1
+    if code != 200 or not resp.get("ok"):
+        print("ERROR: HTTP %s completing upload: %s"
+              % (code, resp.get("error", resp.get("raw", ""))))
+        print(fallback_instructions(bundle_path, maintainer))
+        return 1
+
+    remove_upload_state(bundle_path)
+    print("")
+    print("UPLOAD OK (HTTP %d, %d parts)." % (code, len(parts_list)))
+    receipt_id = resp.get("receipt_id")
+    if receipt_id:
+        print("RECEIPT: %s" % receipt_id)
+        print("Note this receipt in your facility log. Thank you!")
+    print("You may keep or archive the local zip; the repository has a copy.")
+    return 0
+
+
+def do_abort(bundle_path, cfg):
+    """Abandon a stalled chunked upload recorded in <bundle>.upload-state.json.
+    Frees the parts stored on the server; the local zip is untouched."""
+    path = state_file_path(bundle_path)
+    if not os.path.isfile(path):
+        print("Nothing to abort: no resume state file at %s" % path)
+        return 0
+    try:
+        with open(path, "r") as fh:
+            state = json.load(fh)
+    except (ValueError, OSError) as exc:
+        print("WARN : resume state file unreadable (%s); deleting it." % exc)
+        remove_upload_state(bundle_path)
+        return 0
+    key = state.get("key")
+    upload_id = state.get("upload_id")
+    if not key or not upload_id:
+        print("WARN : resume state file incomplete; deleting it.")
+        remove_upload_state(bundle_path)
+        return 0
+    base = endpoint_base(cfg["endpoint_url"])
+    code, resp = json_call_with_retries(
+        base + "/upload/abort", "POST",
+        {"key": key, "upload_id": upload_id}, cfg["token"], "upload/abort")
+    if code is None:
+        print("ERROR: could not reach the server to abort. The resume file is kept;")
+        print("       try again later (the server also expires stale uploads on its own).")
+        return 1
+    if code != 200:
+        print("WARN : HTTP %s on abort: %s" % (code, resp.get("error", resp.get("raw", ""))))
+        print("       Deleting the local resume file anyway (the server expires stale")
+        print("       uploads on its own).")
+    else:
+        print("Upload aborted on the server.")
+    remove_upload_state(bundle_path)
+    print("Local resume state removed. The zip itself is untouched:")
+    print("    %s" % os.path.abspath(bundle_path))
+    return 0
+
+
+# --------------------------------------------------------------------------
 # main
 # --------------------------------------------------------------------------
 
@@ -553,6 +981,10 @@ def main(argv=None):
     parser.add_argument("--selftest", action="store_true",
                         help="validate zip structure and meta.json against "
                              "schema/meta.schema.json; no network")
+    parser.add_argument("--abort", action="store_true",
+                        help="abandon the stalled chunked upload recorded in "
+                             "<bundle>.upload-state.json (frees server-side "
+                             "parts; the zip is untouched)")
     parser.add_argument("--schema", default=None,
                         help="override path to meta.schema.json (used by "
                              "--selftest/--verify-only)")
@@ -576,7 +1008,7 @@ def main(argv=None):
         print("RESULT: %s" % ("PASS" if ok else "FAIL"))
         return 0 if ok else 1
 
-    # ---- upload path -------------------------------------------------------
+    # ---- upload / abort paths (need config) --------------------------------
     cfg_path = args.config or default_config_path()
     cfg, err = load_config(cfg_path)
     if cfg is None:
@@ -587,6 +1019,9 @@ def main(argv=None):
         print("maintainer sent to your facility.")
         print(fallback_instructions(bundle_path, DEFAULT_MAINTAINER_EMAIL))
         return 2
+
+    if args.abort:
+        return do_abort(bundle_path, cfg)
 
     # Quick structural sanity check before burning upload bandwidth.
     # Hash verification of every data file is skipped here for speed; run
@@ -606,7 +1041,12 @@ def main(argv=None):
     digest_hex = sha256_of_file(bundle_path)
     print("sha256: %s" % digest_hex)
 
-    return do_upload(bundle_path, cfg, digest_hex, args.dry_run)
+    # Automatic path selection: small bundles go in one request, big ones
+    # take the chunked resumable path (works on every Cloudflare plan).
+    size = os.path.getsize(bundle_path)
+    if size <= SINGLE_SHOT_MAX_BYTES:
+        return do_upload(bundle_path, cfg, digest_hex, args.dry_run)
+    return do_upload_chunked(bundle_path, cfg, digest_hex, args.dry_run)
 
 
 if __name__ == "__main__":

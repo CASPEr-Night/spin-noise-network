@@ -30,7 +30,10 @@ spin-noise-limited records relevant to fundamental-sensitivity and dark-matter
    ```
    (First time: copy `uploader/config.example.json` to `config.json` and paste the
    endpoint + token from the coordinator. No config? The script prints where to email
-   the zip instead.)
+   the zip instead.) Size never matters: small bundles go up in one request, big ones
+   (overnight runs, up to 5 GiB) automatically switch to a chunked upload that
+   **resumes where it left off** if the network drops or the machine reboots — just
+   rerun the same command.
 
 The script never touches your lock/sweep settings silently — it asks you to confirm
 the BSMS field sweep is OFF and records your answer. It has a `SIMULATE` flag for a
@@ -46,10 +49,10 @@ commands mocked — runnable on a free processing-only TopSpin install
 | `topspin/spin_noise_run.py` | Jython orchestrator, runs inside TopSpin 2.x–4.x |
 | `topspin/pp/zgnoise2d` | no-pulse pseudo-2D pulse program for the noise blocks |
 | `topspin/INSTALL.md` | install paths, expno map, troubleshooting |
-| `uploader/upload_bundle.py` | Python 3 stdlib-only uploader (+ `--selftest` bundle validator; accepts schema v1.0 and v1.1 bundles) |
+| `uploader/upload_bundle.py` | Python 3 stdlib-only uploader — auto-selects single-shot vs. chunked-resumable upload by size (+ `--selftest` bundle validator; accepts schema v1.0 and v1.1 bundles) |
 | `schema/meta.schema.json` | the metadata contract (JSON Schema, v1.1 — adds the `software` provenance object; v1.0 bundles remain valid) |
-| `server/` | Cloudflare Worker + R2 ingest endpoint (maintainer deploys once — `server/DEPLOY.md`) |
-| `testing/` | real-Jython harness (`run_jython_harness.sh`), Tier-0 desk-test checklist (`tier0_desktest.md`), `static_check.py` |
+| `server/` | Cloudflare Worker + R2 ingest endpoint, single-shot + chunked/resumable (maintainer deploys once — `server/DEPLOY.md`) |
+| `testing/` | real-Jython harness (`run_jython_harness.sh`), Tier-0 desk-test checklist (`tier0_desktest.md`), `static_check.py`, end-to-end upload test against a local Worker (`test_upload_integration.sh`) |
 | `VERSION` | repository release version (mirrored by `SCRIPT_VERSION` in the run script) |
 | `PROTOCOL.md` | the science, the operator questions, and why each exists |
 | `DATA_POLICY.md` | ownership, permitted uses, co-authorship, embargo, and withdrawal terms |
@@ -74,8 +77,9 @@ covers ~10 GB), set the shared token, and hand facilities the endpoint + token p
   availability varies with TopSpin age.
 - Sweep/lock state cannot be commanded portably — it is confirmed by the operator and
   recorded (a hard-won lesson: a field sweep left on smears the line by kHz).
-- Overnight bundles can exceed Cloudflare's per-request body limit on free plans; the
-  uploader reports this case explicitly and the zip is always preserved locally.
+- Bundle size is a non-issue up to 5 GiB: the uploader switches to a chunked,
+  resumable upload for anything over 50 MB (50 MiB parts, well inside every
+  Cloudflare plan's per-request cap). The zip is always preserved locally either way.
 
 ## Provenance
 

@@ -1,5 +1,5 @@
 {
-  "_comment": "Copy this file to config.json in the same directory, then fill in the three values below with what the network maintainer sent your facility. config.json is read by upload_bundle.py and never uploaded.",
+  "_comment": "Copy this file to config.json in the same directory, then fill in the three values below with what the network maintainer sent your facility. config.json is read by upload_bundle.py and never uploaded. endpoint_url may be the /ingest URL or the bare Worker origin; the uploader derives every route (single-shot and chunked) from it.",
   "endpoint_url": "https://spin-noise-ingest.YOUR-SUBDOMAIN.workers.dev/ingest",
   "token": "PASTE-THE-BEARER-TOKEN-FROM-THE-MAINTAINER-HERE",
   "facility_slug": "your-facility-slug",

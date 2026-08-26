@@ -12,6 +12,9 @@ __pycache__/
 *.zip
 testing/synthetic_bundles/
 
+# Chunked-upload resume checkpoints (uploader/upload_bundle.py)
+*.upload-state.json
+
 # Facility uploader config carries the live ingest token -- never commit it
 uploader/config.json
 
