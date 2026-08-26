@@ -63,7 +63,7 @@ except ImportError:  # pragma: no cover - cannot happen on py3, but stay polite
 # Kept in sync with the repository VERSION file (a literal, not a file
 # read, because this script is copied standalone to facility machines);
 # testing/static_check.py enforces the sync.
-UPLOADER_VERSION = "0.3.0-dev"
+UPLOADER_VERSION = "0.3.0"
 
 # Metadata schema versions this uploader understands.  The shipped
 # schema/meta.schema.json describes the CURRENT version (2.0, which made
