@@ -13,6 +13,10 @@
 #      byte-exactly (cmp against the original)
 #   4. --abort cleans up a deliberately orphaned multipart upload
 #   5. unknown upload_id on /upload/part answers 404 JSON
+#   6. the facility-registry suite (testing/test_registry.sh: its own
+#      wrangler dev on port 8788 with both tokens; POST /registry, the
+#      idempotent re-POST, 401/503 paths, /registry/list, /list + /stats
+#      exclusion, and analysis/registry_report.py against the live endpoint)
 #
 # Requirements: node >= 18 (for npx wrangler), python3, curl. No Cloudflare
 # account or login needed -- everything runs locally. The test token is
@@ -219,6 +223,10 @@ CODE="$(printf 'x' | curl -s -o "${WORK}/bogus.json" -w '%{http_code}' -X PUT \
 [ "${CODE}" = "404" ] || { cat "${WORK}/bogus.json"; fail "expected 404 for bogus upload_id, got ${CODE}"; }
 grep -q '"ok": false' "${WORK}/bogus.json" || fail "404 body is not the expected JSON"
 ok "bogus upload_id answered 404 JSON"
+
+step "6. facility-registry suite (testing/test_registry.sh, own server on its own port)"
+"${REPO}/testing/test_registry.sh" || fail "registry suite failed"
+ok "registry suite passed"
 
 PASS=1
 printf '\nALL INTEGRATION TESTS PASSED\n'

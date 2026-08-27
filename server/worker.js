@@ -17,12 +17,21 @@
  *   GET  /health             liveness check (no auth)
  *   GET  /list?limit=50      recent bundle keys + sizes (auth required)
  *   GET  /stats              bundle count + total bytes (auth required)
+ *   POST /registry           store one facility sign-up (REGISTRY_TOKEN auth)
+ *   GET  /registry/list      sign-ups + keys (REGISTRY_TOKEN or INGEST_TOKEN)
  *
  * Design notes (kept deliberately boring — this must run unattended for years):
  *   - No external dependencies. Plain ES-module Worker, one file.
  *   - Auth is a single shared bearer token stored as the INGEST_TOKEN secret.
  *     Facilities are trusted collaborators; the token only gates spam/abuse.
  *     The token value is never logged.
+ *   - The registry route is gated by a SEPARATE secret, REGISTRY_TOKEN, so
+ *     the Google-Form forwarder (Apps Script) never holds the bundle-upload
+ *     token. If REGISTRY_TOKEN is unset, POST /registry answers 503 with a
+ *     setup hint instead of silently accepting or leaking anything.
+ *   - Registry entries live under the registry/ key prefix. /list and /stats
+ *     filter on the "spinnoise_" prefix, so registry/ keys (like the
+ *     receipts/ sidecars) can never appear in the bundle listings.
  *   - Bodies are streamed straight into R2 (request.body is a ReadableStream)
  *     — the Worker never buffers a bundle or a part in memory.
  *   - Integrity, single-shot path: the uploader sends X-Content-SHA256 and R2
@@ -61,6 +70,10 @@ const DEFAULT_LIST_LIMIT = 50;
 const MAX_LIST_LIMIT = 500;
 const RECEIPT_PREFIX = "receipts/";                   // sidecar keys — outside the
                                                       // spinnoise_ list/stats prefix
+const REGISTRY_PREFIX = "registry/";                  // facility sign-ups — also
+                                                      // outside the spinnoise_ prefix
+const MAX_REGISTRY_BYTES = 1024 * 1024;               // one sign-up <= 1 MB
+const MAX_REGISTRY_ENTRIES = 500;                     // /registry/list ceiling
 
 // Bundle names are produced by upload_bundle.py as
 //   spinnoise_<facility_slug>_<YYYYMMDD_HHMMSSZ>_<4hex>.zip
@@ -116,6 +129,71 @@ function checkAuth(request, env) {
     return json({ ok: false, error: "unauthorized" }, 401);
   }
   return null;
+}
+
+/**
+ * Registry write auth: REGISTRY_TOKEN only. A separate secret so the
+ * Google-Form forwarder infrastructure never holds the bundle-upload token.
+ * Fails closed with a setup hint if the secret is unset.
+ */
+function checkRegistryWriteAuth(request, env) {
+  if (!env.REGISTRY_TOKEN) {
+    return json(
+      {
+        ok: false,
+        error:
+          "registry not configured (REGISTRY_TOKEN secret missing) — mint one with " +
+          "`openssl rand -hex 32`, store it with `npx wrangler secret put REGISTRY_TOKEN`, " +
+          "and redeploy; see docs/REGISTRY.md",
+      },
+      503
+    );
+  }
+  const header = request.headers.get("Authorization") || "";
+  const m = header.match(/^Bearer\s+(\S+)$/);
+  if (!m || !tokensMatch(m[1], env.REGISTRY_TOKEN)) {
+    return json({ ok: false, error: "unauthorized" }, 401);
+  }
+  return null;
+}
+
+/**
+ * Registry read auth: REGISTRY_TOKEN or INGEST_TOKEN accepted — the
+ * coordinator holds both; the form forwarder only ever needs to write.
+ */
+function checkRegistryReadAuth(request, env) {
+  if (!env.REGISTRY_TOKEN && !env.INGEST_TOKEN) {
+    return json({ ok: false, error: "server not configured (no token secrets set)" }, 503);
+  }
+  const header = request.headers.get("Authorization") || "";
+  const m = header.match(/^Bearer\s+(\S+)$/);
+  if (!m) return json({ ok: false, error: "unauthorized" }, 401);
+  const viaRegistry = env.REGISTRY_TOKEN ? tokensMatch(m[1], env.REGISTRY_TOKEN) : false;
+  const viaIngest = env.INGEST_TOKEN ? tokensMatch(m[1], env.INGEST_TOKEN) : false;
+  if (!viaRegistry && !viaIngest) {
+    return json({ ok: false, error: "unauthorized" }, 401);
+  }
+  return null;
+}
+
+/** SHA-256 of a byte array as lowercase hex. */
+async function sha256HexOf(bytes) {
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/** Compact UTC stamp for registry keys: 20260827T154501Z. */
+function utcStamp(d) {
+  return d.toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
+}
+
+/** customMetadata values must be small, header-safe ASCII. */
+function metaSafe(value, maxLen = 200) {
+  return String(value == null ? "" : value)
+    .replace(/[^\x20-\x7E]/g, "?")
+    .slice(0, maxLen);
 }
 
 /**
@@ -662,6 +740,160 @@ async function handleGetObject(request, env) {
 }
 
 // ---------------------------------------------------------------------------
+// Route handlers — facility registry (Google-Form sign-ups)
+// ---------------------------------------------------------------------------
+
+/**
+ * POST /registry — store one facility sign-up forwarded from the Google Form
+ * by docs/forms_forwarder.gs. Auth: REGISTRY_TOKEN (write-only secret).
+ *
+ * Body: JSON like {submitted_at, institution, contact_name, contact_email,
+ * spectrometers, probes, city, country, heard_via, consent_contact,
+ * consent_map}. Deliberately LENIENT: anything that parses as a JSON object
+ * under 1 MB and carries non-empty institution + city + country is stored
+ * verbatim — the form will evolve and old forwarder versions must keep
+ * working. Stored as registry/<utc-stamp>_<8-hex-of-body-sha>.json.
+ *
+ * Idempotent on the body sha256: Apps Script retries (and runBackfill
+ * re-runs) re-send byte-identical JSON, which answers ok with the EXISTING
+ * key instead of storing a second copy.
+ */
+async function handleRegistrySubmit(request, env) {
+  const authError = checkRegistryWriteAuth(request, env);
+  if (authError) return authError;
+
+  // Cheap header-level size gate first, then a hard check on the real bytes
+  // (Apps Script always sends Content-Length, but be defensive).
+  const lenHeader = request.headers.get("Content-Length");
+  const contentLength = lenHeader === null ? NaN : Number(lenHeader);
+  if (Number.isFinite(contentLength) && contentLength > MAX_REGISTRY_BYTES) {
+    return json({ ok: false, error: `sign-up exceeds ${MAX_REGISTRY_BYTES} bytes (1 MB) limit` }, 413);
+  }
+
+  const bodyBytes = new Uint8Array(await request.arrayBuffer());
+  if (bodyBytes.byteLength === 0) {
+    return json({ ok: false, error: "empty request body" }, 400);
+  }
+  if (bodyBytes.byteLength > MAX_REGISTRY_BYTES) {
+    return json({ ok: false, error: `sign-up exceeds ${MAX_REGISTRY_BYTES} bytes (1 MB) limit` }, 413);
+  }
+
+  let submission;
+  try {
+    submission = JSON.parse(new TextDecoder().decode(bodyBytes));
+  } catch (_) {
+    return json({ ok: false, error: "request body must be JSON" }, 400);
+  }
+  if (submission === null || typeof submission !== "object" || Array.isArray(submission)) {
+    return json({ ok: false, error: "request body must be a JSON object" }, 400);
+  }
+
+  // Minimal validation — these three drive the coverage map and the
+  // coordinator's table; everything else is stored as it arrived.
+  const missing = ["institution", "city", "country"].filter(
+    (k) => !(typeof submission[k] === "string" && submission[k].trim().length > 0)
+  );
+  if (missing.length > 0) {
+    return json(
+      { ok: false, error: "sign-up must carry non-empty string fields: " + missing.join(", ") },
+      400
+    );
+  }
+
+  // Idempotency: the key embeds the first 8 hex of the body sha256, so a
+  // byte-identical re-send is findable by suffix scan (the registry stays
+  // O(dozens of entries); one or two list() calls).
+  const sha256hex = await sha256HexOf(bodyBytes);
+  const sha8 = sha256hex.slice(0, 8);
+  const suffix = "_" + sha8 + ".json";
+  let cursor = undefined;
+  do {
+    const page = await env.SPIN_NOISE.list({ prefix: REGISTRY_PREFIX, limit: 1000, cursor });
+    for (const o of page.objects) {
+      if (!o.key.endsWith(suffix)) continue;
+      // 8 hex chars could collide in principle; confirm the full sha.
+      const head = await env.SPIN_NOISE.head(o.key);
+      const storedSha = head && head.customMetadata && head.customMetadata.sha256;
+      if (storedSha === sha256hex) {
+        return json({
+          ok: true,
+          key: o.key,
+          sha256: sha256hex,
+          duplicate: true,
+          note: "identical sign-up already stored (idempotent re-send)",
+        });
+      }
+    }
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor);
+
+  const receivedAt = new Date();
+  const country = (request.cf && request.cf.country) || "unknown"; // country only — never the IP
+  const key = REGISTRY_PREFIX + utcStamp(receivedAt) + "_" + sha8 + ".json";
+
+  try {
+    await env.SPIN_NOISE.put(key, bodyBytes, {
+      httpMetadata: { contentType: "application/json" },
+      customMetadata: {
+        sha256: sha256hex,
+        receivedAt: receivedAt.toISOString(),
+        uploadCountry: country,
+        institution: metaSafe(submission.institution, 120),
+        city: metaSafe(submission.city, 80),
+        declaredCountry: metaSafe(submission.country, 80),
+      },
+    });
+  } catch (err) {
+    return json(
+      { ok: false, error: "storage error (nothing stored): " + String((err && err.message) || err) },
+      502
+    );
+  }
+
+  return json({ ok: true, key, sha256: sha256hex, receivedAt: receivedAt.toISOString() }, 201);
+}
+
+/**
+ * GET /registry/list?limit=N — all stored sign-ups with their keys and
+ * parsed bodies. Auth: REGISTRY_TOKEN or INGEST_TOKEN (the coordinator holds
+ * both). Consumed by analysis/registry_report.py.
+ */
+async function handleRegistryList(request, env) {
+  const authError = checkRegistryReadAuth(request, env);
+  if (authError) return authError;
+
+  const url = new URL(request.url);
+  let limit = parseInt(url.searchParams.get("limit") || String(MAX_REGISTRY_ENTRIES), 10);
+  if (!Number.isFinite(limit) || limit < 1) limit = MAX_REGISTRY_ENTRIES;
+  if (limit > MAX_REGISTRY_ENTRIES) limit = MAX_REGISTRY_ENTRIES;
+
+  const entries = [];
+  let truncated = false;
+  let cursor = undefined;
+  do {
+    const page = await env.SPIN_NOISE.list({ prefix: REGISTRY_PREFIX, limit: 1000, cursor });
+    for (const o of page.objects) {
+      if (entries.length >= limit) {
+        truncated = true;
+        break;
+      }
+      const entry = { key: o.key, size: o.size, uploaded: o.uploaded };
+      try {
+        const obj = await env.SPIN_NOISE.get(o.key);
+        if (obj !== null) entry.submission = JSON.parse(await obj.text());
+      } catch (_) {
+        entry.submission = null;
+        entry.note = "stored body is not parseable JSON";
+      }
+      entries.push(entry);
+    }
+    cursor = page.truncated && !truncated ? page.cursor : undefined;
+  } while (cursor);
+
+  return json({ ok: true, count: entries.length, truncated, entries });
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -681,6 +913,8 @@ export default {
       if (method === "GET" && path === "/health") return await handleHealth(env);
       if (method === "GET" && path === "/list") return await handleList(request, env);
       if (method === "GET" && path === "/stats") return await handleStats(request, env);
+      if (method === "POST" && path === "/registry") return await handleRegistrySubmit(request, env);
+      if (method === "GET" && path === "/registry/list") return await handleRegistryList(request, env);
     } catch (err) {
       // Last-ditch guard so a bug never leaks a stack trace to the client.
       return json({ ok: false, error: "internal error: " + String((err && err.message) || err) }, 500);
@@ -702,6 +936,8 @@ export default {
           "GET /health",
           "GET /list?limit=50",
           "GET /stats",
+          "POST /registry",
+          "GET /registry/list",
         ],
       },
       405
