@@ -47,6 +47,24 @@ openssl rand -hex 32
 npx wrangler secret put INGEST_TOKEN
 ```
 
+## 2b. Set the registry token (the facility sign-up forwarder's secret)
+
+The `POST /registry` route (Google-Form sign-ups, forwarded by
+`docs/forms_forwarder.gs`) is gated by a **separate** secret, so the form
+infrastructure never holds the bundle-upload token. Same recipe, different
+name — and until this secret exists the route answers 503 (everything else
+is unaffected):
+
+```sh
+openssl rand -hex 32                      # mint a fresh, SEPARATE token
+npx wrangler secret put REGISTRY_TOKEN    # paste it
+npx wrangler deploy                       # redeploy so the secret takes effect
+```
+
+The value goes into exactly one consumer: the CONFIG block of the Apps
+Script pasted into the Form (setup walkthrough: `docs/REGISTRY.md`).
+`GET /registry/list` accepts either token — the coordinator holds both.
+
 ## 3. Deploy
 
 ```sh
@@ -97,7 +115,9 @@ code changes; just update `endpoint_url` in the facility configs.
 
 ## The upload API (what the Worker serves)
 
-All routes except `/health` require `Authorization: Bearer <INGEST_TOKEN>`.
+All routes except `/health` require `Authorization: Bearer <INGEST_TOKEN>`,
+except the two registry routes: `POST /registry` takes `REGISTRY_TOKEN`
+only, and `GET /registry/list` takes either token.
 
 | Route | Purpose |
 |---|---|
@@ -110,6 +130,8 @@ All routes except `/health` require `Authorization: Bearer <INGEST_TOKEN>`.
 | `GET /health` | liveness (no auth) |
 | `GET /list?limit=50` | recent bundles |
 | `GET /stats` | count + total bytes |
+| `POST /registry` | store one facility sign-up (JSON ≤ 1 MB with `institution` + `city` + `country`; idempotent on the body sha256) — `REGISTRY_TOKEN` auth; 503 until that secret is set |
+| `GET /registry/list` | sign-ups with keys + parsed bodies — `REGISTRY_TOKEN` **or** `INGEST_TOKEN`; consumed by `analysis/registry_report.py` |
 
 Size rules: single-shot formally caps at 2 GiB but Cloudflare's edge cuts
 bodies at 100 MB (Free/Pro) first — hence the 50 MB guidance; the chunked
@@ -271,8 +293,12 @@ runs the real Worker under `wrangler dev --local` (workerd + a local R2
 simulation), uploads a small bundle through `/ingest` and a ~160 MiB bundle
 through the chunked path with the real uploader, kill -9's the uploader
 mid-transfer and proves the resume, verifies byte-exact retrieval via
-`GET /object`, and exercises `--abort`. Run it after any change to
-`worker.js` or `upload_bundle.py`.
+`GET /object`, and exercises `--abort`. Its final step runs the
+facility-registry suite (`testing/test_registry.sh`, also runnable on its
+own): the 503-until-configured path, a synthetic sign-up, the idempotent
+re-POST, the 401 paths, `/registry/list`, the `/list`+`/stats` exclusion,
+and `analysis/registry_report.py` against the live local endpoint. Run it
+after any change to `worker.js` or `upload_bundle.py`.
 
 ---
 

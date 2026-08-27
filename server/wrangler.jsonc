@@ -22,5 +22,8 @@
 
   // The shared ingest token is a SECRET, not a var — set it with:
   //   npx wrangler secret put INGEST_TOKEN
-  // Never put the token value in this file.
+  // The facility-registry route uses a SEPARATE secret (so the Google-Form
+  // forwarder never holds the bundle-upload token):
+  //   npx wrangler secret put REGISTRY_TOKEN
+  // Never put either token value in this file.
 }
