@@ -39,6 +39,12 @@ pluggable through reader adapters (see VendorReader below):
                package B).  Delegates format parsing to
                vendors/magritek/magritek_reader.py; see MagritekReader
                and vendors/magritek/README.md (validation checklist).
+    agilent  : IMPLEMENTED as a DRAFT pending partner-facility validation
+               (Agilent/Varian VnmrJ + OpenVnmrJ lineage).  Delegates
+               format parsing to vendors/agilent/agilent_reader.py
+               (binary fid + procpar per nmrglue's varian reader); see
+               AgilentReader and vendors/agilent/README.md (operator
+               protocol + validation checklist).
 
 Same portability rules as the uploader: Python 3 STANDARD LIBRARY ONLY,
 nothing newer than 3.6 (facility workstations).  The packer never
@@ -59,6 +65,14 @@ on real hardware/software before the corresponding reader is trusted):
     (https://nmrglue.readthedocs.io/en/latest/reference/spinsolve.html)
     documents the file family (acqu.par, data.1d/fid.1d, proc.par under
     SpinsolveExpert); exact fields must be confirmed on a bench.
+  * Agilent/Varian: fid binary layout and procpar text format follow
+    nmrglue's varian reader (nmrglue/fileio/varian.py, BSD-3-Clause,
+    https://github.com/jjhelmus/nmrglue) -- but unlike the JEOL path, NO
+    public corpus of raw .fid directories was found to verify against,
+    so the whole format implementation awaits real VnmrJ 3.2 output
+    (vendors/agilent/README.md checklist).  Receiver-gain ('gain', dB)
+    range/step per console model, 'tof' offset convention, and procpar
+    timestamp semantics are UNVERIFIED.
   * Bruker: nothing pending -- acqus parameter names used here (TD,
     SW_h, SFO1, BF1, O1, RG, NS, PULPROG, BYTORDA, DTYPA, GRPDLY) are
     standard JCAMP-DX labels already exercised by this repository's
@@ -681,10 +695,267 @@ class MagritekReader(VendorReader):
         return block, warnings
 
 
+class AgilentReader(VendorReader):
+    """Agilent/Varian (VnmrJ / OpenVnmrJ) datasets: one VnmrJ save
+    directory per experiment -- <name>.fid/ holding procpar + fid (svf()
+    writes procpar, text, log, and fid; the packer packs all four) --
+    named per the Tier-1 operator checklist (vendors/agilent/README.md):
+    a numeric prefix maps each directory onto the Bruker expno plan,
+    e.g. 11_sn_ref_open.fid, 12_sn_noise.fid.
+
+    DRAFT PENDING PARTNER-FACILITY VALIDATION (Boyd Goodson, SIU
+    Carbondale: 400 MHz Agilent DD2, VnmrJ 3.2).  Parsing is delegated
+    to vendors/agilent/agilent_reader.py; the fid/procpar layout follows
+    nmrglue's varian reader (BSD-3-Clause) but -- unlike the JEOL path --
+    has NOT yet been checked against real instrument output (no public
+    corpus of raw .fid directories was found).  Still UNVERIFIED and
+    awaiting the partner session (vendors/agilent/README.md checklist):
+    'gain' units/range/linearity on the DD2, 'tof' offset convention,
+    transmitter silence at pw=0, procpar timestamp semantics, and
+    whatever a live VnmrJ 3.2 writes that the docs did not teach us.
+
+    Parameter mapping (README.md table):
+      td   = np                (Varian np is TOTAL points, re+im
+                                interleaved -- the same counting
+                                convention as Bruker TD; at = np/(2*sw))
+      td1_rows = fid nblocks   (arrayed acquisitions land as blocks; 1
+                                for the Tier-1 protocol's plain 1Ds)
+      sw_hz = sw               (Hz)
+      rg   = 10^(gain/20)      (gain is dB; meta 'rg' is the Bruker-
+                                comparable LINEAR amplitude convention,
+                                same mapping the Magritek adapter uses;
+                                raw dB kept in instrument.agilent)
+      o1_hz = tof              (transmitter offset, Hz assumed --
+                                sign/reference convention UNVERIFIED)
+      ns   = nt
+      aq_s_per_row = at        (s; falls back to np/(2*sw))
+      h1_freq_mhz = sfrq       (MHz) when tn is the proton channel
+    """
+
+    name = "agilent"
+
+    _PREFIX_RE = re.compile(r"^(\d+)_")
+
+    def __init__(self):
+        self._mod = None
+        self._warnings = []
+
+    def _reader(self):
+        """Lazy-import vendors/agilent/agilent_reader.py (stdlib)."""
+        if self._mod is None:
+            import importlib.util
+            here = os.path.dirname(os.path.abspath(__file__))
+            path = os.path.abspath(os.path.join(
+                here, "..", "vendors", "agilent", "agilent_reader.py"))
+            if not os.path.isfile(path):
+                raise PackError("vendors/agilent/agilent_reader.py not "
+                                "found (looked at %s) -- the Agilent "
+                                "adapter needs the repository checkout, "
+                                "not a standalone packer copy" % path)
+            spec = importlib.util.spec_from_file_location("snn_agilent",
+                                                          path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            self._mod = mod
+        return self._mod
+
+    def discover_experiments(self, data_dir):
+        try:
+            names = sorted(os.listdir(data_dir))
+        except OSError as exc:
+            raise PackError("cannot list data directory %s: %s"
+                            % (data_dir, exc))
+        candidates = []
+        for n in names:
+            d = os.path.join(data_dir, n)
+            if not os.path.isdir(d):
+                continue
+            if not n.lower().endswith(".fid"):
+                continue
+            if os.path.isfile(os.path.join(d, "procpar")) \
+                    or os.path.isfile(os.path.join(d, "fid")):
+                candidates.append(n)
+        if not candidates:
+            raise PackError(
+                "no Agilent/Varian experiments found under %s -- expected "
+                "one <name>.fid directory per experiment (each holding "
+                "procpar + fid), named per the Tier-1 checklist (e.g. "
+                "11_sn_ref_open.fid); see vendors/agilent/README.md"
+                % data_dir)
+        prefixed = {}
+        unprefixed = []
+        for n in candidates:
+            m = self._PREFIX_RE.match(n)
+            if m:
+                prefixed.setdefault(int(m.group(1)), []).append(n)
+            else:
+                unprefixed.append(n)
+        out = []
+        if prefixed and not unprefixed:
+            for expno in sorted(prefixed):
+                group = prefixed[expno]
+                if len(group) > 1:
+                    raise PackError(
+                        "expno prefix %d is claimed by multiple "
+                        "directories (%s) -- the Tier-1 naming convention "
+                        "requires one experiment per prefix"
+                        % (expno, ", ".join(group)))
+                out.append((expno, os.path.join(data_dir, group[0])))
+        else:
+            self._warnings.append(
+                "Agilent .fid directories lack the NN_ expno prefix of "
+                "the Tier-1 checklist; assigning positional expnos 1..%d "
+                "in sorted directory-name order" % len(candidates))
+            for i, n in enumerate(sorted(candidates), start=1):
+                out.append((i, os.path.join(data_dir, n)))
+        return out
+
+    def read_experiment(self, dirpath):
+        mod = self._reader()
+        try:
+            result = mod.read_experiment_dir(dirpath)
+        except (mod.AgilentReadError, OSError, ValueError) as exc:
+            raise PackError("cannot parse Agilent experiment %s: %s"
+                            % (dirpath, exc))
+        self._warnings.extend(result["warnings"])
+        pp = result["procpar"]
+        fid = result["fid"]
+        sc = mod.scalar
+        found = {}
+        np_pts = sc(pp, "np")
+        if np_pts is None and fid and fid.get("np_total_points"):
+            np_pts = fid["np_total_points"]
+        if isinstance(np_pts, (int, float)) and np_pts >= 1:
+            # np counts real+imag points -- same convention as Bruker TD
+            found["td"] = int(np_pts)
+        if fid and isinstance(fid.get("nblocks"), int) \
+                and fid["nblocks"] >= 1:
+            found["td1_rows"] = fid["nblocks"]
+        else:
+            found["td1_rows"] = 1
+        sw = sc(pp, "sw")
+        if isinstance(sw, (int, float)) and sw > 0:
+            found["sw_hz"] = float(sw)
+        at = sc(pp, "at")
+        if isinstance(at, (int, float)) and at > 0:
+            found["aq_s_per_row"] = float(at)
+        elif "td" in found and "sw_hz" in found:
+            found["aq_s_per_row"] = found["td"] / (2.0 * found["sw_hz"])
+        gain = sc(pp, "gain")
+        if isinstance(gain, (int, float)):
+            # 'gain' is receiver gain in dB (VnmrJ parameter docs); the
+            # meta 'rg' convention is Bruker-comparable LINEAR amplitude,
+            # so rg = 10^(dB/20) (same mapping as the Magritek adapter).
+            # Range/step/linearity on a given console are UNVERIFIED
+            # (partner checklist item 1); raw dB goes to the instrument
+            # block.
+            found["rg"] = 10.0 ** (float(gain) / 20.0)
+            found["rx_gain_db"] = float(gain)
+        nt = sc(pp, "nt")
+        if isinstance(nt, (int, float)) and nt >= 1:
+            found["ns"] = int(nt)
+        seqfil = sc(pp, "seqfil") or sc(pp, "pslabel")
+        if isinstance(seqfil, str) and seqfil:
+            found["pulprog"] = seqfil
+        sfrq = sc(pp, "sfrq")
+        tn = sc(pp, "tn")
+        if isinstance(sfrq, (int, float)) and sfrq > 0 \
+                and isinstance(tn, str) and tn.upper() in ("H1", "1H",
+                                                           "PROTON"):
+            found["h1_freq_mhz"] = float(sfrq)
+        # o1 analog: tof (transmitter offset). UNVERIFIED(2) that tof is
+        # the exact analog of Bruker O1 (sign and reference convention);
+        # recorded verbatim in Hz, override in answers.json if wrong.
+        tof = sc(pp, "tof")
+        if isinstance(tof, (int, float)):
+            found["o1_hz"] = float(tof)
+        if fid is not None:
+            found["fid_structure_ok"] = bool(fid.get("structure_ok"))
+        found["_format"] = "varian-fid"
+        return found
+
+    def instrument_block(self, answers, discovered):
+        warnings = list(self._warnings)
+        self._warnings = []
+        ans_inst = answers.get("instrument", {})
+        if not isinstance(ans_inst, dict):
+            ans_inst = {}
+        vnmrj_version = ans_inst.get("vnmrj_version")
+        if not isinstance(vnmrj_version, str) or not vnmrj_version:
+            raise PackError(
+                "answers.json is missing instrument.vnmrj_version (the "
+                "VnmrJ/OpenVnmrJ software version, e.g. \"3.2\"; no "
+                "machine-readable source in procpar is verified yet, so "
+                "enter it by hand)")
+        gains = [d["rx_gain_db"] for d in discovered.values()
+                 if isinstance(d.get("rx_gain_db"), float)]
+        # verbatim dB; the noise block runs at the highest, most relevant
+        # gain (same assumption the Magritek adapter documents)
+        rg = max(gains) if gains else None
+        bad_fids = sorted(e for e, d in discovered.items()
+                          if d.get("fid_structure_ok") is False)
+        if bad_fids:
+            warnings.append("fid in expno(s) %s did not match the "
+                            "nmrglue-documented header arithmetic "
+                            "(UNVERIFIED format variant?) -- packed "
+                            "verbatim; verify at the partner session"
+                            % bad_fids)
+        notes = ans_inst.get("field_state_notes", "")
+        if not notes:
+            warnings.append(
+                "instrument.field_state_notes not answered -- please "
+                "describe the lock/z0 state during the noise block "
+                "(the Agilent analog of the Bruker BSMS sweep "
+                "confirmation)")
+        block = {
+            "vnmrj_version": str(vnmrj_version),
+            "data_format": "varian-fid",
+            "receiver_gain_db": rg,
+            "field_state_notes": notes,
+        }
+        if ans_inst.get("spectrometer_model"):
+            block["spectrometer_model"] = ans_inst["spectrometer_model"]
+        return block, warnings
+
+
+
+class NanalysisReader(VendorReader):
+    """Delegates to vendors/nanalysis/nanalysis_reader.py (see there)."""
+    name = "nanalysis"
+
+    def __init__(self):
+        self._impl = None
+
+    def _get(self):
+        if self._impl is None:
+            import importlib.util
+            here = os.path.dirname(os.path.abspath(__file__))
+            path = os.path.abspath(os.path.join(
+                here, "..", "vendors", "nanalysis", "nanalysis_reader.py"))
+            if not os.path.isfile(path):
+                raise PackError("vendors/nanalysis/nanalysis_reader.py "
+                                "not found (looked at %s)" % path)
+            spec = importlib.util.spec_from_file_location("snn_nanalysis", path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            self._impl = mod.NanalysisReader(pack_error=PackError)
+        return self._impl
+
+    def discover_experiments(self, data_dir):
+        return self._get().discover_experiments(data_dir)
+
+    def read_experiment(self, dirpath):
+        return self._get().read_experiment(dirpath)
+
+    def instrument_block(self, answers, discovered):
+        return self._get().instrument_block(answers, discovered)
+
 VENDOR_READERS = {
     "bruker": BrukerReader,
     "jeol": JeolReader,
     "magritek": MagritekReader,
+    "agilent": AgilentReader,
+    "nanalysis": NanalysisReader,
 }
 
 

@@ -13,7 +13,12 @@ fed by the Google-Form forwarder in docs/forms_forwarder.gs) and renders:
   (c) best-effort sidereal-coverage numbers for the facilities whose city
       resolves in a small built-in gazetteer -- the same variance-inflation
       metric as proposals/geo_coverage.py (needs numpy; silently skipped
-      without it, or when no city resolves).
+      without it, or when no city resolves);
+  (d) with --update-map PATH: rewrites the facility-map sentinel blocks
+      baked into the website's index.html -- consent_map == true facilities
+      ONLY, institution + city only (never contact names/emails), city-level
+      gazetteer coordinates. Idempotent; refuses if the sentinels are
+      missing; --dry-run prints the would-be blocks instead of writing.
 
 Endpoint + token resolution, in order:
   1. --endpoint / --token flags;
@@ -31,8 +36,10 @@ Contact: John W. Blanchard <jwbquantum@gmail.com>.
 
 import argparse
 import datetime
+import html as html_escape
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -71,6 +78,7 @@ GAZETTEER = {
     "madison": (43.1, -89.4), "minneapolis": (45.0, -93.3),
     "tallahassee": (30.4, -84.3), "gainesville": (29.7, -82.3),
     "carbondale": (37.7, -89.2),       # Southern Illinois University
+    "davis": (38.5, -121.7), "miami": (25.8, -80.2),
     "college station": (30.6, -96.3), "houston": (29.8, -95.4),
     "ithaca": (42.4, -76.5), "baltimore": (39.3, -76.6), "bethesda": (39.0, -77.1),
     "ann arbor": (42.3, -83.7), "columbus": (40.0, -83.0),
@@ -168,7 +176,8 @@ def resolve_endpoint_token(args):
 def fetch_registry(base, token):
     req = urllib.request.Request(
         base + "/registry/list",
-        headers={"Authorization": "Bearer " + token},
+        headers={"Authorization": "Bearer " + token,
+                 "User-Agent": "spin-noise-registry-report/0.3.0"},
     )
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
@@ -321,6 +330,101 @@ def coverage_section(facilities):
 
 
 # ---------------------------------------------------------------------------
+# Website facility map (--update-map): rewrite the sentinel blocks baked into
+# website/index.html. Static generation, privacy by construction:
+#   * only facilities with consent_map == True (strict boolean) are placed;
+#   * only institution + city ever reach the page -- never contact names or
+#     emails, which exist in the registry but are filtered out here;
+#   * coordinates are the gazetteer's city-level 1-decimal-degree values.
+# The page's SVG is equirectangular with viewBox "0 14 1000 403":
+#   x = (lon + 180) / 360 * 1000 ;  y = (90 - lat) / 180 * 500.
+# ---------------------------------------------------------------------------
+
+MAP_DATA_START = "<!-- REGISTRY-MAP-DATA-START -->"
+MAP_DATA_END = "<!-- REGISTRY-MAP-DATA-END -->"
+MAP_CAPTION_START = "<!-- REGISTRY-MAP-CAPTION-START -->"
+MAP_CAPTION_END = "<!-- REGISTRY-MAP-CAPTION-END -->"
+
+
+def latlon_to_svg(lat, lon):
+    return (round((lon + 180.0) / 360.0 * 1000.0, 1),
+            round((90.0 - lat) / 180.0 * 500.0, 1))
+
+
+def plural(n, noun):
+    return "%d %s%s" % (n, noun, "" if n == 1 else "s")
+
+
+def build_map_markers(facilities):
+    """(marker_lines, caption_text, n_placed, skipped_institutions).
+    Filters to consent_map == True ONLY and emits institution + city only."""
+    consented = [f for f in facilities if f.get("consent_map") is True]
+    markers, skipped, fields = [], [], set()
+    for f in sorted(consented, key=lambda f: str(f.get("institution", ""))):
+        coords = resolve_coords(f)
+        if coords is None:
+            skipped.append(str(f.get("institution", "?")))
+            continue
+        x, y = latlon_to_svg(*coords)
+        label = html_escape.escape(
+            "%s — %s" % (str(f.get("institution", "")).strip(),
+                              str(f.get("city", "")).strip()))
+        markers.append(
+            '      <g class="fac"><title>%s</title>'
+            '<circle class="fac-glow" cx="%g" cy="%g" r="7"/>'
+            '<circle class="fac-dot" cx="%g" cy="%g" r="2.5"/></g>'
+            % (label, x, y, x, y))
+        for m in re.findall(r"(\d+(?:\.\d+)?)\s*mhz", str(f.get("spectrometers", "")),
+                            re.IGNORECASE):
+            fields.add(float(m))
+    n_placed = len(markers)
+    caption = "%s &#183; %s &#183; updated %s" % (
+        "1 facility" if n_placed == 1 else "%d facilities" % n_placed,
+        plural(len(fields), "distinct field"),
+        datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d"))
+    return markers, caption, n_placed, skipped
+
+
+def splice_sentinels(text, start, end, replacement, path):
+    """Replace what sits between one start/end sentinel pair (sentinels kept).
+    Refuses (exits) unless exactly one well-ordered pair exists."""
+    if text.count(start) != 1 or text.count(end) != 1:
+        sys.exit("ERROR: %s: expected exactly one %s / %s sentinel pair -- "
+                 "refusing to touch the file." % (path, start, end))
+    i = text.index(start) + len(start)
+    j = text.index(end)
+    if j < i:
+        sys.exit("ERROR: %s: sentinel %s precedes %s -- refusing." % (path, end, start))
+    return text[:i] + replacement + text[j:]
+
+
+def update_map(html_path, facilities, dry_run=False):
+    markers, caption, n_placed, skipped = build_map_markers(facilities)
+    data_block = ("\n" + "\n".join(markers) + "\n      ") if markers else "\n      "
+    try:
+        with open(html_path, "r", encoding="utf-8") as fh:
+            page = fh.read()
+    except OSError as exc:
+        sys.exit("ERROR: cannot read %s: %s" % (html_path, exc))
+    page = splice_sentinels(page, MAP_DATA_START, MAP_DATA_END, data_block, html_path)
+    page = splice_sentinels(page, MAP_CAPTION_START, MAP_CAPTION_END, caption, html_path)
+    print("\nFacility map: %d marker(s) (consent_map only; institution + city only)"
+          % n_placed)
+    for inst in skipped:
+        print("  %s: city not in the gazetteer -- consented but NOT placed"
+              % first_line(inst, 40))
+    if dry_run:
+        print("--dry-run: would write to %s:" % html_path)
+        print(MAP_DATA_START + data_block + MAP_DATA_END)
+        print(MAP_CAPTION_START + caption + MAP_CAPTION_END)
+        return
+    with open(html_path, "w", encoding="utf-8") as fh:
+        fh.write(page)
+    print("rewrote sentinel blocks in %s (caption: %s)"
+          % (html_path, caption.replace("&#183;", "·")))
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -335,6 +439,13 @@ def main():
                     "(overrides config/env)")
     ap.add_argument("--out", default=".", help="directory for "
                     "registry_facilities.json (default: current directory)")
+    ap.add_argument("--update-map", metavar="INDEX_HTML",
+                    help="rewrite the facility-map sentinel blocks in the "
+                    "given website index.html (consent_map facilities only; "
+                    "institution + city only, never contact details)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="with --update-map: print the would-be sentinel "
+                    "blocks instead of writing the file")
     args = ap.parse_args()
 
     base, token = resolve_endpoint_token(args)
@@ -375,6 +486,9 @@ def main():
         json.dump(payload, fh, indent=2)
         fh.write("\n")
     print("\nwrote %s" % out_path)
+
+    if args.update_map:
+        update_map(args.update_map, facilities, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":

@@ -1,352 +1,663 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://spin-noise-network.org/schema/meta.schema.json",
-  "title": "spin-noise network bundle metadata (meta.json), schema version 2.0",
-  "description": "Metadata record placed at the root of every spin-noise bundle zip. Written by topspin/spin_noise_run.py (Bruker, schema 1.2) or packer/pack_bundle.py (any vendor, schema 2.0); validated by uploader/upload_bundle.py --selftest. This file describes schema version 2.0, which makes the contract vendor-neutral: a required top-level 'vendor' enum plus a vendor-namespaced 'instrument' object hold everything instrument-specific (Bruker: TopSpin version + BSMS sweep state; JEOL and Magritek blocks are drafts pending partner/bench validation), while the 'spectrometer' common core keeps only vendor-neutral physics (frequency, field, probe class, temperatures). BACKWARD COMPATIBILITY: bundles declaring 1.0/1.1/1.2 remain valid and are validated against their own vintage of the contract (the uploader re-tightens the v1.x requireds: 'topspin_version' back into spectrometer, 'lock_sweep_confirmed_off' back into environment) with an ABSENT vendor treated as 'bruker'. History: 1.0 = initial contract; 1.1 = added the required 'software' object; 1.2 = added the optional 'clock_audit' object; 2.0 = vendor enum + vendor-namespaced 'instrument' blocks (Bruker-specific fields moved out of the common core). NOTE: the uploader ships a deliberately minimal built-in validator (type / required / enum / const / pattern / items only) so this schema intentionally avoids $ref, allOf, conditionals, and other advanced keywords; the rule 'instrument must contain the block named by vendor' cannot be expressed in that subset and is enforced in uploader/packer code instead.",
-  "type": "object",
-  "required": [
-    "schema_version",
-    "program_version",
-    "software",
-    "created_utc",
-    "local_timezone_offset_min",
-    "vendor",
-    "facility",
-    "spectrometer",
-    "instrument",
-    "sample",
-    "environment",
-    "calibration",
-    "experiments",
-    "checksums"
-  ],
-  "properties": {
+ "$schema": "http://json-schema.org/draft-07/schema#",
+ "$id": "https://spin-noise-network.org/schema/meta.schema.json",
+ "title": "spin-noise network bundle metadata (meta.json), schema version 2.0",
+ "description": "Metadata record placed at the root of every spin-noise bundle zip. Written by topspin/spin_noise_run.py (Bruker, schema 1.2) or packer/pack_bundle.py (any vendor, schema 2.0); validated by uploader/upload_bundle.py --selftest. This file describes schema version 2.0, which makes the contract vendor-neutral: a required top-level 'vendor' enum plus a vendor-namespaced 'instrument' object hold everything instrument-specific (Bruker: TopSpin version + BSMS sweep state; JEOL and Magritek blocks are drafts pending partner/bench validation), while the 'spectrometer' common core keeps only vendor-neutral physics (frequency, field, probe class, temperatures). BACKWARD COMPATIBILITY: bundles declaring 1.0/1.1/1.2 remain valid and are validated against their own vintage of the contract (the uploader re-tightens the v1.x requireds: 'topspin_version' back into spectrometer, 'lock_sweep_confirmed_off' back into environment) with an ABSENT vendor treated as 'bruker'. History: 1.0 = initial contract; 1.1 = added the required 'software' object; 1.2 = added the optional 'clock_audit' object; 2.0 = vendor enum + vendor-namespaced 'instrument' blocks (Bruker-specific fields moved out of the common core). NOTE: the uploader ships a deliberately minimal built-in validator (type / required / enum / const / pattern / items only) so this schema intentionally avoids $ref, allOf, conditionals, and other advanced keywords; the rule 'instrument must contain the block named by vendor' cannot be expressed in that subset and is enforced in uploader/packer code instead.",
+ "type": "object",
+ "required": [
+  "schema_version",
+  "program_version",
+  "software",
+  "created_utc",
+  "local_timezone_offset_min",
+  "vendor",
+  "facility",
+  "spectrometer",
+  "instrument",
+  "sample",
+  "environment",
+  "calibration",
+  "experiments",
+  "checksums"
+ ],
+ "properties": {
+  "schema_version": {
+   "type": "string",
+   "const": "2.0",
+   "description": "Version of this metadata schema. Bump only with coordinated uploader/server changes. History: 1.0 = initial contract; 1.1 = added the required 'software' object; 1.2 = added the optional 'clock_audit' object; 2.0 = vendor-neutral core (required 'vendor' enum + vendor-namespaced 'instrument' blocks). 1.x bundles remain valid; absent vendor means 'bruker'."
+  },
+  "program_version": {
+   "type": "string",
+   "description": "Version string of the program that produced this bundle (spin_noise_run.py or pack_bundle.py; kept for 1.0 continuity, duplicates software.script_version)."
+  },
+  "software": {
+   "type": "object",
+   "required": [
+    "script_version",
+    "schema_version"
+   ],
+   "properties": {
+    "script_version": {
+     "type": "string",
+     "description": "Version constant of the script that wrote this bundle (SCRIPT_VERSION of spin_noise_run.py, or PACKER_VERSION of pack_bundle.py); matches the repository VERSION file for released code."
+    },
     "schema_version": {
-      "type": "string",
-      "const": "2.0",
-      "description": "Version of this metadata schema. Bump only with coordinated uploader/server changes. History: 1.0 = initial contract; 1.1 = added the required 'software' object; 1.2 = added the optional 'clock_audit' object; 2.0 = vendor-neutral core (required 'vendor' enum + vendor-namespaced 'instrument' blocks). 1.x bundles remain valid; absent vendor means 'bruker'."
+     "type": "string",
+     "description": "Schema version the writing script targeted; duplicates the top-level schema_version for self-contained provenance."
     },
-    "program_version": {
-      "type": "string",
-      "description": "Version string of the program that produced this bundle (spin_noise_run.py or pack_bundle.py; kept for 1.0 continuity, duplicates software.script_version)."
+    "script_sha256": {
+     "type": "string",
+     "pattern": "^(sha256:[0-9a-f]{64}|unavailable)$",
+     "description": "SHA-256 of the running writer script file, computed at runtime (works without git on facility machines); 'unavailable' if it could not be determined. Optional."
     },
-    "software": {
-      "type": "object",
-      "required": ["script_version", "schema_version"],
-      "properties": {
-        "script_version": {
-          "type": "string",
-          "description": "Version constant of the script that wrote this bundle (SCRIPT_VERSION of spin_noise_run.py, or PACKER_VERSION of pack_bundle.py); matches the repository VERSION file for released code."
-        },
-        "schema_version": {
-          "type": "string",
-          "description": "Schema version the writing script targeted; duplicates the top-level schema_version for self-contained provenance."
-        },
-        "script_sha256": {
-          "type": "string",
-          "pattern": "^(sha256:[0-9a-f]{64}|unavailable)$",
-          "description": "SHA-256 of the running writer script file, computed at runtime (works without git on facility machines); 'unavailable' if it could not be determined. Optional."
-        },
-        "writer": {
-          "type": "string",
-          "description": "Which program wrote the bundle, e.g. 'topspin/spin_noise_run.py' or 'packer/pack_bundle.py'. Optional (new in 2.0)."
-        },
-        "run_mode": {
-          "type": "string",
-          "enum": ["live", "simulate", "desktest", "archival-repackage", "synthetic-injection", "external-acquisition"],
-          "description": "How the data came to be: 'live' = real acquisition by the orchestrator; 'simulate'/'desktest' = hardware commands mocked, bundle is a plumbing test, NOT data; 'archival-repackage' = real historical spectrometer data repackaged into the bundle format; 'synthetic-injection' = numerically synthesized data with a known injected feature, used to validate the analysis pipeline (never a science result); 'external-acquisition' = real data acquired by the facility's own vendor software (e.g. Delta, SpinsolveExpert, or manual TopSpin operation) and packed by packer/pack_bundle.py. Optional; enum extension is backward compatible."
-        }
-      },
-      "description": "Provenance of the software that produced the bundle. Required from schema 1.1 onward."
+    "writer": {
+     "type": "string",
+     "description": "Which program wrote the bundle, e.g. 'topspin/spin_noise_run.py' or 'packer/pack_bundle.py'. Optional (new in 2.0)."
     },
-    "created_utc": {
-      "type": "string",
-      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
-      "description": "UTC timestamp of bundle creation, ISO 8601 with trailing Z, e.g. 2026-08-18T14:03:22Z."
-    },
-    "local_timezone_offset_min": {
-      "type": "integer",
-      "description": "Local timezone offset from UTC in minutes at creation time (e.g. +120 for CEST). Lets us reconstruct local time-of-day for environmental-noise correlation."
-    },
-    "vendor": {
-      "type": "string",
-      "enum": ["bruker", "jeol", "magritek"],
-      "description": "Instrument vendor (required from 2.0). Determines which block of 'instrument' applies and which reader/adapter produced the data/ tree. 1.x bundles carry no vendor field; validators and analysis treat an ABSENT vendor as 'bruker' (every 1.x writer was the TopSpin orchestrator)."
-    },
-    "facility": {
-      "type": "object",
-      "required": ["institution", "city", "country", "facility_slug", "contact_email", "contact_consent"],
-      "properties": {
-        "institution": { "type": "string" },
-        "city": { "type": "string" },
-        "country": { "type": "string" },
-        "facility_slug": {
-          "type": "string",
-          "pattern": "^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$",
-          "description": "Short lowercase identifier assigned by the maintainer; also appears in the bundle filename."
-        },
-        "contact_email": {
-          "type": "string",
-          "description": "Optional contact address; empty string if not provided. Only stored when contact_consent is true."
-        },
-        "contact_consent": {
-          "type": "boolean",
-          "description": "True only if the operator explicitly consented to storing contact_email."
-        }
-      }
-    },
-    "spectrometer": {
-      "type": "object",
-      "required": ["h1_freq_mhz", "field_tesla", "console", "probe_string", "probe_type", "coil_temp_k", "preamp_temp_k"],
-      "description": "Vendor-NEUTRAL common physics core (2.0): the quantities every analysis needs regardless of who built the instrument. Vendor-specific software versions and console state live in instrument.<vendor>. In 1.x this block also carried the required Bruker field 'topspin_version'; it is kept below as an OPTIONAL deprecated alias so 1.x bundles and old tooling keep working.",
-      "properties": {
-        "topspin_version": {
-          "type": "string",
-          "description": "DEPRECATED alias (required through 1.2, moved to instrument.bruker.topspin_version in 2.0). Writers targeting 2.0 should put it in the bruker block; readers should look in both places."
-        },
-        "h1_freq_mhz": { "type": "number", "exclusiveMinimum": 0, "description": "1H Larmor frequency of the magnet in MHz (BF1 on Bruker). Vendor-neutral: this is the axion-mass coordinate of the site." },
-        "field_tesla": { "type": "number", "exclusiveMinimum": 0 },
-        "console": { "type": "string", "description": "Instrument/console identification as reported or entered, e.g. 'Avance III HD', 'JNM-ECZL 500G', 'Spinsolve 60 Carbon'. Empty string if unknown." },
-        "probe_string": { "type": "string", "description": "Verbatim probe identification string (PROBHD on Bruker; probe/model text elsewhere). Empty string if the instrument has no separate probe identity (benchtop systems)." },
-        "probe_type": {
-          "type": "string",
-          "enum": ["RT", "N2-cryo", "He-cryo", "permanent-magnet-benchtop", "unknown"],
-          "description": "RT = room-temperature probe (expect Gueron absorption dip); cryoprobes expect emission bump; permanent-magnet-benchtop = Magritek-class integrated RT probe on a permanent magnet (Gueron-dip physics, no separate probe hardware). Enum extension in 2.0 is backward compatible: 1.x bundles only ever carried the first four values."
-        },
-        "coil_temp_k": {
-          "type": ["number", "null"],
-          "description": "RF coil temperature in kelvin if known; null otherwise."
-        },
-        "preamp_temp_k": {
-          "type": ["number", "null"],
-          "description": "Preamplifier temperature in kelvin if known; null otherwise."
-        }
-      }
-    },
-    "instrument": {
-      "type": "object",
-      "description": "Vendor-namespaced instrument details (required from 2.0). MUST contain the block named by the top-level 'vendor' field -- the uploader and packer enforce that in code (the minimal validator subset cannot express it). Other blocks are permitted but ignored. The bruker block is exactly the Bruker-specific fields that lived in the 1.x common core (TopSpin version; BSMS sweep state); the jeol and magritek blocks are the contract packages B and C fill in -- their field lists are DRAFTS pending partner/bench validation and were designed against the JEOL Delta/.jdf and Magritek SpinsolveExpert/Prospa converter paths.",
-      "properties": {
-        "bruker": {
-          "type": "object",
-          "required": ["topspin_version", "bsms_field_sweep_confirmed_off"],
-          "properties": {
-            "topspin_version": {
-              "type": "string",
-              "description": "TopSpin version, e.g. '4.1.4' (moved here from spectrometer.topspin_version, which remains as a deprecated alias)."
-            },
-            "bsms_field_sweep_confirmed_off": {
-              "type": "boolean",
-              "description": "Operator explicitly confirmed the BSMS field sweep was OFF during the noise block (moved here from environment.lock_sweep_confirmed_off, which remains as a deprecated alias). A running sweep smears the noise feature by kHz and ruins the record -- the 2022 lesson."
-            },
-            "console_raw": {
-              "type": "string",
-              "description": "Verbatim console line from uxnmr.info if available. Optional."
-            },
-            "rga_used": {
-              "type": ["boolean", "null"],
-              "description": "Whether receiver-gain optimization (rga) chose the noise-block RG. Optional; null if unknown."
-            }
-          }
-        },
-        "jeol": {
-          "type": "object",
-          "required": ["delta_version"],
-          "description": "DRAFT (package B/C contract; not yet validated on JEOL hardware). Field semantics follow JEOL Delta and the .jdf single-file format as documented by the open-source cheminfo/jeolconverter parser (MIT), which package work may port with attribution; every mapping must be confirmed at the partner facility before this block is treated as authoritative.",
-          "properties": {
-            "delta_version": {
-              "type": "string",
-              "description": "JEOL Delta software version that acquired/exported the data. UNVERIFIED how best to read this programmatically; operator-entered until the partner-facility session confirms a machine-readable source."
-            },
-            "spectrometer_model": {
-              "type": "string",
-              "description": "e.g. 'JNM-ECZL 500G'. Optional; operator-entered or parsed from the .jdf header (header field names pending validation against jeolconverter)."
-            },
-            "data_format": {
-              "type": "string",
-              "enum": ["jdf", "jcamp-dx", "other"],
-              "description": "Source format of the files under data/: native .jdf, or the Delta JCAMP-DX export fallback."
-            },
-            "receiver_gain": {
-              "type": ["number", "null"],
-              "description": "Receiver gain as reported by Delta, in JEOL's native units. UNVERIFIED: unit convention and parameter name vary by model/version; record verbatim, calibrate at the partner facility. Null if unknown."
-            },
-            "field_state_notes": {
-              "type": "string",
-              "description": "Free text on lock/field state during the noise block (JEOL consoles have no BSMS; the equivalent 'is anything sweeping B0' confirmation is captured here until a vendor-specific checklist is validated). Empty string allowed."
-            }
-          }
-        },
-        "magritek": {
-          "type": "object",
-          "required": ["spinsolve_software_version"],
-          "description": "DRAFT (package B/C contract; scripted path pending bench validation on a Spinsolve). Field semantics follow the Spinsolve/Prospa file conventions (acqu.par acquisition-parameter file; data.1d/fid.1d raw data; proc.par under SpinsolveExpert) as documented by nmrglue's spinsolve reader; every mapping must be confirmed on a real bench before this block is treated as authoritative.",
-          "properties": {
-            "spinsolve_software_version": {
-              "type": "string",
-              "description": "Spinsolve (or SpinsolveExpert) software version. UNVERIFIED best machine-readable source; operator-entered until bench validation."
-            },
-            "model": {
-              "type": "string",
-              "description": "e.g. 'Spinsolve 60 Carbon'. Optional."
-            },
-            "prospa_version": {
-              "type": "string",
-              "description": "Prospa version, when the scripted (Prospa-macro) path acquired the data. Optional."
-            },
-            "expert_mode": {
-              "type": ["boolean", "null"],
-              "description": "True if SpinsolveExpert (scripting-capable) drove the acquisition; false for the standard Spinsolve UI; null if unknown."
-            },
-            "rx_gain": {
-              "type": ["number", "null"],
-              "description": "Receiver gain setting from acqu.par, in Magritek's native units. UNVERIFIED parameter name/units pending bench validation. Null if unknown."
-            },
-            "data_format": {
-              "type": "string",
-              "enum": ["prospa-1d", "jcamp-dx", "other"],
-              "description": "Source format of the files under data/: native Prospa binary (data.1d family) or the JCAMP-DX export."
-            }
-          }
-        }
-      }
-    },
-    "sample": {
-      "type": "object",
-      "required": ["description", "h2o_fraction_pct", "d2o_pct", "additives", "tube_od_mm", "sample_volume_ul", "vt_setpoint_k"],
-      "properties": {
-        "description": { "type": "string", "description": "Free text, e.g. 'tap water', 'distilled water + 10% D2O'." },
-        "h2o_fraction_pct": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 100,
-          "description": "Protonated-water fraction in percent. Critical: the spin-noise feature scales with proton density (the 2022 lesson)."
-        },
-        "d2o_pct": { "type": "number", "minimum": 0, "maximum": 100 },
-        "additives": { "type": "string", "description": "e.g. 'none', 'CuSO4 0.1 mM'. Empty string allowed." },
-        "tube_od_mm": { "type": "number", "exclusiveMinimum": 0 },
-        "sample_volume_ul": { "type": "number", "exclusiveMinimum": 0 },
-        "vt_setpoint_k": { "type": "number", "exclusiveMinimum": 0, "description": "Variable-temperature setpoint in kelvin (or ambient bore/magnet temperature where there is no VT unit); sample temperature enters the noise-power law via Ts." }
-      }
-    },
-    "environment": {
-      "type": "object",
-      "required": ["locked", "operator_notes"],
-      "description": "Vendor-neutral run environment. In 1.x this block also required the Bruker field 'lock_sweep_confirmed_off'; from 2.0 that lives in instrument.bruker.bsms_field_sweep_confirmed_off and is kept below as an OPTIONAL deprecated alias.",
-      "properties": {
-        "locked": { "type": "boolean", "description": "Whether a field-frequency lock was engaged during the noise acquisition (false for lockless systems such as benchtops)." },
-        "lock_sweep_confirmed_off": {
-          "type": "boolean",
-          "description": "DEPRECATED alias (required through 1.2, moved to instrument.bruker.bsms_field_sweep_confirmed_off in 2.0). Bruker writers may keep mirroring it here for old tooling."
-        },
-        "operator_notes": { "type": "string", "description": "Free text: construction nearby, elevator, He fill that morning, etc. Empty string allowed." }
-      }
-    },
-    "calibration": {
-      "type": "object",
-      "required": ["p90_us", "p90_power_db_or_w", "rg_ladder", "topshim_ok"],
-      "properties": {
-        "p90_us": { "type": "number", "exclusiveMinimum": 0, "description": "Calibrated (or operator-entered) 1H 90-degree pulse length in microseconds." },
-        "p90_power_db_or_w": {
-          "type": ["number", "string"],
-          "description": "Power level at which p90_us applies. Number in dB (Avance III+) or watts; string allowed for consoles that report e.g. '-6 dB PLW1' or where the value was not retained."
-        },
-        "rg_ladder": {
-          "type": "array",
-          "minItems": 1,
-          "items": {
-            "type": "object",
-            "required": ["expno", "rg", "tip_deg"],
-            "properties": {
-              "expno": { "type": "integer", "minimum": 1 },
-              "rg": { "type": "number", "exclusiveMinimum": 0, "description": "Receiver gain in the VENDOR'S native units (Bruker RG; JEOL/Magritek gain settings -- see instrument.<vendor> for unit provenance)." },
-              "tip_deg": { "type": "number", "exclusiveMinimum": 0 }
-            }
-          },
-          "description": "Small-flip 1D acquisitions at increasing receiver gain, used offline to check receiver linearity."
-        },
-        "topshim_ok": { "type": "boolean", "description": "True if automated shimming ran and converged (topshim on Bruker; the vendor's equivalent elsewhere); false if unavailable or skipped." }
-      }
-    },
-    "experiments": {
-      "type": "array",
-      "minItems": 1,
-      "items": {
-        "type": "object",
-        "required": ["expno", "role", "pulprog", "td", "td1_rows", "sw_hz", "o1_hz", "rg", "ns", "aq_s_per_row", "started_local", "finished_local"],
-        "properties": {
-          "expno": { "type": "integer", "minimum": 1 },
-          "role": {
-            "type": "string",
-            "enum": ["setup", "rg_ladder", "reference_open", "noise", "reference_close"]
-          },
-          "pulprog": { "type": "string", "description": "Pulse program / experiment name, e.g. 'zgnoise2d' for the Bruker noise block; the vendor's sequence name elsewhere." },
-          "td": { "type": "integer", "minimum": 1, "description": "Points per row (direct dimension), in the vendor's raw-point convention (Bruker: complex-pair count TD)." },
-          "td1_rows": { "type": "integer", "minimum": 1, "description": "Number of pseudo-2D rows / repeated records (1 for plain 1Ds)." },
-          "sw_hz": { "type": "number", "exclusiveMinimum": 0 },
-          "o1_hz": { "type": "number" },
-          "rg": { "type": "number", "exclusiveMinimum": 0, "description": "Receiver gain in the vendor's native units." },
-          "ns": { "type": "integer", "minimum": 1 },
-          "aq_s_per_row": { "type": "number", "exclusiveMinimum": 0 },
-          "started_local": { "type": "string", "description": "Local wall-clock start, ISO 8601 without zone (zone given by local_timezone_offset_min)." },
-          "finished_local": { "type": "string" }
-        }
-      }
-    },
-    "clock_audit": {
-      "type": "object",
-      "required": ["blocks", "ntp_status_raw", "workstation_time_source"],
-      "description": "OPTIONAL (added in schema 1.2; absent from 1.0/1.1 bundles and from packer-produced bundles whose source data carries no block timestamps -- no penalty). Software-only console-clock audit: spectrometer acquisition durations derive from the console's OCXO master clock, while the workstation wall clock is normally NTP-disciplined, so comparing OCXO-implied and wall-clock elapsed time across blocks measures the fractional console-clock offset (precision ~ NTP timestamp jitter / time span). Written by spin_noise_run.py v0.2+; analyzed by analysis/facility_report.py.",
-      "properties": {
-        "blocks": {
-          "type": "array",
-          "minItems": 1,
-          "items": {
-            "type": "object",
-            "required": ["expno", "role", "wall_start_ms", "wall_end_ms", "ocxo_expected_s"],
-            "properties": {
-              "expno": { "type": "integer", "minimum": 1 },
-              "role": {
-                "type": "string",
-                "enum": ["setup", "rg_ladder", "reference_open", "noise", "reference_close"]
-              },
-              "wall_start_ms": {
-                "type": "integer",
-                "description": "Workstation wall-clock milliseconds since the Unix epoch, recorded immediately before the block's acquisition started."
-              },
-              "wall_end_ms": {
-                "type": "integer",
-                "description": "Workstation wall-clock milliseconds recorded immediately after the block's acquisition completed."
-              },
-              "ocxo_expected_s": {
-                "type": ["number", "null"],
-                "description": "OCXO-implied block duration in seconds, computed from the acquisition parameters (rows * ns * (TD/(2*SW_h) + delays)). Null for blocks whose duration is not OCXO-predictable (the setup block: tune/shim/pulsecal plus operator dialogs); such blocks are excluded from the offset fit."
-              }
-            }
-          },
-          "description": "One entry per acquisition block, in session order. TopSpin's script layer cannot see individual rows of a pseudo-2D acquisition, so the audit is block-level by construction."
-        },
-        "ntp_status_raw": {
-          "type": "string",
-          "description": "Raw output of the first time-sync status probe that answered (chronyc tracking / ntpq -pn / timedatectl / w32tm), captured once per session; 'unavailable' if none did."
-        },
-        "workstation_time_source": {
-          "type": "string",
-          "description": "Short label of the tool that answered the time-sync probe (e.g. 'chrony', 'ntpd (ntpq)', 'w32time'); 'unknown' if none did."
-        }
-      }
-    },
-    "checksums": {
-      "type": "object",
-      "description": "Map from in-zip path (always under data/) to its SHA-256, e.g. {\"data/12/ser\": \"sha256:ab12...\"}.",
-      "patternProperties": {
-        "^data/": {
-          "type": "string",
-          "pattern": "^sha256:[0-9a-f]{64}$"
-        }
-      },
-      "additionalProperties": false,
-      "minProperties": 1
+    "run_mode": {
+     "type": "string",
+     "enum": [
+      "live",
+      "simulate",
+      "desktest",
+      "archival-repackage",
+      "synthetic-injection",
+      "external-acquisition"
+     ],
+     "description": "How the data came to be: 'live' = real acquisition by the orchestrator; 'simulate'/'desktest' = hardware commands mocked, bundle is a plumbing test, NOT data; 'archival-repackage' = real historical spectrometer data repackaged into the bundle format; 'synthetic-injection' = numerically synthesized data with a known injected feature, used to validate the analysis pipeline (never a science result); 'external-acquisition' = real data acquired by the facility's own vendor software (e.g. Delta, SpinsolveExpert, or manual TopSpin operation) and packed by packer/pack_bundle.py. Optional; enum extension is backward compatible."
     }
+   },
+   "description": "Provenance of the software that produced the bundle. Required from schema 1.1 onward."
+  },
+  "created_utc": {
+   "type": "string",
+   "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+   "description": "UTC timestamp of bundle creation, ISO 8601 with trailing Z, e.g. 2026-08-18T14:03:22Z."
+  },
+  "local_timezone_offset_min": {
+   "type": "integer",
+   "description": "Local timezone offset from UTC in minutes at creation time (e.g. +120 for CEST). Lets us reconstruct local time-of-day for environmental-noise correlation."
+  },
+  "vendor": {
+   "type": "string",
+   "enum": [
+    "bruker",
+    "jeol",
+    "magritek",
+    "agilent",
+    "nanalysis"
+   ],
+   "description": "Instrument vendor (required from 2.0). Determines which block of 'instrument' applies and which reader/adapter produced the data/ tree. 1.x bundles carry no vendor field; validators and analysis treat an ABSENT vendor as 'bruker' (every 1.x writer was the TopSpin orchestrator). 'agilent' (added within 2.0; enum extension is backward compatible -- no existing bundle carried it) covers the Agilent/Varian VnmrJ and OpenVnmrJ lineage."
+  },
+  "facility": {
+   "type": "object",
+   "required": [
+    "institution",
+    "city",
+    "country",
+    "facility_slug",
+    "contact_email",
+    "contact_consent"
+   ],
+   "properties": {
+    "institution": {
+     "type": "string"
+    },
+    "city": {
+     "type": "string"
+    },
+    "country": {
+     "type": "string"
+    },
+    "facility_slug": {
+     "type": "string",
+     "pattern": "^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$",
+     "description": "Short lowercase identifier assigned by the maintainer; also appears in the bundle filename."
+    },
+    "contact_email": {
+     "type": "string",
+     "description": "Optional contact address; empty string if not provided. Only stored when contact_consent is true."
+    },
+    "contact_consent": {
+     "type": "boolean",
+     "description": "True only if the operator explicitly consented to storing contact_email."
+    }
+   }
+  },
+  "spectrometer": {
+   "type": "object",
+   "required": [
+    "h1_freq_mhz",
+    "field_tesla",
+    "console",
+    "probe_string",
+    "probe_type",
+    "coil_temp_k",
+    "preamp_temp_k"
+   ],
+   "description": "Vendor-NEUTRAL common physics core (2.0): the quantities every analysis needs regardless of who built the instrument. Vendor-specific software versions and console state live in instrument.<vendor>. In 1.x this block also carried the required Bruker field 'topspin_version'; it is kept below as an OPTIONAL deprecated alias so 1.x bundles and old tooling keep working.",
+   "properties": {
+    "topspin_version": {
+     "type": "string",
+     "description": "DEPRECATED alias (required through 1.2, moved to instrument.bruker.topspin_version in 2.0). Writers targeting 2.0 should put it in the bruker block; readers should look in both places."
+    },
+    "h1_freq_mhz": {
+     "type": "number",
+     "exclusiveMinimum": 0,
+     "description": "1H Larmor frequency of the magnet in MHz (BF1 on Bruker). Vendor-neutral: this is the axion-mass coordinate of the site."
+    },
+    "field_tesla": {
+     "type": "number",
+     "exclusiveMinimum": 0
+    },
+    "console": {
+     "type": "string",
+     "description": "Instrument/console identification as reported or entered, e.g. 'Avance III HD', 'JNM-ECZL 500G', 'Spinsolve 60 Carbon'. Empty string if unknown."
+    },
+    "probe_string": {
+     "type": "string",
+     "description": "Verbatim probe identification string (PROBHD on Bruker; probe/model text elsewhere). Empty string if the instrument has no separate probe identity (benchtop systems)."
+    },
+    "probe_type": {
+     "type": "string",
+     "enum": [
+      "RT",
+      "N2-cryo",
+      "He-cryo",
+      "permanent-magnet-benchtop",
+      "unknown"
+     ],
+     "description": "RT = room-temperature probe (expect Gueron absorption dip); cryoprobes expect emission bump; permanent-magnet-benchtop = Magritek-class integrated RT probe on a permanent magnet (Gueron-dip physics, no separate probe hardware). Enum extension in 2.0 is backward compatible: 1.x bundles only ever carried the first four values."
+    },
+    "coil_temp_k": {
+     "type": [
+      "number",
+      "null"
+     ],
+     "description": "RF coil temperature in kelvin if known; null otherwise."
+    },
+    "preamp_temp_k": {
+     "type": [
+      "number",
+      "null"
+     ],
+     "description": "Preamplifier temperature in kelvin if known; null otherwise."
+    }
+   }
+  },
+  "instrument": {
+   "type": "object",
+   "description": "Vendor-namespaced instrument details (required from 2.0). MUST contain the block named by the top-level 'vendor' field -- the uploader and packer enforce that in code (the minimal validator subset cannot express it). Other blocks are permitted but ignored. The bruker block is exactly the Bruker-specific fields that lived in the 1.x common core (TopSpin version; BSMS sweep state); the jeol and magritek blocks are the contract packages B and C fill in -- their field lists are DRAFTS pending partner/bench validation and were designed against the JEOL Delta/.jdf and Magritek SpinsolveExpert/Prospa converter paths.",
+   "properties": {
+    "bruker": {
+     "type": "object",
+     "required": [
+      "topspin_version",
+      "bsms_field_sweep_confirmed_off"
+     ],
+     "properties": {
+      "topspin_version": {
+       "type": "string",
+       "description": "TopSpin version, e.g. '4.1.4' (moved here from spectrometer.topspin_version, which remains as a deprecated alias)."
+      },
+      "bsms_field_sweep_confirmed_off": {
+       "type": "boolean",
+       "description": "Operator explicitly confirmed the BSMS field sweep was OFF during the noise block (moved here from environment.lock_sweep_confirmed_off, which remains as a deprecated alias). A running sweep smears the noise feature by kHz and ruins the record -- the 2022 lesson."
+      },
+      "console_raw": {
+       "type": "string",
+       "description": "Verbatim console line from uxnmr.info if available. Optional."
+      },
+      "rga_used": {
+       "type": [
+        "boolean",
+        "null"
+       ],
+       "description": "Whether receiver-gain optimization (rga) chose the noise-block RG. Optional; null if unknown."
+      }
+     }
+    },
+    "jeol": {
+     "type": "object",
+     "required": [
+      "delta_version"
+     ],
+     "description": "DRAFT (package B/C contract; not yet validated on JEOL hardware). Field semantics follow JEOL Delta and the .jdf single-file format as documented by the open-source cheminfo/jeolconverter parser (MIT), which package work may port with attribution; every mapping must be confirmed at the partner facility before this block is treated as authoritative.",
+     "properties": {
+      "delta_version": {
+       "type": "string",
+       "description": "JEOL Delta software version that acquired/exported the data. UNVERIFIED how best to read this programmatically; operator-entered until the partner-facility session confirms a machine-readable source."
+      },
+      "spectrometer_model": {
+       "type": "string",
+       "description": "e.g. 'JNM-ECZL 500G'. Optional; operator-entered or parsed from the .jdf header (header field names pending validation against jeolconverter)."
+      },
+      "data_format": {
+       "type": "string",
+       "enum": [
+        "jdf",
+        "jcamp-dx",
+        "other"
+       ],
+       "description": "Source format of the files under data/: native .jdf, or the Delta JCAMP-DX export fallback."
+      },
+      "receiver_gain": {
+       "type": [
+        "number",
+        "null"
+       ],
+       "description": "Receiver gain as reported by Delta, in JEOL's native units. UNVERIFIED: unit convention and parameter name vary by model/version; record verbatim, calibrate at the partner facility. Null if unknown."
+      },
+      "field_state_notes": {
+       "type": "string",
+       "description": "Free text on lock/field state during the noise block (JEOL consoles have no BSMS; the equivalent 'is anything sweeping B0' confirmation is captured here until a vendor-specific checklist is validated). Empty string allowed."
+      }
+     }
+    },
+    "magritek": {
+     "type": "object",
+     "required": [
+      "spinsolve_software_version"
+     ],
+     "description": "DRAFT (package B/C contract; scripted path pending bench validation on a Spinsolve). Field semantics follow the Spinsolve/Prospa file conventions (acqu.par acquisition-parameter file; data.1d/fid.1d raw data; proc.par under SpinsolveExpert) as documented by nmrglue's spinsolve reader; every mapping must be confirmed on a real bench before this block is treated as authoritative.",
+     "properties": {
+      "spinsolve_software_version": {
+       "type": "string",
+       "description": "Spinsolve (or SpinsolveExpert) software version. UNVERIFIED best machine-readable source; operator-entered until bench validation."
+      },
+      "model": {
+       "type": "string",
+       "description": "e.g. 'Spinsolve 60 Carbon'. Optional."
+      },
+      "prospa_version": {
+       "type": "string",
+       "description": "Prospa version, when the scripted (Prospa-macro) path acquired the data. Optional."
+      },
+      "expert_mode": {
+       "type": [
+        "boolean",
+        "null"
+       ],
+       "description": "True if SpinsolveExpert (scripting-capable) drove the acquisition; false for the standard Spinsolve UI; null if unknown."
+      },
+      "rx_gain": {
+       "type": [
+        "number",
+        "null"
+       ],
+       "description": "Receiver gain setting from acqu.par, in Magritek's native units. UNVERIFIED parameter name/units pending bench validation. Null if unknown."
+      },
+      "data_format": {
+       "type": "string",
+       "enum": [
+        "prospa-1d",
+        "jcamp-dx",
+        "other"
+       ],
+       "description": "Source format of the files under data/: native Prospa binary (data.1d family) or the JCAMP-DX export."
+      }
+     }
+    },
+    "agilent": {
+     "type": "object",
+     "required": [
+      "vnmrj_version"
+     ],
+     "description": "DRAFT (converter path; not yet validated on Agilent hardware -- partner facility: 400 MHz Agilent DD2 running VnmrJ 3.2). Field semantics follow the Varian/Agilent fid + procpar file family as documented by nmrglue's varian reader (BSD-3-Clause), with the MAGICAL macro lineage shared by VnmrJ and the open-source OpenVnmrJ continuation (github.com/OpenVnmrJ); every mapping must be confirmed at the partner facility before this block is treated as authoritative.",
+     "properties": {
+      "vnmrj_version": {
+       "type": "string",
+       "description": "VnmrJ (or OpenVnmrJ) software version that acquired the data, e.g. '3.2'. UNVERIFIED whether procpar carries a reliable machine-readable source; operator-entered until the partner-facility session confirms one."
+      },
+      "spectrometer_model": {
+       "type": "string",
+       "description": "e.g. 'Agilent DD2 400'. Optional; operator-entered."
+      },
+      "data_format": {
+       "type": "string",
+       "enum": [
+        "varian-fid",
+        "other"
+       ],
+       "description": "Source format of the files under data/: 'varian-fid' = native .fid save directories (procpar + fid [+ text, log])."
+      },
+      "receiver_gain_db": {
+       "type": [
+        "number",
+        "null"
+       ],
+       "description": "Receiver gain ('gain' parameter) in dB, verbatim from procpar, for the noise block. UNVERIFIED: range/step/linearity per console model pending the partner ladder measurement. Null if unknown. (The per-experiment meta 'rg' carries the Bruker-comparable linear amplitude 10^(gain/20).)"
+      },
+      "field_state_notes": {
+       "type": "string",
+       "description": "Free text on lock/z0 state during the noise block (Agilent consoles have no Bruker BSMS; the equivalent 'is anything sweeping or stepping B0' confirmation is captured here until a vendor-specific checklist is validated). Empty string allowed."
+      }
+     }
+    },
+    "nanalysis": {
+     "type": "object",
+     "required": [
+      "software_version"
+     ],
+     "description": "DRAFT (converter-first Nanalysis NMReady path; pending partner validation on a 60 MHz NMReady 60PRO). Field semantics follow the JCAMP-DX exports of the NMReady touchscreen software as verified against Nanalysis Corp.'s own open-source jcamp-parser test corpus (real v2.2.4.5 instrument output); every mapping must be confirmed on the partner's unit before this block is treated as authoritative.",
+     "properties": {
+      "software_version": {
+       "type": "string",
+       "description": "NMReady software version, machine-readable from the ##JCAMP-DX label comment ('$$ Nanalysis NMReady v2.2.6.2'); operator-entered if the export omits it."
+      },
+      "model": {
+       "type": "string",
+       "description": "e.g. 'NMReady-60PRO'. Optional."
+      },
+      "firmware_version": {
+       "type": "string",
+       "description": "Instrument firmware version, operator-entered (no machine-readable source verified). Optional."
+      },
+      "data_format": {
+       "type": "string",
+       "enum": [
+        "jcamp-dx",
+        "csv",
+        "other"
+       ],
+       "description": "Source format of the files under data/: the NMReady exports JCAMP-DX (FID as NTUPLES, spectrum as XYDATA) and csv."
+      },
+      "receiver_gain": {
+       "type": [
+        "number",
+        "null"
+       ],
+       "description": "##$RECVR_GAIN verbatim, in Nanalysis's native units. UNVERIFIED units/linearity -- record verbatim, calibrate at the partner session. Null if unknown."
+      },
+      "lock_nucleus": {
+       "type": "string",
+       "description": "Lock channel nucleus during the noise block: '2H', '1H', 'off', or 'unknown'. The NMReady has an internal 1H-or-2H lock; whether it can be disabled or radiates in-band during acquisition is a partner-session question."
+      },
+      "field_state_notes": {
+       "type": "string",
+       "description": "Free text on lock/shim/drift state during the noise block (the NMReady analog of the Bruker BSMS sweep confirmation: is anything actively stepping B0 between or during records?). Empty string allowed."
+      }
+     }
+    }
+   }
+  },
+  "sample": {
+   "type": "object",
+   "required": [
+    "description",
+    "h2o_fraction_pct",
+    "d2o_pct",
+    "additives",
+    "tube_od_mm",
+    "sample_volume_ul",
+    "vt_setpoint_k"
+   ],
+   "properties": {
+    "description": {
+     "type": "string",
+     "description": "Free text, e.g. 'tap water', 'distilled water + 10% D2O'."
+    },
+    "h2o_fraction_pct": {
+     "type": "number",
+     "minimum": 0,
+     "maximum": 100,
+     "description": "Protonated-water fraction in percent. Critical: the spin-noise feature scales with proton density (the 2022 lesson)."
+    },
+    "d2o_pct": {
+     "type": "number",
+     "minimum": 0,
+     "maximum": 100
+    },
+    "additives": {
+     "type": "string",
+     "description": "e.g. 'none', 'CuSO4 0.1 mM'. Empty string allowed."
+    },
+    "tube_od_mm": {
+     "type": "number",
+     "exclusiveMinimum": 0
+    },
+    "sample_volume_ul": {
+     "type": "number",
+     "exclusiveMinimum": 0
+    },
+    "vt_setpoint_k": {
+     "type": "number",
+     "exclusiveMinimum": 0,
+     "description": "Variable-temperature setpoint in kelvin (or ambient bore/magnet temperature where there is no VT unit); sample temperature enters the noise-power law via Ts."
+    }
+   }
+  },
+  "environment": {
+   "type": "object",
+   "required": [
+    "locked",
+    "operator_notes"
+   ],
+   "description": "Vendor-neutral run environment. In 1.x this block also required the Bruker field 'lock_sweep_confirmed_off'; from 2.0 that lives in instrument.bruker.bsms_field_sweep_confirmed_off and is kept below as an OPTIONAL deprecated alias.",
+   "properties": {
+    "locked": {
+     "type": "boolean",
+     "description": "Whether a field-frequency lock was engaged during the noise acquisition (false for lockless systems such as benchtops)."
+    },
+    "lock_sweep_confirmed_off": {
+     "type": "boolean",
+     "description": "DEPRECATED alias (required through 1.2, moved to instrument.bruker.bsms_field_sweep_confirmed_off in 2.0). Bruker writers may keep mirroring it here for old tooling."
+    },
+    "operator_notes": {
+     "type": "string",
+     "description": "Free text: construction nearby, elevator, He fill that morning, etc. Empty string allowed."
+    }
+   }
+  },
+  "calibration": {
+   "type": "object",
+   "required": [
+    "p90_us",
+    "p90_power_db_or_w",
+    "rg_ladder",
+    "topshim_ok"
+   ],
+   "properties": {
+    "p90_us": {
+     "type": "number",
+     "exclusiveMinimum": 0,
+     "description": "Calibrated (or operator-entered) 1H 90-degree pulse length in microseconds."
+    },
+    "p90_power_db_or_w": {
+     "type": [
+      "number",
+      "string"
+     ],
+     "description": "Power level at which p90_us applies. Number in dB (Avance III+) or watts; string allowed for consoles that report e.g. '-6 dB PLW1' or where the value was not retained."
+    },
+    "rg_ladder": {
+     "type": "array",
+     "minItems": 1,
+     "items": {
+      "type": "object",
+      "required": [
+       "expno",
+       "rg",
+       "tip_deg"
+      ],
+      "properties": {
+       "expno": {
+        "type": "integer",
+        "minimum": 1
+       },
+       "rg": {
+        "type": "number",
+        "exclusiveMinimum": 0,
+        "description": "Receiver gain in the VENDOR'S native units (Bruker RG; JEOL/Magritek gain settings -- see instrument.<vendor> for unit provenance)."
+       },
+       "tip_deg": {
+        "type": "number",
+        "exclusiveMinimum": 0
+       }
+      }
+     },
+     "description": "Small-flip 1D acquisitions at increasing receiver gain, used offline to check receiver linearity."
+    },
+    "topshim_ok": {
+     "type": "boolean",
+     "description": "True if automated shimming ran and converged (topshim on Bruker; the vendor's equivalent elsewhere); false if unavailable or skipped."
+    }
+   }
+  },
+  "experiments": {
+   "type": "array",
+   "minItems": 1,
+   "items": {
+    "type": "object",
+    "required": [
+     "expno",
+     "role",
+     "pulprog",
+     "td",
+     "td1_rows",
+     "sw_hz",
+     "o1_hz",
+     "rg",
+     "ns",
+     "aq_s_per_row",
+     "started_local",
+     "finished_local"
+    ],
+    "properties": {
+     "expno": {
+      "type": "integer",
+      "minimum": 1
+     },
+     "role": {
+      "type": "string",
+      "enum": [
+       "setup",
+       "rg_ladder",
+       "reference_open",
+       "noise",
+       "reference_close"
+      ]
+     },
+     "pulprog": {
+      "type": "string",
+      "description": "Pulse program / experiment name, e.g. 'zgnoise2d' for the Bruker noise block; the vendor's sequence name elsewhere."
+     },
+     "td": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Points per row (direct dimension), in the vendor's raw-point convention (Bruker: complex-pair count TD)."
+     },
+     "td1_rows": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Number of pseudo-2D rows / repeated records (1 for plain 1Ds)."
+     },
+     "sw_hz": {
+      "type": "number",
+      "exclusiveMinimum": 0
+     },
+     "o1_hz": {
+      "type": "number"
+     },
+     "rg": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Receiver gain in the vendor's native units."
+     },
+     "ns": {
+      "type": "integer",
+      "minimum": 1
+     },
+     "aq_s_per_row": {
+      "type": "number",
+      "exclusiveMinimum": 0
+     },
+     "started_local": {
+      "type": "string",
+      "description": "Local wall-clock start, ISO 8601 without zone (zone given by local_timezone_offset_min)."
+     },
+     "finished_local": {
+      "type": "string"
+     }
+    }
+   }
+  },
+  "clock_audit": {
+   "type": "object",
+   "required": [
+    "blocks",
+    "ntp_status_raw",
+    "workstation_time_source"
+   ],
+   "description": "OPTIONAL (added in schema 1.2; absent from 1.0/1.1 bundles and from packer-produced bundles whose source data carries no block timestamps -- no penalty). Software-only console-clock audit: spectrometer acquisition durations derive from the console's OCXO master clock, while the workstation wall clock is normally NTP-disciplined, so comparing OCXO-implied and wall-clock elapsed time across blocks measures the fractional console-clock offset (precision ~ NTP timestamp jitter / time span). Written by spin_noise_run.py v0.2+; analyzed by analysis/facility_report.py.",
+   "properties": {
+    "blocks": {
+     "type": "array",
+     "minItems": 1,
+     "items": {
+      "type": "object",
+      "required": [
+       "expno",
+       "role",
+       "wall_start_ms",
+       "wall_end_ms",
+       "ocxo_expected_s"
+      ],
+      "properties": {
+       "expno": {
+        "type": "integer",
+        "minimum": 1
+       },
+       "role": {
+        "type": "string",
+        "enum": [
+         "setup",
+         "rg_ladder",
+         "reference_open",
+         "noise",
+         "reference_close"
+        ]
+       },
+       "wall_start_ms": {
+        "type": "integer",
+        "description": "Workstation wall-clock milliseconds since the Unix epoch, recorded immediately before the block's acquisition started."
+       },
+       "wall_end_ms": {
+        "type": "integer",
+        "description": "Workstation wall-clock milliseconds recorded immediately after the block's acquisition completed."
+       },
+       "ocxo_expected_s": {
+        "type": [
+         "number",
+         "null"
+        ],
+        "description": "OCXO-implied block duration in seconds, computed from the acquisition parameters (rows * ns * (TD/(2*SW_h) + delays)). Null for blocks whose duration is not OCXO-predictable (the setup block: tune/shim/pulsecal plus operator dialogs); such blocks are excluded from the offset fit."
+       }
+      }
+     },
+     "description": "One entry per acquisition block, in session order. TopSpin's script layer cannot see individual rows of a pseudo-2D acquisition, so the audit is block-level by construction."
+    },
+    "ntp_status_raw": {
+     "type": "string",
+     "description": "Raw output of the first time-sync status probe that answered (chronyc tracking / ntpq -pn / timedatectl / w32tm), captured once per session; 'unavailable' if none did."
+    },
+    "workstation_time_source": {
+     "type": "string",
+     "description": "Short label of the tool that answered the time-sync probe (e.g. 'chrony', 'ntpd (ntpq)', 'w32time'); 'unknown' if none did."
+    }
+   }
+  },
+  "checksums": {
+   "type": "object",
+   "description": "Map from in-zip path (always under data/) to its SHA-256, e.g. {\"data/12/ser\": \"sha256:ab12...\"}.",
+   "patternProperties": {
+    "^data/": {
+     "type": "string",
+     "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+   },
+   "additionalProperties": false,
+   "minProperties": 1
   }
+ }
 }

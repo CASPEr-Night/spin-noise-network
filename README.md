@@ -4,9 +4,9 @@
 
 A community measurement program for nuclear spin noise. Any NMR facility with a Bruker
 spectrometer can contribute a data point with one sample tube and one command — and the
-bundle contract is now vendor-neutral (schema v2.0), with a standalone packer so JEOL
-and Magritek data can join through converter/scripted paths (see the vendor-support
-matrix below): the
+bundle contract is now vendor-neutral (schema v2.0), with a standalone packer so JEOL,
+Magritek, and Agilent/Varian data can join through converter/scripted paths (see the
+vendor-support matrix below): the
 protocol measures the spin-noise feature of water (the Guéron absorption dip on
 room-temperature probes, the emission bump on cryoprobes) together with the receiver
 calibrations needed to interpret it absolutely. Across many facilities this maps the
@@ -69,12 +69,14 @@ commands mocked — runnable on a free processing-only TopSpin install
 | **Bruker** (TopSpin 2.x–4.x; 5.0 untested — reports welcome) | full/automatic: the `topspin/spin_noise_run.py` orchestrator acquires, tags, and bundles everything itself; `packer/pack_bundle.py --vendor bruker` additionally repacks any existing TopSpin expno tree | Desk-tested end to end (real-Jython harness + packer round-trip); first supervised pilot pending |
 | **JEOL** (Delta) | converter path: acquire with Delta, then pack the exported data with `packer/pack_bundle.py --vendor jeol`; acquisition automation to be developed with a partner facility | Adapter interface + schema block defined; reader **draft pending partner-facility validation** (.jdf parsing to follow the MIT-licensed [jeolconverter v1.0.1](https://www.npmjs.com/package/jeolconverter) (cheminfo, npm), with attribution) |
 | **Magritek** (Spinsolve/SpinsolveExpert) | scripted path: a Prospa-driven acquisition plus `packer/pack_bundle.py --vendor magritek` | Adapter interface + schema block defined; reader **pending bench validation** (file conventions per [nmrglue's spinsolve reader](https://nmrglue.readthedocs.io/en/latest/reference/spinsolve.html)) |
+| **Agilent/Varian** (VnmrJ 2.x–3.x, [OpenVnmrJ](https://github.com/OpenVnmrJ)) | converter path: acquire with VnmrJ's ordinary tools (Tier-1 checklist) or the draft MAGICAL macro `vendors/agilent/spin_noise_run.mac`, then pack with `packer/pack_bundle.py --vendor agilent` | Adapter interface + schema block defined; reader **draft pending partner-facility validation** (fid/procpar layout per [nmrglue's varian reader](https://nmrglue.readthedocs.io/en/latest/reference/varian.html), BSD-3; macro constructs verified against OpenVnmrJ manuals + Agilent's shipped `cryo_noisetest`); partner instrument identified (400 MHz DD2, VnmrJ 3.2) — see `vendors/agilent/README.md` |
+| **Nanalysis** (NMReady benchtops) | converter-first: acquire with the standard software, export JCAMP-DX FIDs, pack with `packer/pack_bundle.py --vendor nanalysis` | Draft — reader validated against real NMReady exports; partner validation pending (`vendors/nanalysis/`) |
 
 Every vendor lands in the same bundle contract: `meta.json` keeps the physics core
 (frequencies, sample, temperatures, timing/clock audit, checksums, software
 provenance) vendor-neutral, and everything instrument-specific lives in a
-vendor-namespaced `instrument` block. Anything in the JEOL/Magritek paths that could
-not be verified against real vendor documentation is explicitly marked UNVERIFIED in
+vendor-namespaced `instrument` block. Anything in the JEOL/Magritek/Agilent paths that
+could not be verified against real vendor documentation is explicitly marked UNVERIFIED in
 code and listed in the partner-session validation checklist at the top of
 `packer/pack_bundle.py` — draft vendor code is expected; guessed-but-authoritative
 vendor code is not.
