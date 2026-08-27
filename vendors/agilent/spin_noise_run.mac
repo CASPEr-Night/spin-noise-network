@@ -1,0 +1,355 @@
+"macro spin_noise_run"
+"########################################################################"
+"# spin_noise_run.mac                                                    "
+"#                                                                       "
+"# spin-noise network acquisition orchestrator -- Agilent/Varian port    "
+"# (VnmrJ / OpenVnmrJ MAGICAL macro).                                    "
+"#                                                                       "
+"# *** STATUS: DRAFT PENDING BENCH VALIDATION -- HAS NEVER RUN ON A  *** "
+"# *** VnmrJ SYSTEM. Written for first validation on the partner     *** "
+"# *** instrument: 400 MHz Agilent DD2 running VnmrJ 3.2 (Boyd       *** "
+"# *** Goodson, SIU Carbondale), 5 mm HCN probe, room temperature,   *** "
+"# *** no autotune/match. Every construct below was checked against  *** "
+"# *** OpenVnmrJ sources (github.com/OpenVnmrJ -- the open-source    *** "
+"# *** continuation of VnmrJ; shared macro language and manual       *** "
+"# *** lineage): the src/common/manual pages for go/au, write,       *** "
+"# *** shell, svf, mkdir, exists, input, lookup, unixtime/           *** "
+"# *** systemtime, sleep, create; and Agilent's own shipped macro    *** "
+"# *** src/common/maclib/cryo_noisetest, the direct precedent for    *** "
+"# *** this design: a receiver-only noise measurement using          *** "
+"# *** 'tpwr=-16 pw=0 nt=1 ss=0 pad=0 gain=50' (verbatim), chained   *** "
+"# *** through wexp='macro(...)' + au + return, with acquisition     *** "
+"# *** parameters as the loop state. Constructs the documentation    *** "
+"# *** could not settle are marked UNVERIFIED(n), where n is the     *** "
+"# *** item in the partner validation checklist in                   *** "
+"# *** vendors/agilent/README.md.                                    *** "
+"#                                                                       "
+"# INSTALL: copy this file to ~/vnmrsys/maclib/spin_noise_run (no        "
+"# extension) on the spectrometer workstation. Join an experiment with   "
+"# a calibrated 1H setup (tune/match by hand -- the partner probe has    "
+"# no autotune), then type spin_noise_run on the command line.           "
+"#                                                                       "
+"# SHAPE: a wexp-chained state machine -- the documented VnmrJ idiom     "
+"# for multi-block automation from a macro. Per the go/au manual, go     "
+"# and au return after SUBMISSION (the 'sync'/'next' keywords only       "
+"# synchronize submission), so a macro cannot block until acquisition    "
+"# ends; instead au runs the wexp macro when the experiment completes.   "
+"# Each stage here submits one block with au, names this macro as        "
+"# wexp, and returns; the next invocation saves the finished block       "
+"# with svf and submits the next one. cryo_noisetest chains exactly      "
+"# this way. Run state lives in created 'sn_*' parameters in the         "
+"# current experiment (cryo_noisetest uses the dpwr parameter as its     "
+"# loop counter -- same idiom).                                          "
+"#                                                                       "
+"# PROTOCOL (identical block structure to the Bruker orchestrator        "
+"# topspin/spin_noise_run.py): operator questions -> receiver-gain       "
+"# ladder (4 small-flip 1Ds at increasing gain) -> small-flip opening    "
+"# reference -> N no-pulse noise acquisitions -> closing reference.      "
+"# Session directory layout produced (numeric prefixes map onto the      "
+"# Bruker expno plan; packer/pack_bundle.py --vendor agilent relies      "
+"# on them):                                                             "
+"#     <session>/10_sn_ladder_a.fid ... 16_sn_ladder_d.fid               "
+"#     <session>/11_sn_ref_open.fid                                      "
+"#     <session>/12_sn_noise.fid, 17_sn_noise.fid, ... (13 reserved)     "
+"#     <session>/13_sn_ref_close.fid                                     "
+"#     <session>/answers_packer.json  (packer questionnaire, written     "
+"#                                     at setup; edit vnmrj_version!)    "
+"#     <session>/spin_noise_times.txt (wall-clock block log; clock-      "
+"#                                     audit wiring is checklist 6)      "
+"#                                                                       "
+"# THE NOISE BLOCK (the point of the run): s2pul with pw=0 tpwr=-16      "
+"# nt=1, receiver gain at the ladder maximum. pw=0 at minimum power      "
+"# is Agilent's own receiver-only idiom (cryo_noisetest). Whether the    "
+"# DD2 transmitter chain is GENUINELY silent under it is                 "
+"# UNVERIFIED(3) -- the 2022 attenuator lesson: never assume an          "
+"# attenuator is an off switch; the noise-path state (pw=0,              "
+"# tpwr=-16) is recorded in the questionnaire either way, and the        "
+"# procpar of every noise block records it again verbatim.               "
+"#                                                                       "
+"# Maintainer: John W. Blanchard, jwbquantum@gmail.com                   "
+"# Co-developed with Claude (Anthropic).                                 "
+"########################################################################"
+
+"----------------------------------------------------------------------"
+" Editable run plan. 'gain' is receiver gain in dB (VnmrJ parameter     "
+" docs; typical documented range 0-60, autogain gain='n' must NOT be    "
+" used here). UNVERIFIED(1): the DD2's legal gain values/step and the   "
+" maximum no-overflow noise gain -- snap these at the bench. The        "
+" linear rungs ($ladlin*) are 10^(dB/20), precomputed so the            "
+" questionnaire needs no exponentials.                                  "
+"----------------------------------------------------------------------"
+$ladgain1=0  $ladgain2=20 $ladgain3=40 $ladgain4=60
+$ladlin1=1.0 $ladlin2=10.0 $ladlin3=100.0 $ladlin4=1000.0
+$refgain=20
+$noisegain=60                      "UNVERIFIED(1): max no-overflow gain"
+$refat=2.0                         "reference acquisition time (s)"
+$noiseat=10.0                      "noise acquisition time per record (s)"
+$reftip=1.0                        "reference tip (degrees)"
+$sw=10000.0                        "spectral width (Hz); VnmrJ derives np"
+
+if ($# < 1) then
+
+"----------------------------------------------------------------------"
+" SETUP stage (interactive). The six operator questions, via input()    "
+" (documented; cryo_noisetest uses it the same way). input's default    "
+" field delimiter is the comma, so the prompts say: no commas.          "
+" Numeric answers arrive typed as reals (cryo_noisetest's typeof        "
+" check documents that behavior); text where a number is expected       "
+" will abort loudly later rather than acquire garbage.                  "
+"----------------------------------------------------------------------"
+  write('line3','spin-noise network run -- DRAFT macro, bench validation pending')
+  $slug='' $inst='' $city='' $country='' $sdesc='' $lock='' $consent=''
+  input('Facility slug (lowercase-hyphens, from maintainer): '):$slug
+  input('Institution (no commas): '):$inst
+  input('City: '):$city
+  input('Country: '):$country
+  input('OK to store your contact email with the data? (yes/no): '):$consent
+  input('Sample description e.g. tap water (no commas): '):$sdesc
+  input('H2O fraction in percent -- THE critical answer: '):$h2o
+  input('D2O fraction in percent: '):$d2o
+  input('Sample/VT temperature in kelvin (298 if ambient): '):$temp
+  input('Lock during noise blocks? (on/off/unknown): '):$lock
+  input('Number of noise blocks (e.g. 180 x 10 s = 30 min): '):$nnoise
+  input('Calibrated 1H 90-deg pulse in us: '):$p90
+
+"----------------------------------------------------------------------"
+" Load a standard 1H parameter set and force the run-relevant state.    "
+" setup('H1','D2O') / wshim='n' alock='n' in='n' ss=0 pad=0 nt=1 is     "
+" verbatim the cryo_noisetest preamble; spin is left in the operator's  "
+" current state on purpose (record it in the notes).                    "
+" dsp='n': cryo_noisetest sets it; UNVERIFIED(4) whether inline DSP     "
+" off is right/available on a DD2 -- ask at the bench.                  "
+"----------------------------------------------------------------------"
+  setup('H1','D2O')
+  wshim='n' alock='n' in='n' ss=0 pad=0 nt=1 dsp='n'
+  d1=1.0
+  sw=$sw at=$refat                 "VnmrJ recomputes np = 2*sw*at"
+  gain=$ladgain1
+  pw=$p90*$reftip/90.0             "small-flip reference pulse"
+
+"session directory: userdir/spinnoise_<slug>_<stamp>"
+  $stamp=''
+  systemtime('%Y%m%d_%H%M%S'):$stamp
+  $sess=userdir+'/spinnoise_'+$slug+'_'+$stamp
+  mkdir('-p',$sess):$ok
+  if ($ok<>1) then
+    write('error','spin_noise_run: cannot create %s -- aborting',$sess)
+    return
+  endif
+
+"run state as created parameters in the current experiment (create     "
+"manual: tree 'current', types 'real'/'string'; 4-arg form initializes)"
+  create('sn_stage','string','current','LADDER'):$dum
+  create('sn_ilad','real','current',1):$dum
+  create('sn_inoise','real','current',0):$dum
+  create('sn_nnoise','real','current',0):$dum
+  create('sn_p90','real','current',0):$dum
+  create('sn_tpwr','real','current',0):$dum
+  create('sn_t0','real','current',0):$dum
+  create('sn_sess','string','current',''):$dum
+  sn_stage='LADDER' sn_ilad=1 sn_inoise=0 sn_nnoise=$nnoise
+  sn_p90=$p90 sn_tpwr=tpwr sn_sess=$sess
+
+"----------------------------------------------------------------------"
+" Write the packer questionnaire now (crash-safe: whatever acquires     "
+" after this point is packable). write('reset'/'file') is the           "
+" documented text writer. Roles are fixed by the plan; per-experiment   "
+" started/finished fall back to file mtimes in the packer (checklist    "
+" 6 upgrades this from spin_noise_times.txt).                           "
+"----------------------------------------------------------------------"
+  $ans=$sess+'/answers_packer.json'
+  write('reset',$ans)
+  write('file',$ans,'{')
+  write('file',$ans,'  "_writer": "spin_noise_run.mac 0.1.0-draft (VnmrJ MAGICAL port; DRAFT pending bench validation)",')
+  write('file',$ans,'  "vendor": "agilent",')
+  write('file',$ans,'  "run_mode": "external-acquisition",')
+  write('file',$ans,'  "facility": {')
+  write('file',$ans,'    "institution": "%s",',$inst)
+  write('file',$ans,'    "city": "%s",',$city)
+  write('file',$ans,'    "country": "%s",',$country)
+  write('file',$ans,'    "facility_slug": "%s",',$slug)
+  write('file',$ans,'    "contact_email": "",')
+  if ($consent='yes') then
+    write('file',$ans,'    "contact_consent": true')
+  else
+    write('file',$ans,'    "contact_consent": false')
+  endif
+  write('file',$ans,'  },')
+  write('file',$ans,'  "sample": {')
+  write('file',$ans,'    "description": "%s",',$sdesc)
+  write('file',$ans,'    "h2o_fraction_pct": %g,',$h2o)
+  write('file',$ans,'    "d2o_pct": %g,',$d2o)
+  write('file',$ans,'    "additives": "none",')
+  write('file',$ans,'    "tube_od_mm": 5.0,')
+  write('file',$ans,'    "sample_volume_ul": 550.0,')
+  write('file',$ans,'    "vt_setpoint_k": %g',$temp)
+  write('file',$ans,'  },')
+  write('file',$ans,'  "environment": {')
+  if ($lock='on') then
+    write('file',$ans,'    "locked": true,')
+  else
+    write('file',$ans,'    "locked": false,')
+  endif
+  write('file',$ans,'    "operator_notes": "lock state during noise blocks: %s. Noise path: s2pul pw=0 tpwr=-16 (cryo_noisetest idiom); TX silence unverified on this console -- the 2022 attenuator lesson applies. Spinner left in operator state."',$lock)
+  write('file',$ans,'  },')
+  write('file',$ans,'  "spectrometer": {')
+  write('file',$ans,'    "probe_type": "RT",')
+  write('file',$ans,'    "console": "CHANGE ME (e.g. Agilent DD2 400)",')
+  write('file',$ans,'    "probe_string": "%s",',probe)
+  write('file',$ans,'    "coil_temp_k": null,')
+  write('file',$ans,'    "preamp_temp_k": null')
+  write('file',$ans,'  },')
+  write('file',$ans,'  "instrument": {')
+  write('file',$ans,'    "vnmrj_version": "CHANGE ME (e.g. 3.2 -- Help/About; no verified procpar source, checklist 8)",')
+  write('file',$ans,'    "spectrometer_model": "CHANGE ME (e.g. Agilent DD2 400)",')
+  write('file',$ans,'    "field_state_notes": "lock %s during noise blocks; z0/lock not commanded by this macro"',$lock)
+  write('file',$ans,'  },')
+  write('file',$ans,'  "calibration": {')
+  write('file',$ans,'    "p90_us": %g,',$p90)
+  write('file',$ans,'    "p90_power_db_or_w": "tpwr %g dB",',tpwr)
+  write('file',$ans,'    "topshim_ok": false,')
+  write('file',$ans,'    "rg_ladder": [')
+  write('file',$ans,'      {"expno": 10, "rg": %g, "tip_deg": %g},',$ladlin1,$reftip)
+  write('file',$ans,'      {"expno": 14, "rg": %g, "tip_deg": %g},',$ladlin2,$reftip)
+  write('file',$ans,'      {"expno": 15, "rg": %g, "tip_deg": %g},',$ladlin3,$reftip)
+  write('file',$ans,'      {"expno": 16, "rg": %g, "tip_deg": %g}',$ladlin4,$reftip)
+  write('file',$ans,'    ]')
+  write('file',$ans,'  },')
+  write('file',$ans,'  "experiments": [')
+  write('file',$ans,'    {"expno": 10, "role": "rg_ladder"},')
+  write('file',$ans,'    {"expno": 14, "role": "rg_ladder"},')
+  write('file',$ans,'    {"expno": 15, "role": "rg_ladder"},')
+  write('file',$ans,'    {"expno": 16, "role": "rg_ladder"},')
+  write('file',$ans,'    {"expno": 11, "role": "reference_open"},')
+  write('file',$ans,'    {"expno": 12, "role": "noise"},')
+  $k=1
+  while ($k <= $nnoise-1) do
+    write('file',$ans,'    {"expno": %d, "role": "noise"},',16+$k)
+    $k=$k+1
+  endwhile
+  write('file',$ans,'    {"expno": 13, "role": "reference_close"}')
+  write('file',$ans,'  ]')
+  write('file',$ans,'}')
+
+"block-time log (sidecar; clock-audit wiring is checklist item 6)"
+  $times=$sess+'/spin_noise_times.txt'
+  write('reset',$times)
+  write('file',$times,'# expno role wall_submit_s wall_wexp_s (unixtime seconds since 1970, workstation clock)')
+
+  unixtime:sn_t0
+  write('line3','spin-noise run: session %s -- submitting ladder rung 1/4',$sess)
+  wexp='spin_noise_run(\'NEXT\')'
+  au
+  return
+endif
+
+"########################################################################"
+"# Chained stage: wexp calls spin_noise_run('NEXT') each time a block    "
+"# completes. UNVERIFIED(5): this wexp quoting/recursion pattern and     "
+"# created-parameter persistence on VnmrJ 3.2 specifically -- the        "
+"# pattern is verbatim cryo_noisetest, but that macro's vintage vs 3.2   "
+"# is unknown; first bench item after install.                           "
+"########################################################################"
+if ($1='NEXT') then
+
+  exists('sn_stage','parameter'):$e
+  if ($e<>1) then
+    write('error','spin_noise_run: no run state in this experiment -- run spin_noise_run (no arguments) to start')
+    return
+  endif
+  $sess=sn_sess
+  $times=$sess+'/spin_noise_times.txt'
+  unixtime:$t1
+
+  if (sn_stage='LADDER') then
+    "save the rung that just finished (svf manual: writes procpar,"
+    "text, log, and fid into <name>.fid; UNVERIFIED(7): behavior with"
+    "absolute session paths and name collisions on 3.2)"
+    if (sn_ilad=1) then
+      svf($sess+'/10_sn_ladder_a')
+      write('file',$times,'10 rg_ladder %d %d',sn_t0,$t1)
+      gain=$ladgain2
+    endif
+    if (sn_ilad=2) then
+      svf($sess+'/14_sn_ladder_b')
+      write('file',$times,'14 rg_ladder %d %d',sn_t0,$t1)
+      gain=$ladgain3
+    endif
+    if (sn_ilad=3) then
+      svf($sess+'/15_sn_ladder_c')
+      write('file',$times,'15 rg_ladder %d %d',sn_t0,$t1)
+      gain=$ladgain4
+    endif
+    if (sn_ilad=4) then
+      svf($sess+'/16_sn_ladder_d')
+      write('file',$times,'16 rg_ladder %d %d',sn_t0,$t1)
+      "ladder done -> opening reference at the reference gain"
+      gain=$refgain at=$refat pw=sn_p90*$reftip/90.0 tpwr=sn_tpwr
+      sn_stage='REFOPEN'
+      write('line3','spin-noise run: ladder done -- submitting opening reference')
+    else
+      sn_ilad=sn_ilad+1
+      write('line3','spin-noise run: submitting ladder rung %g/4',sn_ilad)
+    endif
+    sn_t0=$t1
+    wexp='spin_noise_run(\'NEXT\')'
+    au
+    return
+  endif
+
+  if (sn_stage='REFOPEN') then
+    svf($sess+'/11_sn_ref_open')
+    write('file',$times,'11 reference_open %d %d',sn_t0,$t1)
+    "-> first noise block: NO PULSE, minimum power, max stable gain."
+    "pw=0 tpwr=-16 nt=1: verbatim the cryo_noisetest receiver-only"
+    "idiom. UNVERIFIED(3): TX-chain silence on the DD2."
+    gain=$noisegain at=$noiseat pw=0 tpwr=-16
+    sn_stage='NOISE' sn_inoise=1 sn_t0=$t1
+    write('line3','spin-noise run: submitting noise block 1 of %g',sn_nnoise)
+    wexp='spin_noise_run(\'NEXT\')'
+    au
+    return
+  endif
+
+  if (sn_stage='NOISE') then
+    "save the block that just finished. Bruker plan numbering: block 1"
+    "-> expno 12; block k>=2 -> expno 16+k (13 is the closing ref)."
+    if (sn_inoise=1) then
+      svf($sess+'/12_sn_noise')
+      write('file',$times,'12 noise %d %d',sn_t0,$t1)
+    else
+      "write-to-line3 with a return value formats into the variable"
+      "without displaying (write manual, verbatim behavior)"
+      $name=''
+      write('line3','%s/%d_sn_noise',$sess,16+sn_inoise):$name
+      svf($name)
+      write('file',$times,'%d noise %d %d',16+sn_inoise,sn_t0,$t1)
+    endif
+    sn_t0=$t1
+    if (sn_inoise < sn_nnoise) then
+      sn_inoise=sn_inoise+1
+      write('line3','spin-noise run: submitting noise block %g of %g',sn_inoise,sn_nnoise)
+    else
+      "-> closing reference (drift check against the opening one)"
+      gain=$refgain at=$refat pw=sn_p90*$reftip/90.0 tpwr=sn_tpwr
+      sn_stage='REFCLOSE'
+      write('line3','spin-noise run: noise done -- submitting closing reference')
+    endif
+    wexp='spin_noise_run(\'NEXT\')'
+    au
+    return
+  endif
+
+  if (sn_stage='REFCLOSE') then
+    svf($sess+'/13_sn_ref_close')
+    write('file',$times,'13 reference_close %d %d',sn_t0,$t1)
+    sn_stage='DONE'
+    write('line3','spin-noise run DONE. Edit answers_packer.json in %s (vnmrj_version!), then on any Python 3 machine: python3 packer/pack_bundle.py <session> --answers <session>/answers_packer.json --vendor agilent',$sess)
+    return
+  endif
+
+  write('error','spin_noise_run: unexpected stage %s -- session already done? Run spin_noise_run to start a new one',sn_stage)
+  return
+endif
+
+write('error','spin_noise_run: unknown argument -- run spin_noise_run without arguments to start')

@@ -175,11 +175,16 @@ check("schema: orchestrator SCHEMA_VERSION (%r) is uploader-supported (%r)"
       % (script_schema, supported),
       script_schema in supported and script_schema is not None)
 
-check("schema: vendor enum required with bruker/jeol/magritek (v2.0)",
+check("schema: vendor enum required with bruker/jeol/magritek/agilent/nanalysis (v2.0)",
       "vendor" in schema.get("required", [])
       and schema.get("properties", {}).get("vendor", {}).get("enum")
-      == ["bruker", "jeol", "magritek"]
+      == ["bruker", "jeol", "magritek", "agilent", "nanalysis"]
       and "instrument" in schema.get("required", []))
+
+check("schema: every vendor enum value has an instrument.<vendor> block",
+      set(schema.get("properties", {}).get("vendor", {}).get("enum") or [])
+      <= set(schema.get("properties", {}).get("instrument", {})
+             .get("properties", {})))
 
 
 # --------------------------------------------------------------------------

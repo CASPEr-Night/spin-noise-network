@@ -1,0 +1,39 @@
+{
+  "generated_at": "2026-08-27T18:51:42+00:00",
+  "endpoint": "https://spin-noise-ingest.johnwblanchard.workers.dev",
+  "count": 1,
+  "facilities": [
+    {
+      "submitted_at": "2026-08-27T17:39:27.630Z",
+      "institution": "Southern Illinois University Carbondale",
+      "contact_name": "Boyd Goodson",
+      "contact_email": "bgoodson@chem.siu.edu",
+      "spectrometers": "400 MHZ / Agilent Technologies DD2 / VnmrJ v3.2\n500 Mhz / JEOL ECZ Luminous / Delta v6.3\n300 Mhz / Bruker Avance III HD / Topspin 3.5 pI 7\n60 Mhz / NMReady 60PRO / Nanalysis v2.2.6.2",
+      "probes": "5mm_HCN_TTR_W055  (for 400), room temp, no autotune/match\nROHFX/FGHQ, room temp (for 500. 5mm), yes can autotune/match\nPA BBO 300S1 BBF-H-D-05 Z (for 300), room temp, yes can autotune/match\nBenchtop, room temp, no autotune/match, Firmware version v2.6.0",
+      "city": "Carbondale, IL",
+      "country": "USA",
+      "city_country_raw": "Carbondale, IL, USA",
+      "heard_via": "from John via the Pinenuts Whatsapp",
+      "consent_contact": true,
+      "consent_map": true,
+      "forwarder": "forms_forwarder.gs",
+      "_registry_key": "registry/20260827T184719Z_0e0d2848.json",
+      "_stored_at": "2026-08-27T18:47:19.315Z"
+    }
+  ],
+  "sidereal_coverage": {
+    "coverage_fraction": 0.5,
+    "vif_const": 3.3418670585896857,
+    "vif_sidereal_amp": 2.6897224897328993,
+    "n_rows": 840,
+    "n_days": 14,
+    "night_hours": 10.0,
+    "sites": [
+      {
+        "institution": "Southern Illinois University Carbondale",
+        "lat": 37.7,
+        "lon_east": -89.2
+      }
+    ]
+  }
+}
