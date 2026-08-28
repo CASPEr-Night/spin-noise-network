@@ -177,7 +177,7 @@ def fetch_registry(base, token):
     req = urllib.request.Request(
         base + "/registry/list",
         headers={"Authorization": "Bearer " + token,
-                 "User-Agent": "spin-noise-registry-report/0.3.0"},
+                 "User-Agent": "spin-noise-registry-report/0.4.0"},
     )
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
