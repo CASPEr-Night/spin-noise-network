@@ -38,6 +38,11 @@ spin-noise-limited records relevant to fundamental-sensitivity and dark-matter
    **resumes where it left off** if the network drops or the machine reboots — just
    rerun the same command.
 
+**Something not working?** [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)
+is indexed by symptom and quotes the exact error messages; the first move is
+always `python3 uploader/upload_bundle.py --doctor`, which self-diagnoses the
+install (Python, config, network path, TLS, clock) with no bundle needed.
+
 **Using Claude Code (or another AI coding agent)?** Point it at
 [docs/CLAUDE_INSTALL.md](docs/CLAUDE_INSTALL.md) — an agent-facing runbook that
 walks it through install, configuration, validation, packing, and upload, with

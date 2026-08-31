@@ -136,6 +136,9 @@ ok "small: $(basename "${SMALL_ZIP}") ($(du -m "${SMALL_ZIP}" | cut -f1) MB)"
 ok "big  : $(basename "${BIG_ZIP}") ($(du -m "${BIG_ZIP}" | cut -f1) MB)"
 
 step "1. single-shot path (<= 50 MiB -> POST /ingest)"
+echo "--- doctor preflight against the mock server ---"
+python3 "${UPLOADER}" --doctor ${CFG} || fail "doctor reported problems against the mock server"
+
 OUT="$(python3 "${UPLOADER}" "${SMALL_ZIP}" ${CFG} --allow-test-bundle)" || { echo "${OUT}"; fail "small upload failed"; }
 echo "${OUT}" | grep -q "UPLOAD OK"  || { echo "${OUT}"; fail "no UPLOAD OK for small bundle"; }
 echo "${OUT}" | grep -q "RECEIPT: "  || { echo "${OUT}"; fail "no RECEIPT for small bundle"; }
