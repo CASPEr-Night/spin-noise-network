@@ -157,10 +157,75 @@ Success prints a server receipt. On any failure the bundle is never
 deleted and the script prints manual-upload instructions — relay them
 to the human verbatim. Large bundles resume automatically if rerun.
 
-## Step 8 — report back
+## Step 8 — validation campaign: what to TEST on a first-time facility
+
+The first bundle from a new facility — and ESPECIALLY the first real
+data through a young vendor path (the Agilent and Nanalysis readers
+have so far been validated against synthetic fixtures and the
+published binary layouts, never against a real console's files) —
+doubles as a software validation run. Work through this checklist and
+put the results in your report. A precise "it failed at V3, here is
+the exact output" is worth exactly as much to the project as all-pass.
+
+V1 — source-data sanity (before packing). For each noise record the
+human saved: the data directory is complete (Agilent: `.fid/` with
+`fid` and `procpar`). Read the parameters and report them to the
+human: np, sw, sfrq, nt, pw, tpwr, gain (Agilent names; use the
+vendor equivalents elsewhere). Confirm WITH THEM that the no-pulse
+recipe from the quickstart was in force — pw 0 (or the console's
+minimum), minimum tpwr, nt=1. You are recording what actually ran,
+not judging it.
+
+V2 — pack (Step 6) and capture the packer's output VERBATIM. On a
+first-time vendor, every warning is a finding, not noise.
+
+V3 — validate: `--selftest` and then `--verify-only` both end PASS/OK.
+
+V4 — byte round-trip. The bundle must carry the raw vendor files
+unmodified: unzip it to a temporary directory and compare the sha256
+of each source `fid`/`procpar` against its bundled copy. Report any
+mismatch with both paths and both hashes.
+
+V5 — metadata spot-check WITH the human: `h1_freq_mhz` against the
+console's nameplate frequency, sample description, temperatures,
+facility fields. Wrong metadata is a finding too.
+
+V6 — upload (Step 7) and record the server receipt.
+
+V7 — send a validation report to the maintainer (contact in
+CITATION.cff), using this template:
+
+    Facility / slug:
+    Vendor, console, software version (e.g. VnmrJ 3.2 on a DD2):
+    Probe + nominal 1H frequency:
+    OS + python3 version on the machine used:
+    Checklist V1..V6: PASS/FAIL each, one line of detail
+    Packer warnings (verbatim):
+    Upload receipt:
+    Attached: one procpar (or vendor equivalent) from a noise record
+      -- it is a plain-text parameter file, no secrets in it -- and,
+      if anything failed, the first 64 bytes of the matching fid:
+      python3 -c "print(open('fid','rb').read(64).hex())"
+    Anything odd the human noticed during acquisition:
+
+If you get BLOCKED at any step: collect the exact command, its full
+output, the procpar, the hex dump above, and `python3 --version`, and
+send that instead of a completed checklist. Do not retry blindly and
+do not patch the code (hard rule 3) — a precise failure report from a
+real console is one of the most valuable artifacts this project
+receives.
+
+What NOT to test: anything that pulses or touches hardware (hard rule
+1 stands throughout), and the Tier-2 acquisition macros (e.g.
+`vendors/agilent/spin_noise_run.mac`) — those get their first
+hardware runs only in coordination with the maintainer, after the
+converter path above is validated on your console.
+
+## Step 9 — report back
 
 Tell the human, in plain language: what you installed and where, which
-verifications passed, what remains for THEM (the acquisition session,
-per PROTOCOL.md and their vendor quickstart), and that questions about
-tokens, slugs, or odd data go to the maintainer (contact in
-CITATION.cff). If anything above failed verification, lead with that.
+verifications passed, the validation-checklist outcome, what remains
+for THEM (the acquisition session, per PROTOCOL.md and their vendor
+quickstart), and that questions about tokens, slugs, or odd data go to
+the maintainer (contact in CITATION.cff). If anything above failed
+verification, lead with that.
