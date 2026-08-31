@@ -167,6 +167,16 @@ doubles as a software validation run. Work through this checklist and
 put the results in your report. A precise "it failed at V3, here is
 the exact output" is worth exactly as much to the project as all-pass.
 
+BRUKER VARIANT: on Bruker facilities the orchestrator acquires AND
+bundles by itself, so V1, V2, and V4 change shape: V1 becomes "the
+human ran `xpy spin_noise_run desktest` first and it completed with a
+desktest bundle" (a plumbing rehearsal before the real session); V2 is
+skipped (no packing step); V4 becomes "the bundle's `meta.json` says
+`run_mode: live`, `experiments` covers setup / rg_ladder /
+reference_open / noise / reference_close, and `clock_audit.blocks` is
+non-empty" (read the zip's meta.json; you can do all of this without
+touching TopSpin). V3, V5, V6, V7 apply unchanged.
+
 V1 — source-data sanity (before packing). For each noise record the
 human saved: the data directory is complete (Agilent: `.fid/` with
 `fid` and `procpar`). Read the parameters and report them to the
