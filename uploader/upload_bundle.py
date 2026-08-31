@@ -63,7 +63,7 @@ except ImportError:  # pragma: no cover - cannot happen on py3, but stay polite
 # Kept in sync with the repository VERSION file (a literal, not a file
 # read, because this script is copied standalone to facility machines);
 # testing/static_check.py enforces the sync.
-UPLOADER_VERSION = "0.5.0"
+UPLOADER_VERSION = "0.5.1"
 
 # Metadata schema versions this uploader understands.  The shipped
 # schema/meta.schema.json describes the CURRENT version (2.0, which made
@@ -132,18 +132,77 @@ def sha256_of_file(path):
 
 
 def load_config(path):
-    """Return (config_dict, None) or (None, error_message)."""
+    """Return (config_dict, None) or (None, error_message).
+
+    Robust against the two classic Windows-editor injuries: a UTF-8 BOM
+    (read with utf-8-sig, which is a no-op on clean files) and curly
+    "smart quotes" from editing JSON in a word processor -- the latter
+    gets a targeted hint instead of a bare parser error. String values
+    are stripped (tokens pasted from email often carry a newline)."""
     if not os.path.isfile(path):
         return None, "config file not found: %s" % path
     try:
-        with open(path, "r") as fh:
-            cfg = json.load(fh)
+        with open(path, "r", encoding="utf-8-sig") as fh:
+            raw = fh.read()
+        cfg = json.loads(raw)
     except ValueError as exc:
-        return None, "config file %s is not valid JSON: %s" % (path, exc)
+        hint = ""
+        try:
+            if any(q in raw for q in (u"\u201c", u"\u201d", u"\u2018",
+                                      u"\u2019")):
+                hint = (" -- the file contains curly 'smart quotes', "
+                        "usually from editing in Word/TextEdit; recreate "
+                        "it in a plain-text editor with straight quotes")
+        except Exception:
+            pass
+        return None, "config file %s is not valid JSON: %s%s" % (path, exc,
+                                                                 hint)
+    for k in ("endpoint_url", "token", "facility_slug", "maintainer_email"):
+        v = cfg.get(k)
+        if isinstance(v, str):
+            cfg[k] = v.strip()
     missing = [k for k in ("endpoint_url", "token", "facility_slug") if not cfg.get(k)]
     if missing:
         return None, "config file %s is missing required key(s): %s" % (path, ", ".join(missing))
     return cfg, None
+
+
+# Run modes whose bundles are plumbing tests / synthetic validation, never
+# science data. The uploader refuses to ship them without an explicit
+# override, because a desktest rehearsal zip is otherwise indistinguishable
+# from the night's real bundle in a directory listing.
+TEST_RUN_MODES = ("simulate", "desktest", "synthetic-injection")
+
+
+def bundle_run_mode(bundle_path):
+    """software.run_mode from the bundle's meta.json, or None."""
+    try:
+        with zipfile.ZipFile(bundle_path, "r") as zf:
+            meta = json.loads(zf.read("meta.json").decode("utf-8"))
+        return (meta.get("software") or {}).get("run_mode")
+    except Exception:
+        return None
+
+
+def cert_error_hint(exc):
+    """A message when exc is a TLS trust/clock failure (NOT transient --
+    retrying cannot help), else None."""
+    try:
+        text = ("%s %s" % (getattr(exc, "reason", ""), exc)).lower()
+    except Exception:
+        return None
+    if ("certificate_verify_failed" in text
+            or "certificate verify failed" in text
+            or "certificate is not yet valid" in text
+            or "certificate has expired" in text):
+        return ("this machine cannot verify the server's TLS certificate. "
+                "That is NOT a network outage, and retrying will not help. "
+                "Usual causes: the system clock is wrong (run 'date' and "
+                "check the YEAR), or the OS certificate store is too old "
+                "(unpatched pre-2021 systems). Fix the clock or upload "
+                "this zip from any current machine -- never disable "
+                "certificate verification.")
+    return None
 
 
 def fallback_instructions(bundle_path, maintainer_email):
@@ -609,6 +668,10 @@ def json_call_with_retries(url, method, payload, token, what):
         try:
             code, parsed = http_json_call(url, method, payload, token)
         except (urlerror.URLError, ssl.SSLError, OSError) as exc:
+            hint = cert_error_hint(exc)
+            if hint:
+                print("ERROR: %s" % hint)
+                return None, None
             reason = getattr(exc, "reason", exc)
             print("WARN : could not reach server for %s (%s)." % (what, reason))
             continue
@@ -739,8 +802,18 @@ def do_upload(bundle_path, cfg, digest_hex, dry_run):
             print("WARN : HTTP %d from server (%s) -- transient, will retry." % (code, detail or exc.reason))
 
         except urlerror.URLError as exc:
+            hint = cert_error_hint(exc)
+            if hint:
+                print("ERROR: %s" % hint)
+                print(fallback_instructions(bundle_path, maintainer))
+                return 1
             print("WARN : could not reach %s (%s)." % (url, exc.reason))
         except (ssl.SSLError, OSError) as exc:
+            hint = cert_error_hint(exc)
+            if hint:
+                print("ERROR: %s" % hint)
+                print(fallback_instructions(bundle_path, maintainer))
+                return 1
             print("WARN : network/TLS error: %s" % exc)
 
     # All attempts exhausted.
@@ -812,6 +885,10 @@ def _upload_one_part(base, token, key, upload_id, fh, part, n_parts, size):
                 continue
             return None, code  # 4xx: terminal, caller explains
         except (urlerror.URLError, ssl.SSLError, OSError) as exc:
+            hint = cert_error_hint(exc)
+            if hint:
+                print("ERROR: %s" % hint)
+                return None, None
             reason = getattr(exc, "reason", exc)
             print("WARN : network error on part %d (%s)." % (part, reason))
     return None, None
@@ -1029,6 +1106,11 @@ def main(argv=None):
                         help="compute checksum and show the request, but send nothing")
     parser.add_argument("--verify-only", action="store_true",
                         help="validate the bundle and print its sha256; no network")
+    parser.add_argument("--allow-test-bundle", action="store_true",
+                        help="permit uploading a bundle whose run_mode is a "
+                             "plumbing test (simulate/desktest/"
+                             "synthetic-injection) -- integration testing "
+                             "only, never for contributions")
     parser.add_argument("--selftest", action="store_true",
                         help="validate zip structure and meta.json against "
                              "schema/meta.schema.json; no network")
@@ -1050,10 +1132,23 @@ def main(argv=None):
 
     # ---- offline modes ----------------------------------------------------
     if args.selftest or args.verify_only:
+        if not os.path.isfile(schema_path):
+            print("ERROR: schema file not found: %s" % schema_path)
+            print("       --selftest/--verify-only exist to validate against")
+            print("       the schema; without it the check would be an empty")
+            print("       PASS. Run from a full repository checkout, or pass")
+            print("       --schema /path/to/meta.schema.json.")
+            return 2
         print("Validating bundle: %s" % bundle_path)
         ok, msgs = verify_bundle(bundle_path, schema_path)
         for m in msgs:
             print(m)
+        mode = bundle_run_mode(bundle_path)
+        if mode in TEST_RUN_MODES:
+            print("NOTE : run_mode '%s' -- this bundle is a PLUMBING TEST, "
+                  "not data. Do not upload it as a contribution (the "
+                  "uploader will refuse it without --allow-test-bundle)."
+                  % mode)
         if args.verify_only:
             print("sha256: %s" % sha256_of_file(bundle_path))
         print("RESULT: %s" % ("PASS" if ok else "FAIL"))
@@ -1073,6 +1168,17 @@ def main(argv=None):
 
     if args.abort:
         return do_abort(bundle_path, cfg)
+
+    mode = bundle_run_mode(bundle_path)
+    if mode in TEST_RUN_MODES and not args.allow_test_bundle:
+        print("ERROR: this bundle's run_mode is '%s' -- a plumbing test /" % mode)
+        print("       rehearsal, not measurement data. Uploading it as a")
+        print("       contribution would be confusing for everyone: the")
+        print("       analysis refuses such bundles by design.")
+        print("       If two zips sit in the dataset directory, the LIVE one")
+        print("       is the one whose meta.json says run_mode 'live'.")
+        print("       (Integration tests may pass --allow-test-bundle.)")
+        return 1
 
     # Quick structural sanity check before burning upload bandwidth.
     # Hash verification of every data file is skipped here for speed; run

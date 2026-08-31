@@ -86,7 +86,8 @@ console. Contact for everything: John W. Blanchard, jwbquantum@gmail.com.
    greeting shows `*** SIMULATE MODE ***`, then facility → slug → contact
    consent → sample (H₂O fraction!) → VT → duration → lock → sweep
    confirmation → hardware check → probe type → probe temperatures → P90
-   confirmation → noise-start notice → final notes. Confirm the final dialog
+   confirmation → final notes (the noise block AUTO-STARTS after a 30 s
+   status-line countdown; the P90 confirmation is the walk-away point). Confirm the final dialog
    reports a bundle zip path and the zip exists. This proves the dialog
    chain and bundling on *their* TopSpin before anything touches hardware.
 4. **DESKTEST run (10 min).** `xpy spin_noise_run desktest`. Watch for the
