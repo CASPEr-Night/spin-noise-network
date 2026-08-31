@@ -91,9 +91,22 @@ DESKTEST = False          # True: Tier-0 desk test.  Like SIMULATE, but it
                           # testing/tier0_desktest.md.  Runtime:
                           #     xpy spin_noise_run desktest
 
+RDOPT = False             # True: run the probe-tuning scan for maximum
+                          # radiation damping after setup (needs ATM).
+                          # Runtime:  xpy spin_noise_run rdopt
+                          # Design: docs/design_rdopt_locksweep.md.
+
+SWEEP = False             # True: replace the single noise block with a
+                          # ladder of field-stepped noise blocks (each
+                          # step = its own axion mass point; operator
+                          # shifts the field, the script verifies by
+                          # measurement).  Runtime:
+                          #     xpy spin_noise_run sweep
+                          # Composable with rdopt / simulate / desktest.
+
 # Single source of truth for the script version.  KEEP IN SYNC with the
 # repository VERSION file (testing/static_check.py enforces the match).
-SCRIPT_VERSION  = "0.4.0"
+SCRIPT_VERSION  = "0.5.0"
 PROGRAM_VERSION = SCRIPT_VERSION  # alias kept for meta.json 'program_version'
 # This TopSpin orchestrator still writes schema 1.2 bundles (the last
 # Bruker-only schema).  The repository schema is 2.0 (vendor-neutral:
@@ -140,6 +153,9 @@ import sys
 import os
 import time
 import traceback
+import math
+import re
+import struct
 
 IN_TOPSPIN = 1
 try:
@@ -236,6 +252,10 @@ try:
             SIMULATE = True
         if _al in ("desktest", "--desktest", "-d"):
             DESKTEST = True
+        if _al in ("rdopt", "--rdopt", "--rd-optimize"):
+            RDOPT = True
+        if _al in ("sweep", "--sweep", "--lock-sweep"):
+            SWEEP = True
 except Exception:
     pass
 
@@ -699,6 +719,27 @@ def copy_tree(src, dst):
                 print "spin_noise_run: WARNING could not copy %s" % s
 
 
+def remove_tree(path):
+    """Recursive dir removal via os.listdir (shutil unreliable on old
+    Jython). Best-effort: a file that will not delete is reported, not
+    fatal."""
+    if not os.path.isdir(path):
+        return
+    for name in os.listdir(path):
+        p = os.path.join(path, name)
+        if os.path.isdir(p):
+            remove_tree(p)
+        else:
+            try:
+                os.remove(p)
+            except Exception:
+                print "spin_noise_run: WARNING could not remove %s" % p
+    try:
+        os.rmdir(path)
+    except Exception:
+        print "spin_noise_run: WARNING could not remove dir %s" % path
+
+
 # ============================================================================
 # Defensive TopSpin wrappers
 # ============================================================================
@@ -1052,6 +1093,681 @@ def record_experiment(meta, expno, role, started, finished, rows):
     }
     meta["experiments"].append(entry)
     return entry
+
+
+# ============================================================================
+# Optional features: rd-optimize (probe-tuning scan for maximum radiation
+# damping) and the field-stepped noise sweep ("lock sweep").
+# Both are OFF by default; argv flags 'rdopt' / 'sweep' enable them.
+# Design: docs/design_rdopt_locksweep.md.
+# ============================================================================
+
+RDOPT_OFFSETS_DEFAULT = "0, -100, -200, -350, -500, 100, 250"  # kHz;
+# cryoprobe spin-noise optima sit 150-500 kHz BELOW nominal in the
+# literature (Nausner 2010; Poeschko 2014; 600 TCI measured -488 kHz),
+# hence the down-weighted ladder
+RDOPT_RG = 8.0               # fixed gain across the scan (comparability)
+RDOPT_MAX_OFFSETS = 9
+RDOPT_MIN_IMPROVEMENT = 0.10  # keep D=0 unless >=10% faster decay
+RDOPT_MIN_AMP_FRAC = 0.3      # disqualify tunings with collapsed pickup
+EXP_RDOPT_BASE = 20           # scan 1Ds: 20, 21, ...
+
+SWEEP_STEPS_DEFAULT = 5
+SWEEP_STEPS_MAX = 8
+SWEEP_SPAN_HZ_DEFAULT = 1500.0
+SWEEP_MIN_STEP_SECS = 300.0
+SWEEP_TOL_FRAC = 0.2          # accept |measured-target| <= max(20%, 30 Hz)
+SWEEP_TOL_HZ = 30.0
+SWEEP_SPAN_MAX_HZ = 3000.0    # keep the line inside the +/-SWH/2 band
+SWEEP_FU_HZ_EST = 8.0         # ~Hz per BSMS field unit at 1H, std bore
+EXP_SWEEP_VERIFY_BASE = 30    # baseline 30, steps 31.., restore last
+EXP_SWEEP_NOISE_BASE = 50     # one noise block per step: 50, 51, ...
+
+FID_SKIP_POINTS = 128         # digital-filter charge-up points to skip
+
+
+def _acqus_scalar(expno_dir, key, default):
+    """One scalar from the expno's acqus file (written by the console
+    after acquisition -- authoritative, unlike GETPAR for status
+    values). Returns default on any problem."""
+    try:
+        f = open(os.path.join(expno_dir, "acqus"), "r")
+        txt = f.read()
+        f.close()
+        m = re.search(r"##\$" + key + r"=\s*([-+0-9.eE]+)", txt)
+        if m:
+            return float(m.group(1))
+    except Exception:
+        pass
+    return default
+
+
+def read_fid_points(expno_dir, n_want):
+    """Read data points from <expno_dir>/fid as [(re, im), ...] floats,
+    honoring the acqus BYTORDA/DTYPA/TD. Returns None on any problem
+    (missing file, unreadable acqus, mock modes with no real data)."""
+    try:
+        path = os.path.join(expno_dir, "fid")
+        if not os.path.isfile(path):
+            return None
+        td = int(_acqus_scalar(expno_dir, "TD", 0))
+        byt = int(_acqus_scalar(expno_dir, "BYTORDA", 0))
+        dt = int(_acqus_scalar(expno_dir, "DTYPA", 0))
+        if td < 64:
+            return None
+        if dt == 2:
+            size, code = 8, "d"
+        else:
+            size, code = 4, "i"
+        if byt == 0:
+            endian = "<"
+        else:
+            endian = ">"
+        nvals = min(td, 2 * n_want)
+        f = open(path, "rb")
+        buf = f.read(nvals * size)
+        f.close()
+        n = len(buf) // size
+        n = n - (n % 2)
+        if n < 64:
+            return None
+        vals = struct.unpack(endian + str(n) + code, buf[:n * size])
+        pts = []
+        i = 0
+        while i + 1 < n:
+            pts.append((float(vals[i]), float(vals[i + 1])))
+            i += 2
+        return pts
+    except Exception:
+        return None
+
+
+def fid_envelope_decay(points, dwell_s, skip):
+    """(rate_per_s, amp0) from a log-linear fit of the FID magnitude
+    starting at `skip`. For a small tip from +z the envelope decays at
+    1/T2* + lambda_r; with the shim fixed, a larger rate means more
+    radiation damping. The 4x-tail level defines the fit's ENDPOINT
+    (where signal meets the noise floor), never a per-point gate: a
+    slowly decaying FID whose tail is still signal-dominated is fitted
+    over the full early window, so weak radiation damping measures as a
+    small rate instead of failing. Returns (None, None) when unusable."""
+    try:
+        n = len(points)
+        if n < skip + 64:
+            return None, None
+        mags = []
+        for (a, b) in points:
+            mags.append(math.sqrt(a * a + b * b))
+        tail = sorted(mags[int(n * 0.9):])
+        if not tail:
+            return None, None
+        tail_med = tail[len(tail) // 2]
+        lo = skip
+        hi = int(n * 0.4)
+        if hi < lo + 32:
+            hi = min(n, lo + 32)
+        if mags[lo] > 4.0 * tail_med:
+            # signal reaches the floor inside the record: fit up to the
+            # crossing (fast decay); at the floor within a few points =
+            # far too fast to sample -- unusable
+            cut = hi
+            k = lo
+            while k < hi and k < n:
+                if mags[k] <= 4.0 * tail_med:
+                    cut = k
+                    break
+                k += 1
+            if cut - lo < 24:
+                return None, None
+        else:
+            # the envelope never rises 4x above the tail: the record
+            # never reaches the noise floor (slow decay, weak radiation
+            # damping) -- fit the full early window. A true no-signal
+            # record fits to rate ~0 with a tiny amplitude, which the
+            # caller's amplitude qualifier rejects.
+            cut = hi
+        xs, ys = [], []
+        k = lo
+        while k < cut and k < n:
+            m = mags[k]
+            if m > 0.0:
+                xs.append(k * dwell_s)
+                ys.append(math.log(m))
+            k += 1
+        if len(xs) < 16:
+            return None, None
+        nn = float(len(xs))
+        sx = sum(xs)
+        sy = sum(ys)
+        sxx = 0.0
+        sxy = 0.0
+        for i in range(len(xs)):
+            sxx += xs[i] * xs[i]
+            sxy += xs[i] * ys[i]
+        denom = nn * sxx - sx * sx
+        if denom <= 0:
+            return None, None
+        slope = (nn * sxy - sx * sy) / denom
+        intercept = (sy - slope * sx) / nn
+        return -slope, math.exp(intercept)
+    except Exception:
+        return None, None
+
+
+def fid_dominant_offset_hz(points, dwell_s, skip):
+    """Offset of the dominant line from the carrier via the pulse-pair
+    (Kay) estimator: the angle of sum_k z[k+1]*conj(z[k]). Magnitude-
+    weighted by construction, no FFT needed. The SIGN follows the
+    receiver's quadrature convention -- consistent within a session, so
+    DIFFERENCES between steps are the physical field shifts. None when
+    unusable. Unambiguous for |offset| < SWH/2."""
+    try:
+        n = len(points)
+        lo = skip
+        hi = min(n - 1, skip + 4096)
+        if hi - lo < 64:
+            return None
+        sr, si = 0.0, 0.0
+        k = lo
+        while k < hi:
+            a, b = points[k]
+            c, d = points[k + 1]
+            sr += c * a + d * b
+            si += d * a - c * b
+            k += 1
+        if sr == 0.0 and si == 0.0:
+            return None
+        return math.atan2(si, sr) / (2.0 * math.pi * dwell_s)
+    except Exception:
+        return None
+
+
+def make_1d():
+    """Ensure the current dataset is 1D (PARMODE 0). WR() copies the
+    CURRENT dataset's parameter set, so an expno created after a
+    pseudo-2D inherits PARMODE=1 -- a 'quick 1D' would then acquire
+    td1 rows. Mirror of make_2d(), same verify + dialog fallback."""
+    putpar("PARMODE", "0")
+    pm = getpar("PARMODE")
+    if pm.strip() not in ("0", "1D"):
+        ans = CONFIRM("spin_noise_run: make dataset 1D",
+                      "The script could not switch this dataset back to "
+                      "1D\nautomatically.\n\nPlease type 'parmode' in "
+                      "TopSpin, select 1D, confirm any\n'delete files' "
+                      "question, then press OK here.")
+        if ans != 1:
+            abort("Dataset could not be made 1D.")
+
+
+def clear_raw_data(expno_dir):
+    """Delete any fid/ser inherited from the WR() template copy, BEFORE
+    acquiring. Without this a silently failed zg leaves the PREVIOUS
+    experiment's raw data in place: run_zg_and_wait's data-landed check
+    passes vacuously and read_fid_points would parse stale data as a
+    fresh measurement (mislabeled rd-opt rates, unverified sweep mass
+    coordinates). Deleting first makes both checks real."""
+    if not expno_dir:
+        return
+    for fn in ("fid", "ser"):
+        try:
+            p = os.path.join(expno_dir, fn)
+            if os.path.isfile(p):
+                os.remove(p)
+        except Exception:
+            pass
+
+
+def rdopt_tune_at(o1_hz, offset_khz):
+    """Tune/match the probe offset_khz AWAY from the observe frequency:
+    temporarily shift O1, run atma (guarded), restore O1. The probe
+    then sits detuned by -offset relative to the restored carrier.
+    Returns 1 when atma reported success (always, in mock modes)."""
+    putpar("O1", "%.2f" % (o1_hz + 1000.0 * offset_khz))
+    ok, _r = safe_hw_cmd("atma", "atma at %+.0f kHz tuning offset"
+                         % offset_khz)
+    putpar("O1", "%.2f" % o1_hz)
+    return ok
+
+
+def acquire_quick_1d(meta, template, dsname, expno, role, o1_hz,
+                     p90_us, p90_db, db_par):
+    """One small-flip 1D on a fresh expno (scan/verification probe):
+    TD_LADDER points, fixed RG, clock-audited. Returns the expno dir."""
+    cd = open_expno(template, dsname, expno)
+    make_1d()                    # WR copies PARMODE from a 2D neighbor
+    putpar("PULPROG", "zg")
+    set_common_acq(o1_hz, TD_LADDER, SWH_HZ, 1, D1_REF_S)
+    set_small_flip(p90_us, p90_db, db_par)
+    putpar("RG", str(RDOPT_RG))
+    clear_raw_data(ds_path(cd))  # stale template copy must not pass as data
+    t0 = now_local()
+    ocxo_s = ocxo_expected_s(TD_LADDER, SWH_HZ, 1, 1, D1_REF_S, 1)
+    cb = clock_block_begin(expno, role, ocxo_s)
+    run_zg_and_wait(ds_path(cd), role, ocxo_s)
+    clock_block_end(cb)
+    record_experiment(meta, expno, role, t0, now_local(), 1)
+    return ds_path(cd)
+
+
+def run_rdopt_scan(meta, template, dsname, o1_hz, p90_us, p90_db, db_par):
+    """rd-optimize: scan probe tuning offsets, measure the small-flip
+    FID envelope decay rate at each (decay = 1/T2* + lambda_r), and
+    leave the probe tuned where radiation damping is largest. Fills
+    meta['calibration']['rd_optimize']; returns the scan expnos."""
+    say("rd-optimize: probe-tuning scan for maximum radiation damping")
+    f = ask_fields(
+        "spin-noise rd-optimize: offsets",
+        "Probe-tuning offsets to scan, in kHz relative to the current\n"
+        "observe frequency (0 = the conventional atma optimum; it is\n"
+        "always measured first as the baseline). On cryoprobes the\n"
+        "spin-noise literature finds the optimum 150-500 kHz BELOW\n"
+        "nominal, hence the down-weighted defaults. Each offset costs\n"
+        "one atma (~1-2 min) plus a 3 s acquisition; atma may fail at\n"
+        "large offsets -- such points are skipped, not fatal. If a\n"
+        "nonzero offset wins, a P90 recalibration + confirmation\n"
+        "follows the scan: stay nearby until then.",
+        ["Offsets (kHz, comma-separated)"], [RDOPT_OFFSETS_DEFAULT])
+    offsets = []
+    for tok in f[0].replace(";", ",").split(","):
+        v = to_float(tok.strip(), None)
+        if v is not None:
+            offsets.append(v)
+    if 0.0 in offsets:
+        offsets.remove(0.0)
+    offsets = [0.0] + offsets[:RDOPT_MAX_OFFSETS - 1]
+
+    rec = {"enabled": True, "offsets_khz": offsets, "decay_rates_per_s": [],
+           "amplitudes": [], "scan_expnos": [], "chosen_offset_khz": 0.0,
+           "improvement_frac": None, "note": ""}
+    meta["calibration"]["rd_optimize"] = rec
+
+    dwell = 1.0 / SWH_HZ
+    results = []          # (offset, rate, amp)
+    expnos = []
+    aborted = ""
+    for k in range(len(offsets)):
+        off = offsets[k]
+        expno = EXP_RDOPT_BASE + k
+        ok = rdopt_tune_at(o1_hz, off)
+        if not ok:
+            if k == 0:
+                aborted = ("atma is not available on this system -- the "
+                           "tuning scan cannot actuate; skipped")
+                break
+            rec["decay_rates_per_s"].append(None)
+            rec["amplitudes"].append(None)
+            rec["scan_expnos"].append(None)
+            continue
+        d = acquire_quick_1d(meta, template, dsname, expno, "rdopt_scan",
+                             o1_hz, p90_us, p90_db, db_par)
+        expnos.append(expno)
+        rec["scan_expnos"].append(expno)
+        if hw_skip():
+            rate, amp = None, None
+        else:
+            pts = read_fid_points(d, TD_LADDER // 2)
+            if pts is None:
+                rate, amp = None, None
+            else:
+                rate, amp = fid_envelope_decay(pts, dwell, FID_SKIP_POINTS)
+        rec["decay_rates_per_s"].append(rate)
+        rec["amplitudes"].append(amp)
+        if rate is not None and amp is not None:
+            results.append((off, rate, amp))
+        say("rd-optimize %+.0f kHz: decay %s /s" % (off, str(rate)))
+
+    if aborted:
+        rec["note"] = aborted
+        MSG("rd-optimize skipped:\n" + aborted,
+            "spin-noise rd-optimize: skipped")
+        return expnos, p90_us
+
+    chosen = 0.0
+    improvement = None
+    if hw_skip():
+        rec["note"] = ("mocked (%s): scan structure exercised, no real "
+                       "data to measure; staying at 0 kHz"
+                       % hw_mode_name())
+    elif len(results) >= 2 and results[0][0] == 0.0:
+        base_rate = results[0][1]
+        amp_max = max([r[2] for r in results])
+        best = results[0]
+        for r in results[1:]:
+            if r[2] >= RDOPT_MIN_AMP_FRAC * amp_max and r[1] > best[1]:
+                best = r
+        if base_rate > 0:
+            improvement = best[1] / base_rate - 1.0
+        if improvement is not None and improvement >= RDOPT_MIN_IMPROVEMENT:
+            chosen = best[0]
+            rec["note"] = ("chose %+.0f kHz: envelope decay %.3g /s vs "
+                           "%.3g /s at the pulse optimum (+%.0f%%)"
+                           % (chosen, best[1], base_rate,
+                              100.0 * improvement))
+        else:
+            rec["note"] = ("pulse tune kept: no offset improved the "
+                           "decay rate by >= %.0f%%"
+                           % (100.0 * RDOPT_MIN_IMPROVEMENT))
+    else:
+        rec["note"] = ("scan inconclusive (too few measurable points); "
+                       "staying at 0 kHz")
+
+    rec["chosen_offset_khz"] = chosen
+    rec["improvement_frac"] = improvement
+    # The probe is currently tuned at the LAST scanned offset: always
+    # re-tune at the chosen one (0 kHz = back to the pulse optimum).
+    # A FAILED final atma must be loud -- otherwise the session would
+    # silently run at the last scanned offset while meta claims 'chosen'.
+    ok = rdopt_tune_at(o1_hz, chosen)
+    if not ok:
+        rec["final_retune_ok"] = False
+        rec["note"] = rec["note"] + (" -- WARNING: the FINAL atma at the "
+                                     "chosen offset FAILED; the probe may "
+                                     "still be tuned at the last scanned "
+                                     "offset (%+.0f kHz)" % offsets[-1])
+        MSG("rd-optimize WARNING:\n\nThe final re-tune at %+.0f kHz "
+            "FAILED.\nThe probe may still be tuned at the last scanned "
+            "offset\n(%+.0f kHz). Please tune manually (wobb) before "
+            "closing\nthis message, or the whole session runs mistuned."
+            % (chosen, offsets[-1]),
+            "spin-noise rd-optimize: RE-TUNE FAILED")
+    else:
+        rec["final_retune_ok"] = True
+        # No modal dialog on the happy path: the operator may already
+        # have walked away, and a blocked MSG here would stall the
+        # ladder/references/noise for hours.
+        say("rd-optimize: %s; continuing at %+.0f kHz"
+            % (rec["note"], chosen))
+
+    if chosen != 0.0 and ok and not hw_skip():
+        # P90 lengthens on a deliberately mistuned probe, and the whole
+        # pulsed calibration chain (RG ladder, references, sweep
+        # verifications) rides on the tip angle -- recalibrate at the
+        # chosen tuning, exactly as the SNTO literature does after
+        # retuning. The offsets dialog told the operator to stay for
+        # this. Power (dB) stays as calibrated at setup; only the pulse
+        # LENGTH is redetermined.
+        say("rd-optimize: recalibrating P90 at the chosen tuning")
+        recal_default = "%.2f" % p90_us
+        ok_pc, _r = safe_hw_cmd("pulsecal",
+                                "pulsecal at the rd-optimal tuning")
+        if ok_pc:
+            recal_default = getpar("P 1", recal_default)
+        fp = ask_fields(
+            "spin-noise rd-optimize: P90 at chosen tuning",
+            "The probe is now tuned %+.0f kHz off the observe frequency,\n"
+            "which lengthens the 90-degree pulse. Confirm the\n"
+            "recalibrated P90 (pre-filled from pulsecal; if pulsecal is\n"
+            "unavailable, determine it your usual way -- or accept the\n"
+            "setup value, which then overstates the tip angle by a\n"
+            "recorded, not hidden, amount)." % chosen,
+            ["P90 (us)"], [recal_default])
+        rec["p90_us_at_setup"] = p90_us
+        p90_us = to_float(fp[0], p90_us)
+        rec["p90_us_at_chosen"] = p90_us
+        # downstream truth: the session's pulsed calibration uses this
+        meta["calibration"]["p90_us"] = p90_us
+    return expnos, p90_us
+
+
+def sweep_verify_1d(meta, template, dsname, expno, o1_hz,
+                    p90_us, p90_db, db_par):
+    """Verification 1D for one field step: acquire and measure the
+    dominant-line offset from the carrier. None in mock modes."""
+    d = acquire_quick_1d(meta, template, dsname, expno, "sweep_verify",
+                         o1_hz, p90_us, p90_db, db_par)
+    if hw_skip():
+        return None
+    pts = read_fid_points(d, TD_LADDER // 2)
+    if pts is None:
+        return None
+    return fid_dominant_offset_hz(pts, 1.0 / SWH_HZ, FID_SKIP_POINTS)
+
+
+def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
+                    db_par, noise_secs, fallback_rg, bf1_mhz):
+    """Field-stepped noise blocks: every step is its own axion mass
+    point. The operator steps the field via the LOCK REFERENCE; the
+    script verifies each step by measuring the water line, then records
+    a pulse-free noise block.
+
+    Field mechanics (BSMS manuals): the lock servo holds B0 wherever
+    the 2H lock REFERENCE says -- it constrains nothing about the 1H
+    line except through B0. So the primary actuator is the Lock Shift
+    (the 2H reference, +/-200 ppm range, 0.001 ppm resolution): set the
+    shift, RE-LOCK, and autolock carries the field to the new setpoint
+    (capture ~1000 field units ~ 8 kHz at 1H covers any step here), in
+    exact magnet-independent units -- 1 ppm = BF1 Hz at 1H by
+    definition. The lock is then turned OFF for the acquisition itself
+    (the standing leak-hygiene rule; a facility that prefers to stay
+    locked may, and the lock state is recorded as always). FALLBACK for
+    consoles without accessible shift mode: unlocked FIELD-DAC steps
+    (~8 Hz per unit at 1H std bore, no re-locking mid-sweep -- at a
+    FIXED reference autolock would pull the field straight back). The
+    MEASURED offsets -- never the targets -- are the record, whichever
+    knob moved the line. The pulse-pair estimator's sign convention is
+    a receiver property: it is resolved against the operator's shift
+    direction on the first large step and recorded.
+
+    Fills meta['field_sweep']; returns (verify_expnos, noise_expnos),
+    or None when the operator declines the sweep at the baseline
+    dialog (the caller then falls back to the standard single noise
+    block -- nothing already acquired is ever thrown away)."""
+    say("field sweep: planning")
+    f = ask_fields(
+        "spin-noise sweep: plan",
+        "Field-stepped noise blocks -- each step is a separate axion\n"
+        "mass point. Steps are spread evenly over +/- the half-span,\n"
+        "low to high. The half-span is capped at %.0f Hz: the\n"
+        "acquisition band is +/-%.0f Hz around the carrier and the\n"
+        "line must stay comfortably inside it to be verifiable.\n"
+        "(The BSMS FIELD range itself is far larger, ~+/-80 kHz at 1H\n"
+        "on a standard-bore magnet.)"
+        % (SWEEP_SPAN_MAX_HZ, SWH_HZ / 2.0),
+        ["Number of steps (2-%d)" % SWEEP_STEPS_MAX, "Half-span (Hz)"],
+        [str(SWEEP_STEPS_DEFAULT), "%.0f" % SWEEP_SPAN_HZ_DEFAULT])
+    nsteps = to_int(f[0], SWEEP_STEPS_DEFAULT)
+    if nsteps < 2:
+        nsteps = 2
+    if nsteps > SWEEP_STEPS_MAX:
+        nsteps = SWEEP_STEPS_MAX
+    span = abs(to_float(f[1], SWEEP_SPAN_HZ_DEFAULT))
+    if span > SWEEP_SPAN_MAX_HZ:
+        say("sweep: half-span %.0f Hz capped to %.0f Hz (acquisition "
+            "band)" % (span, SWEEP_SPAN_MAX_HZ))
+        span = SWEEP_SPAN_MAX_HZ
+    targets = []
+    for k in range(nsteps):
+        if nsteps > 1:
+            targets.append(-span + 2.0 * span * k / (nsteps - 1))
+        else:
+            targets.append(0.0)
+    per_secs = noise_secs / float(nsteps)
+    if per_secs < SWEEP_MIN_STEP_SECS:
+        per_secs = SWEEP_MIN_STEP_SECS
+
+    # Baseline gate: the operator can decline the sweep here and fall
+    # back to a standard single-block session (never an abort -- the
+    # ladder and opening reference are already on disk).
+    sel = ask_select(
+        "spin-noise sweep: baseline",
+        "The sweep needs a field baseline first.\n\n"
+        "1. Note the current LOCK SHIFT value (BSMS display, shift\n"
+        "   mode) -- the steps are set relative to it.\n"
+        "2. Lock the sample now if it is not locked (defines the\n"
+        "   baseline field).\n"
+        "3. Turn the LOCK OFF for the baseline measurement.\n"
+        "4. Confirm the BSMS field SWEEP is off (as at session start).\n\n"
+        "Ready?",
+        ["Ready -- measure the baseline",
+         "Skip the sweep -- run one normal noise block instead"], 0)
+    if sel == 1:
+        say("sweep: declined at baseline; falling back to the standard "
+            "noise block")
+        return None
+
+    sweep = {"enabled": True, "requested_half_span_hz": span,
+             "per_step_secs": per_secs, "baseline_line_offset_hz": None,
+             "steps": [], "restored_offset_hz": None,
+             "field_restored": None, "ended_early": False,
+             "sign_convention_flip": None,
+             "note": ("measured offsets are pulse-pair line measurements "
+                      "relative to the baseline verification; the sign "
+                      "convention (a receiver property) is resolved "
+                      "against the operator's shift direction on the "
+                      "first large step and recorded as "
+                      "sign_convention_flip; targets are never "
+                      "substituted for measurements; steps are "
+                      "lock-shift-referenced (1 ppm = BF1 Hz at "
+                      "1H) with unlocked FIELD steps as fallback")}
+    meta["field_sweep"] = sweep
+
+    verify_expnos = [EXP_SWEEP_VERIFY_BASE]
+    base_off = sweep_verify_1d(meta, template, dsname,
+                               EXP_SWEEP_VERIFY_BASE, o1_hz,
+                               p90_us, p90_db, db_par)
+    sweep["baseline_line_offset_hz"] = base_off
+
+    aq_row = TD_ROW / (2.0 * SWH_HZ)
+    row_secs = aq_row + 2.0 * D1_NOISE_S + ROW_OVERHEAD_S
+    n_rows = int(per_secs / row_secs)
+    if n_rows < 4:
+        n_rows = 4
+    noise_expnos = []
+    noise_rg = None
+    sflip = 0            # 0 = unresolved; +1/-1 once a big step lands
+
+    for k in range(nsteps):
+        target = targets[k]
+        measured = None
+        raw_rel = None
+        skipped = 0
+        ended = 0
+        attempt = 0
+        while 1:
+            attempt += 1
+            sel = ask_select(
+                "spin-noise sweep: set field step",
+                "Step %d of %d -- target shift %+.0f Hz from baseline.\n\n"
+                "PRIMARY (lock-referenced): set the LOCK SHIFT to\n"
+                "%+.3f ppm relative to its baseline value, RE-LOCK\n"
+                "(autolock carries the field to the new reference --\n"
+                "1 ppm = %.0f Hz at 1H, exact), then turn the LOCK OFF\n"
+                "again.\n\n"
+                "FALLBACK (no accessible shift mode): with the lock\n"
+                "OFF, change the FIELD value by about %+.0f units\n"
+                "(~8 Hz/unit at 1H, std bore) and do NOT re-lock.\n\n"
+                "Give the field a few seconds to settle, then continue.\n"
+                "(The script measures the actual shift next -- the\n"
+                "MEASURED value is what enters the record; a wrong sign\n"
+                "convention is resolved by the measurement.)"
+                % (k + 1, nsteps, target, target / bf1_mhz, bf1_mhz,
+                   target / SWEEP_FU_HZ_EST),
+                ["Field is set -- measure it",
+                 "End the sweep here (keep everything acquired so far)"],
+                0)
+            if sel == 1:
+                ended = 1
+                break
+            expno_v = EXP_SWEEP_VERIFY_BASE + 1 + k
+            off = sweep_verify_1d(meta, template, dsname, expno_v, o1_hz,
+                                  p90_us, p90_db, db_par)
+            if expno_v not in verify_expnos:
+                verify_expnos.append(expno_v)
+            if off is None or base_off is None:
+                measured = None       # mock modes / unreadable: proceed
+                break
+            raw_rel = off - base_off
+            if sflip == 0 and abs(target) >= 3.0 * SWEEP_TOL_HZ:
+                # resolve the receiver sign convention on the first step
+                # big enough to disambiguate
+                if abs(-raw_rel - target) < abs(raw_rel - target):
+                    sflip = -1
+                else:
+                    sflip = 1
+                sweep["sign_convention_flip"] = sflip
+            eff = sflip or 1
+            measured = raw_rel * eff
+            if abs(measured - target) <= max(SWEEP_TOL_FRAC * abs(target),
+                                             SWEEP_TOL_HZ):
+                break
+            sel = ask_select(
+                "spin-noise sweep: off target",
+                "Measured shift %+.0f Hz vs target %+.0f Hz "
+                "(step %d/%d, attempt %d)." % (measured, target,
+                                               k + 1, nsteps, attempt),
+                ["Accept the measured shift", "Retry the shift",
+                 "Skip this step"], 0)
+            if sel == 0:
+                break
+            if sel == 2:
+                skipped = 1
+                break
+            # sel == 1 -> loop back and re-instruct
+        if ended:
+            sweep["ended_early"] = True
+            break
+        step = {"index": k, "target_offset_hz": target,
+                "measured_offset_hz": measured,
+                "measured_offset_hz_raw": raw_rel,
+                "verify_expno": EXP_SWEEP_VERIFY_BASE + 1 + k,
+                "noise_expno": None, "rows": 0, "skipped": skipped}
+        if skipped:
+            sweep["steps"].append(step)
+            continue
+
+        expno_n = EXP_SWEEP_NOISE_BASE + k
+        say("sweep step %d/%d: noise block (%d rows x %.0f s)"
+            % (k + 1, nsteps, n_rows, row_secs))
+        cd = open_expno(template, dsname, expno_n)
+        putpar("PULPROG", PP_NAME)
+        make_2d(n_rows)
+        set_common_acq(o1_hz, TD_ROW, SWH_HZ, 1, D1_NOISE_S)
+        if noise_rg is None:
+            noise_rg = run_rga()
+            if noise_rg is None:
+                noise_rg = fallback_rg
+        putpar("RG", str(noise_rg))
+        clear_raw_data(ds_path(cd))
+        t0 = now_local()
+        ocxo_s = ocxo_expected_s(TD_ROW, SWH_HZ, 1, n_rows, D1_NOISE_S, 2)
+        cb = clock_block_begin(expno_n, "noise_sweep", ocxo_s)
+        run_zg_and_wait(ds_path(cd), "sweep noise block %d" % (k + 1),
+                        ocxo_s)
+        clock_block_end(cb)
+        record_experiment(meta, expno_n, "noise_sweep",
+                          t0, now_local(), n_rows)
+        step["noise_expno"] = expno_n
+        step["rows"] = n_rows
+        noise_expnos.append(expno_n)
+        sweep["steps"].append(step)
+
+    # Restore the field before the closing reference. All noise data is
+    # already on disk -- nothing here may abort the session.
+    sel = ask_select(
+        "spin-noise sweep: restore field",
+        "Sweep done. Restore the baseline field now:\n\n"
+        "1. Reset the LOCK SHIFT to its baseline value (skip this if\n"
+        "   you used FIELD steps instead).\n"
+        "2. Re-lock -- autolock carries the field back to the\n"
+        "   baseline reference.\n"
+        "3. Turn the LOCK OFF again for the closing reference.\n\n"
+        "The script verifies the restoration next.",
+        ["Field restored -- verify it",
+         "Skip the verification (restoration will be flagged)"], 0)
+    if sel == 0:
+        expno_r = EXP_SWEEP_VERIFY_BASE + 1 + nsteps
+        off = sweep_verify_1d(meta, template, dsname, expno_r, o1_hz,
+                              p90_us, p90_db, db_par)
+        verify_expnos.append(expno_r)
+        if off is not None and base_off is not None:
+            sweep["restored_offset_hz"] = (off - base_off) * (sflip or 1)
+            sweep["field_restored"] = (
+                abs(sweep["restored_offset_hz"]) <= 2.0 * SWEEP_TOL_HZ)
+    else:
+        sweep["field_restored"] = False
+        say("sweep: restoration verification skipped by operator "
+            "(flagged in meta)")
+    return verify_expnos, noise_expnos
 
 
 # ============================================================================
@@ -1538,6 +2254,16 @@ def main():
     clock_block_end(cb)
     record_experiment(meta, EXP_SETUP, "setup", t0, now_local(), 1)
 
+    # ---------------------------------------------------------------- 7b
+    # Optional rd-optimize (argv flag 'rdopt'): scan the probe tuning
+    # for maximum radiation damping and keep the winning offset for the
+    # rest of the session.  Mock modes exercise the structure only.
+    rdopt_expnos = []
+    if RDOPT:
+        rdopt_expnos, p90_us = run_rdopt_scan(meta, template, dsname,
+                                              o1_hz, p90_us, p90_db,
+                                              db_par)
+
     # ---------------------------------------------------------------- 8
     # RG ladder: quick 1D small-flip acquisitions at RG = 1, 8, 64, max.
     say("RG ladder (4 quick 1D acquisitions)")
@@ -1558,6 +2284,7 @@ def main():
             rung = max_rg
         else:
             putpar("RG", str(rung))
+        clear_raw_data(ds_path(cd))
         t0 = now_local()
         ocxo_s = ocxo_expected_s(TD_LADDER, SWH_HZ, 1, 1, D1_REF_S, 1)
         cb = clock_block_begin(expno, "rg_ladder", ocxo_s)
@@ -1586,6 +2313,7 @@ def main():
     set_common_acq(o1_hz, TD_ROW, SWH_HZ, 1, D1_REF_S)
     set_small_flip(p90_us, p90_db, db_par)
     putpar("RG", str(moderate_rg))
+    clear_raw_data(ds_path(cd))
     t0 = now_local()
     ocxo_s = ocxo_expected_s(TD_ROW, SWH_HZ, 1, REF_ROWS, D1_REF_S, 1)
     cb = clock_block_begin(EXP_REF_OPEN, "reference_open", ocxo_s)
@@ -1595,40 +2323,55 @@ def main():
                       t0, now_local(), REF_ROWS)
 
     # ---------------------------------------------------------------- 10
-    # Noise block: zgnoise2d, NO pulse, NS=1/row, RG = max stable,
-    # rows sized to the requested duration.
-    row_secs = aq_row + 2.0 * D1_NOISE_S + ROW_OVERHEAD_S
-    n_rows = int(noise_secs / row_secs)
-    if n_rows < 4:
-        n_rows = 4
-    say("expno %d: NOISE block, %d rows x %.0f s (~%.0f min)"
-        % (EXP_NOISE, n_rows, row_secs, n_rows * row_secs / 60.0))
-    cd = open_expno(template, dsname, EXP_NOISE)
-    putpar("PULPROG", PP_NAME)
-    make_2d(n_rows)
-    set_common_acq(o1_hz, TD_ROW, SWH_HZ, 1, D1_NOISE_S)
-    # RG for the noise block: rga on this (pulse-free) experiment finds
-    # the maximum stable gain, then it stays FIXED for the whole block.
-    noise_rg = run_rga()
-    if noise_rg is None:
-        noise_rg = max_rg
-    putpar("RG", str(noise_rg))
-    t0 = now_local()
-    MSG("The pulse-free noise block starts when you close this message.\n\n"
-        "  rows      : %d\n"
-        "  per row   : %.0f s\n"
-        "  total     : ~%.0f min\n"
-        "  RG        : %s\n\n"
-        "You can walk away now.  A final dialog will appear when the\n"
-        "bundle zip is ready." % (n_rows, row_secs,
-                                  n_rows * row_secs / 60.0, noise_rg),
-        "spin-noise run: noise block starting")
-    # zgnoise2d spends TWO d1 delays per row (before go, before wr).
-    ocxo_s = ocxo_expected_s(TD_ROW, SWH_HZ, 1, n_rows, D1_NOISE_S, 2)
-    cb = clock_block_begin(EXP_NOISE, "noise", ocxo_s)
-    run_zg_and_wait(ds_path(cd), "noise block (%d rows)" % n_rows, ocxo_s)
-    clock_block_end(cb)
-    record_experiment(meta, EXP_NOISE, "noise", t0, now_local(), n_rows)
+    # Noise phase.  Default: one long pulse-free block (expno 12).
+    # With the 'sweep' flag: a ladder of field-stepped noise blocks --
+    # each step its own axion mass point (docs/design_rdopt_locksweep.md).
+    sweep_verify_expnos = []
+    swept = None
+    if SWEEP:
+        swept = run_field_sweep(
+            meta, template, dsname, o1_hz, p90_us, p90_db, db_par,
+            noise_secs, max_rg, bf1)
+    if swept is not None:
+        sweep_verify_expnos, noise_expnos = swept
+    else:
+        # Noise block: zgnoise2d, NO pulse, NS=1/row, RG = max stable,
+        # rows sized to the requested duration.
+        row_secs = aq_row + 2.0 * D1_NOISE_S + ROW_OVERHEAD_S
+        n_rows = int(noise_secs / row_secs)
+        if n_rows < 4:
+            n_rows = 4
+        say("expno %d: NOISE block, %d rows x %.0f s (~%.0f min)"
+            % (EXP_NOISE, n_rows, row_secs, n_rows * row_secs / 60.0))
+        cd = open_expno(template, dsname, EXP_NOISE)
+        putpar("PULPROG", PP_NAME)
+        make_2d(n_rows)
+        set_common_acq(o1_hz, TD_ROW, SWH_HZ, 1, D1_NOISE_S)
+        # RG for the noise block: rga on this (pulse-free) experiment finds
+        # the maximum stable gain, then it stays FIXED for the whole block.
+        noise_rg = run_rga()
+        if noise_rg is None:
+            noise_rg = max_rg
+        putpar("RG", str(noise_rg))
+        clear_raw_data(ds_path(cd))
+        t0 = now_local()
+        MSG("The pulse-free noise block starts when you close this message.\n\n"
+            "  rows      : %d\n"
+            "  per row   : %.0f s\n"
+            "  total     : ~%.0f min\n"
+            "  RG        : %s\n\n"
+            "You can walk away now.  A final dialog will appear when the\n"
+            "bundle zip is ready." % (n_rows, row_secs,
+                                      n_rows * row_secs / 60.0, noise_rg),
+            "spin-noise run: noise block starting")
+        # zgnoise2d spends TWO d1 delays per row (before go, before wr).
+        ocxo_s = ocxo_expected_s(TD_ROW, SWH_HZ, 1, n_rows, D1_NOISE_S, 2)
+        cb = clock_block_begin(EXP_NOISE, "noise", ocxo_s)
+        run_zg_and_wait(ds_path(cd), "noise block (%d rows)" % n_rows, ocxo_s)
+        clock_block_end(cb)
+        record_experiment(meta, EXP_NOISE, "noise", t0, now_local(), n_rows)
+
+        noise_expnos = [EXP_NOISE]
 
     # ---------------------------------------------------------------- 11
     # Reference (close): identical to reference_open.
@@ -1639,6 +2382,7 @@ def main():
     set_common_acq(o1_hz, TD_ROW, SWH_HZ, 1, D1_REF_S)
     set_small_flip(p90_us, p90_db, db_par)
     putpar("RG", str(moderate_rg))
+    clear_raw_data(ds_path(cd))
     t0 = now_local()
     ocxo_s = ocxo_expected_s(TD_ROW, SWH_HZ, 1, REF_ROWS, D1_REF_S, 1)
     cb = clock_block_begin(EXP_REF_CLOSE, "reference_close", ocxo_s)
@@ -1664,11 +2408,16 @@ def main():
     name_dir = os.path.dirname(ds_path(cd))
     stage = os.path.join(name_dir, "bundle_stage")
     data_stage = os.path.join(stage, "data")
+    # A second same-day run shares the dataset NAME (date-based): clear
+    # any stale staging tree so a previous session's expnos can never be
+    # checksummed into THIS bundle.
+    remove_tree(data_stage)
     if not os.path.isdir(data_stage):
         os.makedirs(data_stage)
 
-    all_expnos = [EXP_SETUP] + EXP_LADDER \
-        + [EXP_REF_OPEN, EXP_NOISE, EXP_REF_CLOSE]
+    all_expnos = [EXP_SETUP] + EXP_LADDER + rdopt_expnos \
+        + [EXP_REF_OPEN] + noise_expnos + sweep_verify_expnos \
+        + [EXP_REF_CLOSE]
     for expno in all_expnos:
         src = os.path.join(name_dir, str(expno))
         if os.path.isdir(src):

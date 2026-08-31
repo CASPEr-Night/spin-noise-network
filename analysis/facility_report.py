@@ -41,9 +41,16 @@ matplotlib):
      timestamp sanity, software provenance.
   8. Clock audit (schema 1.2 bundles): fits the fractional console-clock
      offset from wall-clock vs OCXO-implied elapsed time across blocks,
-     states which absolute-frequency requirement tiers the offset
-     satisfies, and flags short sessions as inconclusive. Older bundles
-     without the audit are reported as such, without penalty.
+     re-deriving each block's expected duration from its bundled
+     pulse-program text plus acqus (every programmed delay, pulse, and
+     the per-scan pre-acquisition delay DE -- the acquisition-side
+     formula models only AQ and d1, and a per-scan shortfall biases the
+     offset by ~shortfall/scan-duration), states which
+     absolute-frequency requirement tiers the offset satisfies, and
+     flags short sessions as inconclusive. Older bundles without the
+     audit are reported as such, without penalty; blocks whose
+     pulse-program text or acqus cannot be modeled with certainty fall
+     back to the script-recorded expectations, flagged per block.
 
 Spin-noise master formula (FDT-verified; see the project fact brief):
   S_V(Delta)/S_floor = 1 + f_c*lambda_r*[(Ts/Tc - 2)*lambda - lambda_r]
@@ -143,7 +150,8 @@ def parse_jcamp(text):
     """Parse a Bruker JCAMP-DX parameter file into {name: value}.
 
     Scalars become float/int/str; <bracketed> strings are unwrapped;
-    array blocks are stored as raw strings (not needed here).
+    array blocks (e.g. the delay list D) are stored as whitespace-joined
+    raw strings -- split() to index them.
     """
     out = {}
     lines = text.splitlines()
@@ -153,8 +161,10 @@ def parse_jcamp(text):
         m = re.match(r"##\$?([A-Za-z0-9_]+)=\s*(.*)$", line)
         if m:
             key, val = m.group(1), m.group(2).strip()
-            if val.startswith("(") and ")" in val and not val.endswith(")"):
-                # array header like (0..7); values on following lines
+            if re.match(r"^\(\d+\.\.\d+\)$", val) or (
+                    val.startswith("(") and ")" in val
+                    and not val.endswith(")")):
+                # array header like (0..63); values on following lines
                 buf = []
                 i += 1
                 while i < len(lines) and not lines[i].startswith("##"):
@@ -166,10 +176,13 @@ def parse_jcamp(text):
                 out[key] = val[1:-1]
             else:
                 try:
+                    # string checks FIRST: real acqus carry DBL_MAX
+                    # sentinels ('1.79769313486232e+308', parsed as inf)
+                    # for unset doubles, and int(inf) raises OverflowError
                     fv = float(val)
-                    out[key] = int(fv) if fv == int(fv) and "." not in val \
-                        and "e" not in val.lower() else fv
-                except ValueError:
+                    out[key] = int(fv) if "." not in val \
+                        and "e" not in val.lower() and fv == int(fv) else fv
+                except (ValueError, OverflowError):
                     out[key] = val
         i += 1
     return out
@@ -198,6 +211,25 @@ class Bundle(object):
             return parse_jcamp(self.read(p).decode("utf-8", "replace"))
         except Exception:
             return {}
+
+    def acqu2s(self, expno):
+        p = "data/%d/acqu2s" % expno
+        if not self.has(p):
+            return {}
+        try:
+            return parse_jcamp(self.read(p).decode("utf-8", "replace"))
+        except Exception:
+            return {}
+
+    def pulseprogram_text(self, expno):
+        """The pulse-program text TopSpin stores in the expno dir, or None."""
+        p = "data/%d/pulseprogram" % expno
+        if not self.has(p):
+            return None
+        try:
+            return self.read(p).decode("utf-8", "replace")
+        except Exception:
+            return None
 
     def read_rows(self, expno, exp_meta):
         """Return (rows, acq) where rows is an (n_rows, n_complex) complex
@@ -670,7 +702,218 @@ def analyze_rg_ladder(bundle, meta, f0_guess, fs_default):
 # Clock audit (schema 1.2): console-clock offset from wall-vs-OCXO elapsed
 # ============================================================================
 
-def analyze_clock_audit(meta):
+# The expectation refinement derives each block's OCXO-implied duration
+# from the pulse-program text TopSpin stored in that expno (bundled by
+# the run script's copy_tree) plus the acqus parameters -- NOT from a
+# name-keyed table of assumed structures: the text is the record of what
+# the pulse programmer actually executed. The parser is deliberately
+# conservative: any statement it does not recognize, any ambiguous loop
+# structure, NS != 1, or DS != 0 makes it fall back to the recorded
+# expectation, flagged per block. The wall/OCXO consistency gate then
+# arbitrates empirically: a wrong timing model shows up as a wall
+# mismatch and excludes the block loudly instead of biasing the fit.
+
+_PP_LABEL = re.compile(r"^(\d+)\s+(.*)$")
+_PP_GO = re.compile(r"^go=(\d+)$")
+_PP_DELAY = re.compile(r"^d(\d+)$")
+_PP_PULSE = re.compile(r"^p(\d+)$")
+_PP_LITERAL = re.compile(r"^(\d+(?:\.\d+)?)(s|m|u|n)$")
+_PP_UNIT_S = {"s": 1.0, "m": 1e-3, "u": 1e-6, "n": 1e-9}
+# Zero-duration bookkeeping tokens: write/zero/loop control, phase
+# references and phase-program definitions ('ph31' / 'ph31=0' /
+# 'ph1 = 0 2'), loop targets and counts.
+_PP_ZERO = re.compile(r"^(ze|zd|wr|if|mc|lo|to|times|exit|=|"
+                      r"ph\d+(=.*)?|#\d*|td\d*|\d+|"
+                      r"F\d\([A-Za-z0-9_]*\))$")
+
+
+def _jcamp_array(acq, key):
+    """A JCAMP array (e.g. D, P) as a list of floats, or []."""
+    try:
+        return [float(v) for v in str(acq.get(key, "")).split()]
+    except (TypeError, ValueError):
+        return []
+
+
+def pp_timing_model(pp_text, rows):
+    """Parse pulse-program text into (pre_terms, row_terms) timing lists.
+
+    Terms are ('d', N) / ('p', N) / ('lit', seconds) / ('go',): the
+    programmed delays, pulses, and acquisitions of one pass. row_terms
+    execute once per row (the go-loop body, delimited by the go target
+    label and the lo/mc line that jumps back to it); pre_terms execute
+    once. Statements sharing a line with a delay run concurrently with
+    it (the 'd1 wr #0 if #0 ze' idiom), so a line's duration is its
+    single duration token. Returns (None, None, reason) when the text
+    cannot be modeled with certainty -- unknown statement, two durations
+    on one line, no go, or a missing loop when rows > 1.
+    """
+    lines, labels = [], {}
+    for raw in pp_text.splitlines():
+        code = raw.split(";", 1)[0].strip()
+        if not code or code.startswith("#"):    # blank / preprocessor
+            continue
+        m = _PP_LABEL.match(code)
+        if m:
+            labels[int(m.group(1))] = len(lines)
+            code = m.group(2).strip()
+        lines.append(code)
+
+    per_line, go_idx = [], []
+    for i, code in enumerate(lines):
+        dur = None
+        for t in code.split():
+            if _PP_GO.match(t):
+                term = ("go",)
+            elif _PP_DELAY.match(t):
+                term = ("d", int(_PP_DELAY.match(t).group(1)))
+            elif _PP_PULSE.match(t):
+                term = ("p", int(_PP_PULSE.match(t).group(1)))
+            elif _PP_LITERAL.match(t):
+                m = _PP_LITERAL.match(t)
+                term = ("lit", float(m.group(1)) * _PP_UNIT_S[m.group(2)])
+            elif _PP_ZERO.match(t):
+                continue
+            else:
+                return None, None, "unrecognized statement '%s'" % t
+            if dur is not None:
+                return None, None, "two durations on one line: '%s'" % code
+            dur = term
+        if dur == ("go",):
+            go_idx.append(i)
+        per_line.append(dur)
+
+    if len(go_idx) != 1:
+        return None, None, ("expected exactly one go statement, found %d"
+                            % len(go_idx))
+    m = _PP_GO.match([t for t in lines[go_idx[0]].split()
+                      if _PP_GO.match(t)][0])
+    target = int(m.group(1))
+    if target not in labels:
+        return None, None, "go target label %d not found" % target
+    start = labels[target]
+    close = None
+    for i in range(go_idx[0] + 1, len(lines)):
+        toks = lines[i].split()
+        if ("lo" in toks or "mc" in toks) and "to" in toks:
+            try:
+                if int(toks[toks.index("to") + 1]) == target:
+                    close = i
+                    break
+            except (ValueError, IndexError):
+                return None, None, "unparseable loop close: '%s'" % lines[i]
+    if close is None:
+        if rows > 1:
+            return None, None, ("no loop back to label %d but rows > 1"
+                                % target)
+        close = len(lines) - 1
+    pre = [d for d in per_line[:start] if d is not None]
+    row = [d for d in per_line[start:close + 1] if d is not None]
+    return pre, row, None
+
+
+def refined_block_expectation(bundle, exps_by_no, block):
+    """Recompute one clock-audit block's OCXO-implied duration from the
+    bundle's own pulse-program text and acqus parameters.
+
+    Everything the pulse programmer executes is OCXO-clocked, so every
+    programmed delay, pulse, and the per-scan pre-acquisition delay DE
+    belong on the predicted side of the fit; a per-scan shortfall eps
+    biases the fitted offset by ~eps/(scan duration) -- ~3e-7 even for a
+    stock 6.5 us DE on ~19 s rows (the real 2020 console used 59.4 us),
+    which matters at requirement tiers ii/iii. The acquisition-side
+    formula in spin_noise_run.py models only AQ and d1; here the bundled
+    pulseprogram text supplies the actual per-row structure and acqus
+    supplies the parameter values (D/P arrays, DE, TD, SW_h). Row counts
+    come from meta['experiments'], with acqu2s TD as fallback. Anything
+    the conservative parser cannot model keeps the recorded expectation,
+    flagged per block; the wall/OCXO consistency gate arbitrates any
+    residual model error empirically.
+
+    Returns (refined_seconds or None, info dict for the report row).
+    """
+    rec = block.get("ocxo_expected_s")
+    try:
+        expno = int(block.get("expno"))
+    except (TypeError, ValueError):
+        return None, {"refine_note": "non-numeric expno"}
+    acq = bundle.acqus(expno)
+    if not acq:
+        return None, {"refine_note": "no acqus readable for this expno"}
+    pp_text = bundle.pulseprogram_text(expno)
+    if pp_text is None:
+        return None, {"refine_note": "no pulseprogram text in the bundle "
+                                     "for this expno"}
+    exp_meta = exps_by_no.get(block.get("expno")) or {}
+    try:
+        td = int(acq["TD"])
+        swh = float(acq["SW_h"])
+        de_s = float(acq["DE"]) * 1e-6           # acqus stores DE in us
+        ns = int(acq.get("NS", 1) or 1)
+        ds = int(acq.get("DS", 0) or 0)
+    except (KeyError, TypeError, ValueError):
+        return None, {"refine_note": "acqus lacks TD/SW_h/DE"}
+    try:
+        rows = int(exp_meta.get("td1_rows", 0) or 0)
+    except (TypeError, ValueError):
+        rows = 0
+    if rows <= 0:
+        try:
+            rows = int(bundle.acqu2s(expno).get("TD", 0) or 0)
+        except (TypeError, ValueError):
+            rows = 0
+    if td <= 0 or swh <= 0 or rows <= 0 or de_s < 0:
+        return None, {"refine_note": "non-physical acqus parameters or "
+                                     "unknown row count"}
+    if ns != 1:
+        return None, {"refine_note": "NS=%d: per-scan loop semantics not "
+                                     "modeled (network protocol is NS=1)"
+                                     % ns}
+    if ds != 0:
+        return None, {"refine_note": "DS=%d dummy scans are not in the "
+                                     "timing model" % ds}
+    pre, row, why = pp_timing_model(pp_text, rows)
+    if why is not None:
+        return None, {"refine_note": "pulseprogram not modelable: %s" % why}
+    aq = td / (2.0 * swh)
+    dvals = _jcamp_array(acq, "D")
+    pvals = _jcamp_array(acq, "P")
+
+    def term_seconds(terms):
+        total = 0.0
+        for t in terms:
+            if t[0] == "go":
+                total += de_s + aq
+            elif t[0] == "lit":
+                total += t[1]
+            elif t[0] == "d":
+                if t[1] >= len(dvals):
+                    raise IndexError("D%d not in acqus D array" % t[1])
+                total += dvals[t[1]]
+            elif t[0] == "p":
+                if t[1] >= len(pvals):
+                    raise IndexError("P%d not in acqus P array" % t[1])
+                total += pvals[t[1]] * 1e-6      # P array is microseconds
+        return total
+
+    try:
+        refined = term_seconds(pre) + rows * term_seconds(row)
+    except IndexError as e:
+        return None, {"refine_note": str(e)}
+    if refined <= 0:
+        return None, {"refine_note": "non-positive modeled duration"}
+    info = {"de_s_per_scan": de_s, "scans": rows,
+            "pulprog": str(acq.get("PULPROG", "")).strip("<> "),
+            "pp_row_terms": len(row)}
+    if isinstance(rec, (int, float)) and rec > 0:
+        # informational only -- the wall gate is the arbiter; a large
+        # value here usually means the acquisition-side formula missed
+        # programmed delays that the pulse-program text reveals
+        info["recorded_discrepancy"] = refined / rec - 1.0
+    return refined, info
+
+
+def analyze_clock_audit(meta, bundle=None):
     """Fit the fractional console-clock offset from the bundle's clock_audit
     blocks.
 
@@ -682,6 +925,13 @@ def analyze_clock_audit(meta):
     sqrt(2)*NTP_JITTER_S (two timestamps per block). Blocks with no OCXO
     prediction (setup) or with wall/OCXO mismatch beyond
     CLOCK_CONSISTENCY_MAX (overhead-dominated) are excluded and listed.
+
+    When `bundle` is given, each block's expected duration is re-derived
+    from its bundled pulse-program text plus acqus via
+    refined_block_expectation(); blocks that cannot be modeled with
+    certainty keep the script-recorded value, flagged. When any block is
+    refined, the recorded-model fit is reported alongside for comparison
+    under 'recorded_model'.
     """
     out = {"available": False}
     ca = meta.get("clock_audit")
@@ -698,6 +948,11 @@ def analyze_clock_audit(meta):
         ca.get("workstation_time_source", "unknown"))
     out["ntp_status_raw"] = str(ca.get("ntp_status_raw", ""))[:2000]
 
+    exps_by_no = {}
+    for e in (meta.get("experiments") or []):
+        if isinstance(e, dict) and e.get("expno") is not None:
+            exps_by_no[e.get("expno")] = e
+
     usable, rows = [], []
     t0_ms, t1_ms = None, None
     for b in ca["blocks"]:
@@ -711,9 +966,16 @@ def analyze_clock_audit(meta):
             continue
         t0_ms = ws if t0_ms is None else min(t0_ms, ws)
         t1_ms = we if t1_ms is None else max(t1_ms, we)
-        exp = b.get("ocxo_expected_s")
+        rec = b.get("ocxo_expected_s")
+        exp, src, rinfo = rec, "script-recorded", {}
+        if bundle is not None and isinstance(rec, (int, float)) and rec > 0:
+            refined, rinfo = refined_block_expectation(bundle, exps_by_no, b)
+            if refined is not None:
+                exp, src = refined, "acqus-refined"
         row = {"expno": b.get("expno"), "role": b.get("role"),
-               "wall_s": wall_s, "ocxo_expected_s": exp}
+               "wall_s": wall_s, "ocxo_expected_s": exp,
+               "ocxo_recorded_s": rec, "expected_source": src}
+        row.update(rinfo)
         if exp is None:
             row.update({"used": False,
                         "why": "no OCXO prediction (tune/shim/dialog time)"})
@@ -727,14 +989,15 @@ def analyze_clock_audit(meta):
         else:
             row.update({"used": True,
                         "block_offset": wall_s / exp - 1.0})
-            usable.append((float(exp), wall_s))
+            usable.append((float(exp), wall_s, float(rec),
+                           src == "acqus-refined"))
         rows.append(row)
     out["blocks"] = rows
     out["n_blocks"] = len(rows)
     out["n_usable"] = len(usable)
     span_s = ((t1_ms - t0_ms) / 1000.0) if (t0_ms is not None) else 0.0
     out["session_span_s"] = span_s
-    out["audited_ocxo_s"] = float(sum(x for x, _ in usable))
+    out["audited_ocxo_s"] = float(sum(p[0] for p in usable))
 
     if not usable:
         out["status"] = ("clock audit present but no usable blocks; no "
@@ -742,33 +1005,81 @@ def analyze_clock_audit(meta):
         out["conclusive"] = False
         return out
 
-    x = np.array([p[0] for p in usable])
-    y = np.array([p[1] for p in usable])
-    sigma_pt = math.sqrt(2.0) * NTP_JITTER_S     # two timestamps per block
-    if len(usable) >= 3 and float(np.ptp(x)) > 1.0:
-        # OLS with intercept; parameter errors from the KNOWN per-point
-        # sigma, not from residual scatter (few points, honest jitter model)
-        xb, yb = float(np.mean(x)), float(np.mean(y))
-        sxx = float(np.sum((x - xb) ** 2))
-        slope = float(np.sum((x - xb) * (y - yb)) / sxx)
-        delta = slope - 1.0
-        delta_err = sigma_pt / math.sqrt(sxx)
-        out["fit_model"] = ("wall = c + (1+delta)*ocxo, intercept absorbs "
-                            "constant per-block overhead")
-        out["overhead_intercept_s"] = yb - slope * xb
-    else:
-        # too few blocks for an intercept: inverse-variance mean of the
-        # per-block ratios (overhead then biases delta high -- flagged)
-        d = y / x - 1.0
-        w = (x / sigma_pt) ** 2
-        delta = float(np.sum(w * d) / np.sum(w))
-        delta_err = float(1.0 / math.sqrt(np.sum(w)))
-        out["fit_model"] = ("weighted mean of per-block ratios (too few "
-                            "blocks for an intercept; per-block overhead "
-                            "biases the offset high)")
+    def _offset_fit(pairs):
+        """wall = c + (1+delta)*ocxo over (ocxo_s, wall_s) pairs; errors
+        from the KNOWN per-point sigma sqrt(2)*NTP_JITTER_S (two
+        timestamps per block), not from residual scatter."""
+        fx = np.array([p[0] for p in pairs])
+        fy = np.array([p[1] for p in pairs])
+        sigma_pt = math.sqrt(2.0) * NTP_JITTER_S
+        f = {}
+        if len(pairs) >= 3 and float(np.ptp(fx)) > 1.0:
+            # OLS with intercept
+            xb, yb = float(np.mean(fx)), float(np.mean(fy))
+            sxx = float(np.sum((fx - xb) ** 2))
+            slope = float(np.sum((fx - xb) * (fy - yb)) / sxx)
+            f["delta"] = slope - 1.0
+            f["err"] = sigma_pt / math.sqrt(sxx)
+            f["model"] = ("wall = c + (1+delta)*ocxo, intercept absorbs "
+                          "constant per-block overhead")
+            f["intercept_s"] = yb - slope * xb
+        else:
+            # too few blocks for an intercept: inverse-variance mean of
+            # the per-block ratios (overhead then biases delta high)
+            d = fy / fx - 1.0
+            w = (fx / sigma_pt) ** 2
+            f["delta"] = float(np.sum(w * d) / np.sum(w))
+            f["err"] = float(1.0 / math.sqrt(np.sum(w)))
+            f["model"] = ("weighted mean of per-block ratios (too few "
+                          "blocks for an intercept; per-block overhead "
+                          "biases the offset high)")
+        return f
+
+    fit = _offset_fit([(p[0], p[1]) for p in usable])
+    delta, delta_err = fit["delta"], fit["err"]
+    out["fit_model"] = fit["model"]
+    if "intercept_s" in fit:
+        out["overhead_intercept_s"] = fit["intercept_s"]
     out["fractional_offset"] = float(delta)
     out["fractional_offset_err"] = float(delta_err)
     out["assumed_timestamp_jitter_s"] = NTP_JITTER_S
+
+    n_refined = sum(1 for p in usable if p[3])
+    tot_ocxo = sum(p[0] for p in usable)
+    unref_ocxo = sum(p[0] for p in usable if not p[3])
+    out["expectation_refinement"] = {
+        "n_refined": n_refined,
+        "n_recorded_only": len(usable) - n_refined,
+        "unrefined_usable_ocxo_fraction":
+            (unref_ocxo / tot_ocxo) if tot_ocxo > 0 else None,
+        "note": ("expected durations re-derived from each block's bundled "
+                 "pulse-program text plus acqus (every programmed delay, "
+                 "pulse, and the per-scan pre-acquisition delay DE); the "
+                 "acquisition-side formula models only AQ and d1, and a "
+                 "per-scan shortfall biases the offset by "
+                 "~shortfall/scan-duration"),
+    }
+    if n_refined and tot_ocxo > 0 and unref_ocxo / tot_ocxo > 0.05:
+        out["expectation_refinement"]["caution"] = (
+            "refinement is partial and the unrefined blocks carry %.0f%% "
+            "of the audited OCXO time -- the fit mixes two duration "
+            "models; treat fine-tier verdicts with care"
+            % (100.0 * unref_ocxo / tot_ocxo))
+    if n_refined:
+        corr = [(p[0] - p[2]) / p[2] for p in usable if p[3] and p[2] > 0]
+        if corr:
+            out["expectation_refinement"]["median_fractional_correction"] \
+                = float(np.median(np.array(corr)))
+        rfit = _offset_fit([(p[2], p[1]) for p in usable])
+        out["recorded_model"] = {
+            "fractional_offset": float(rfit["delta"]),
+            "fractional_offset_err": float(rfit["err"]),
+            "fit_model": rfit["model"],
+            "note": ("the same usable blocks fitted against the "
+                     "acquisition-side (AQ+d1 only) expected durations, "
+                     "for comparison; the headline fit uses the "
+                     "pulse-program-derived durations"),
+        }
 
     out["conclusive"] = bool(span_s >= CLOCK_MIN_SPAN_S)
     if not out["conclusive"]:
@@ -835,16 +1146,40 @@ def render_clock_audit_html(clock):
          clock.get("audited_ocxo_s", 0), clock.get("n_usable", 0),
          clock.get("n_blocks", 0),
          esc(clock.get("workstation_time_source", "unknown"))))
+    er = clock.get("expectation_refinement") or {}
+    if er.get("n_refined"):
+        med = er.get("median_fractional_correction")
+        rm = clock.get("recorded_model") or {}
+        extra = ""
+        if med is not None:
+            extra += " &middot; median DE correction %+.2e" % med
+        if rm.get("fractional_offset") is not None:
+            extra += (" &middot; recorded-model fit for comparison: "
+                      "%+.3g &plusmn; %.2g"
+                      % (rm["fractional_offset"],
+                         rm["fractional_offset_err"]))
+        A("<p class='small'>expected durations re-derived from the "
+          "bundled pulse-program text + acqus for %d of %d usable "
+          "blocks%s</p>"
+          % (er["n_refined"],
+             er["n_refined"] + er.get("n_recorded_only", 0), extra))
+        if er.get("caution"):
+            A("<p class='warn'>%s</p>" % esc(er["caution"]))
     if clock.get("blocks"):
         A("<table><tr><th>expno</th><th>role</th><th>wall (s)</th>"
-          "<th>OCXO expected (s)</th><th>used</th><th>per-block offset"
-          "</th></tr>")
+          "<th>OCXO expected (s)</th><th>expected source</th>"
+          "<th>used</th><th>per-block offset</th></tr>")
         for b in clock["blocks"]:
             off = b.get("block_offset")
+            src_html = esc(b.get("expected_source", ""))
+            if b.get("refine_note"):
+                src_html += (" <span class='small'>(%s)</span>"
+                             % esc(b["refine_note"]))
             A("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
-              "<td>%s</td><td>%s</td></tr>"
+              "<td>%s</td><td>%s</td><td>%s</td></tr>"
               % (fmt(b.get("expno")), esc(b.get("role", "?")),
                  fmt(b.get("wall_s"), 6), fmt(b.get("ocxo_expected_s"), 6),
+                 src_html,
                  "yes" if b.get("used") else
                  "no &mdash; %s" % esc(b.get("why", "")),
                  ("%+.2e" % off) if off is not None else "&mdash;"))
@@ -867,6 +1202,91 @@ def render_clock_audit_html(clock):
         A("<p class='small'>NTP status probe (verbatim):</p>"
           "<pre class='small' style='white-space:pre-wrap; overflow-x:auto'>"
           "<code>%s</code></pre>" % esc(clock["ntp_status_raw"][:600]))
+    A("</div>")
+    return "".join(parts)
+
+
+def render_rdopt_html(ctx):
+    """HTML fragment for the rd-optimize tuning scan (empty when the
+    feature did not run). Falls back to the meta object so software-test
+    reports show it too."""
+    ro = ctx.get("rd_optimize")
+    if not isinstance(ro, dict):
+        ro = (ctx["meta"].get("calibration") or {}).get("rd_optimize")
+    if not isinstance(ro, dict) or not ro.get("enabled"):
+        return ""
+    parts = []
+    A = parts.append
+    A("<h2>rd-optimize (probe-tuning scan)</h2><div class='card'>")
+    A("<p class='small'>Small-flip FID envelope decay rate vs probe-"
+      "tuning offset: the envelope decays at 1/T2* + lambda_r, so with "
+      "the shim fixed the largest rate marks the strongest radiation "
+      "damping. The session ran at the chosen offset.</p>")
+    offs = ro.get("offsets_khz") or []
+    rates = ro.get("decay_rates_per_s") or []
+    amps = ro.get("amplitudes") or []
+    exps = ro.get("scan_expnos") or []
+    if offs:
+        A("<table><tr><th>offset (kHz)</th><th>decay rate (1/s)</th>"
+          "<th>amplitude (counts)</th><th>expno</th></tr>")
+        for i in range(len(offs)):
+            A("<tr><td>%+.0f</td><td>%s</td><td>%s</td><td>%s</td></tr>"
+              % (offs[i],
+                 fmt(rates[i] if i < len(rates) else None),
+                 fmt(amps[i] if i < len(amps) else None, 0),
+                 fmt(exps[i] if i < len(exps) else None)))
+        A("</table>")
+    A("<p><b>chosen offset: %+.0f kHz</b> <span class='small'>&mdash; "
+      "%s</span></p>"
+      % (ro.get("chosen_offset_khz") or 0.0, esc(ro.get("note", ""))))
+    A("</div>")
+    return "".join(parts)
+
+
+def render_field_sweep_html(ctx):
+    """HTML fragment for the field-stepped sweep (empty when the feature
+    did not run). Uses the science-path per-step analysis when present,
+    else the raw meta object (software-test reports)."""
+    fs = ctx.get("field_sweep")
+    if not isinstance(fs, dict):
+        m = ctx["meta"].get("field_sweep")
+        if not isinstance(m, dict) or not m.get("enabled"):
+            return ""
+        fs = {"steps": m.get("steps") or [], "note": m.get("note", ""),
+              "restored_offset_hz": m.get("restored_offset_hz"),
+              "headline_expno": None}
+    steps = fs.get("steps") or []
+    parts = []
+    A = parts.append
+    A("<h2>Field-stepped sweep (one mass point per step)</h2>"
+      "<div class='card'>")
+    if fs.get("note"):
+        A("<p class='small'>%s</p>" % esc(fs.get("note", "")))
+    if steps:
+        A("<table><tr><th>step</th><th>target (Hz)</th>"
+          "<th>measured (Hz)</th><th>rows</th><th>noise expno</th>"
+          "<th>line center (Hz)</th><th>FWHM (Hz)</th></tr>")
+        for i in range(len(steps)):
+            s = steps[i]
+            meas = fmt(s.get("measured_offset_hz"), 1)
+            if s.get("offset_basis") == "unverified":
+                meas = "&mdash; <span class='small'>(unverified: no "
+                meas += "line fit)</span>"
+            A("<tr><td>%d</td><td>%s</td><td>%s</td><td>%s</td>"
+              "<td>%s</td><td>%s</td><td>%s</td></tr>"
+              % (i + 1, fmt(s.get("target_offset_hz"), 1), meas,
+                 fmt(s.get("rows")),
+                 fmt(s.get("noise_expno", s.get("expno"))),
+                 fmt(s.get("line_center_hz"), 2),
+                 fmt(s.get("fwhm_hz"), 2)))
+        A("</table>")
+    restored = fs.get("restored_offset_hz")
+    if restored is not None:
+        A("<p class='small'>field restored to %+.1f Hz of baseline after "
+          "the ladder</p>" % restored)
+    if fs.get("headline_expno") is not None:
+        A("<p class='small'>headline science block: expno %s (the step "
+          "nearest the baseline field)</p>" % fs["headline_expno"])
     A("</div>")
     return "".join(parts)
 
@@ -1306,6 +1726,8 @@ def render_html(ctx):
         # On a desk machine the recorded wall times are the desk's, so the
         # numbers describe the test host, never a spectrometer.
         A(render_clock_audit_html(ctx["clock"]))
+        A(render_rdopt_html(ctx))
+        A(render_field_sweep_html(ctx))
         A(_footer())
         return "".join(parts)
 
@@ -1510,6 +1932,10 @@ def render_html(ctx):
     # ---- clock audit
     A(render_clock_audit_html(ctx["clock"]))
 
+    # ---- optional features (empty fragments when absent)
+    A(render_rdopt_html(ctx))
+    A(render_field_sweep_html(ctx))
+
     # ---- QA
     A("<h2>QA flags</h2><div class='card'><table>"
       "<tr><th>status</th><th>check</th><th>detail</th></tr>")
@@ -1602,7 +2028,7 @@ def main(argv=None):
 
     # ---- clock audit (both report types: it is timestamp plumbing, not
     # spin physics, and the harness validates the fit on desktest bundles)
-    clock = analyze_clock_audit(meta)
+    clock = analyze_clock_audit(meta, bundle)
     report["clock_audit"] = strip_private(clock)
 
     # ---- 2. run-mode gate
@@ -1645,12 +2071,123 @@ def main(argv=None):
     else:
         f0_guess, w_ref = 0.0, 12.0
 
-    # ---- 3. noise blocks
-    noise_res = None
-    for e in by_role.get("noise", []):
-        noise_res = analyze_noise_block(bundle, e, f0_guess, fs_default)
-        if noise_res is not None:
+    # ---- 3. noise blocks: a single 'noise' block, or the field-stepped
+    # 'noise_sweep' ladder. Every sweep step is its own axion mass point
+    # (mass coordinate = measured carrier + step offset). Each step's
+    # line is fitted AT ITS OWN SHIFTED POSITION (fit_line searches only
+    # +/-LINE_SEARCH_HZ around its seed, so seeding at the baseline
+    # would fit noise for every shifted step); the sign of the shift on
+    # this PSD axis is resolved empirically by fitting both candidates
+    # and keeping the more significant one. Steps whose offset was never
+    # MEASURED are not line-fitted at all -- an unverified target is not
+    # a position. The measured step nearest baseline doubles as the
+    # headline science block.
+    sweep_meta = meta.get("field_sweep") or {}
+    sweep_steps_meta = sweep_meta.get("steps") or []
+
+    def _sweep_measured_of(expno):
+        for s in sweep_steps_meta:
+            if s.get("noise_expno") == expno:
+                return s.get("measured_offset_hz")
+        return None
+
+    def _fit_significance(r):
+        tot = 0.0
+        for pr in r["per_row"]:
+            ft = pr.get("fit")
+            if ft and ft.get("amp_err"):
+                tot += min(abs(ft["amp_norm"]) / ft["amp_err"], 10.0)
+        return tot
+
+    def _analyze_sweep_step(e, off):
+        """Fit at both sign candidates of the measured offset; keep the
+        candidate whose per-row line fits are more significant (a real
+        line beats a noise fit decisively). Returns (result, seed)."""
+        cands = [off, -off] if off else [0.0]
+        best, best_seed, best_score = None, None, -1.0
+        for c in cands:
+            r = analyze_noise_block(bundle, e, f0_guess + c, fs_default)
+            if r is None:
+                continue
+            score = _fit_significance(r)
+            if score > best_score:
+                best, best_seed, best_score = r, c, score
+        return best, best_seed
+
+    noise_exps = list(by_role.get("noise", []))
+    sweep_exps = sorted(by_role.get("noise_sweep", []),
+                        key=lambda e: e.get("expno", 0))
+    analyzed = {}         # expno -> (result_or_None, seed_offset_or_None)
+    for e in noise_exps:
+        analyzed[e.get("expno")] = (analyze_noise_block(
+            bundle, e, f0_guess, fs_default), 0.0)
+    for e in sweep_exps:
+        expno = e.get("expno")
+        off = _sweep_measured_of(expno)
+        if off is None:
+            analyzed[expno] = (None, None)   # unverified: no line fit
+        else:
+            analyzed[expno] = _analyze_sweep_step(e, off)
+
+    headline_order = noise_exps + sorted(
+        [e for e in sweep_exps
+         if _sweep_measured_of(e.get("expno")) is not None],
+        key=lambda e: abs(_sweep_measured_of(e.get("expno"))))
+    noise_res, f0_detect = None, f0_guess
+    for e in headline_order:
+        res, seed = analyzed.get(e.get("expno"), (None, None))
+        if res is not None:
+            noise_res = res
+            f0_detect = f0_guess + (seed or 0.0)
             break
+
+    sweep_analysis = None
+    if sweep_exps:
+        sweep_analysis = {
+            "headline_expno": (noise_res or {}).get("expno"),
+            "baseline_line_offset_hz":
+                sweep_meta.get("baseline_line_offset_hz"),
+            "restored_offset_hz": sweep_meta.get("restored_offset_hz"),
+            "field_restored": sweep_meta.get("field_restored"),
+            "note": ("field-stepped sweep: every step is a distinct "
+                     "axion mass point, line-fitted at its own measured "
+                     "offset (sign resolved empirically per step); "
+                     "steps without a measured offset are listed but "
+                     "not fitted; the headline science analysis uses "
+                     "the measured step nearest the baseline field"),
+            "steps": []}
+        for e in sweep_exps:
+            expno = e.get("expno")
+            r, seed = analyzed.get(expno, (None, None))
+            off = _sweep_measured_of(expno)
+            entry = {"expno": expno, "measured_offset_hz": off,
+                     "offset_basis": ("measured" if off is not None
+                                      else "unverified"),
+                     "rows": e.get("td1_rows"), "readable": bool(r)}
+            for s in sweep_steps_meta:
+                if s.get("noise_expno") == expno:
+                    entry["target_offset_hz"] = s.get("target_offset_hz")
+            if off is None:
+                entry["note"] = ("offset never measured (verification "
+                                 "failed or was skipped): no line fit -- "
+                                 "an unverified target is not a position")
+            if r:
+                entry["fit_seed_offset_hz"] = seed
+                # line position: mean of per-row fit centers (the coadd
+                # fit is in the self-aligned frame and carries only a
+                # residual shift)
+                centers = [pr["fit"]["center_hz"] for pr in r["per_row"]
+                           if "fit" in pr]
+                if centers:
+                    entry["line_center_hz"] = float(np.mean(centers))
+                    entry["line_center_spread_hz"] = float(
+                        max(centers) - min(centers))
+                if "coadd_fit" in r:
+                    cf = r["coadd_fit"]
+                    entry["fwhm_hz"] = cf.get("fwhm_hz")
+                    entry["amp_norm"] = cf.get("amp_norm")
+                    entry["amp_err"] = cf.get("amp_err")
+            sweep_analysis["steps"].append(entry)
 
     detection = {"detected": False}
     if noise_res and "coadd_fit" in noise_res:
@@ -1671,18 +2208,23 @@ def main(argv=None):
             detection["detected"] = True
     if noise_res and not detection["detected"]:
         # calibrated upper limit at the reference-anchored position
+        # (shifted by the headline sweep step's measured offset when the
+        # headline block is a field-stepped one)
         r0 = noise_res["_rows"][0]
         # co-add unaligned (no feature to align on)
         stack = np.mean([rr["pnorm"] for rr in noise_res["_rows"]], axis=0)
         ul, ul_details = upper_limit_at(
-            r0["f"], stack, f0_guess,
+            r0["f"], stack, f0_detect,
             [max(0.5 * w_ref, 2.0), w_ref, 2.0 * w_ref])
         detection["upper_limit_95_amp"] = ul
         detection["upper_limit_details"] = ul_details
         detection["upper_limit_note"] = (
             "95%% one-sided limit on |feature amplitude| relative to the "
-            "floor, at the reference line position, profiled over widths "
-            "0.5/1/2 x the reference linewidth (%.1f Hz)" % w_ref)
+            "floor, at the reference-anchored line position%s, profiled "
+            "over widths 0.5/1/2 x the reference linewidth (%.1f Hz)"
+            % ((" shifted %+.1f Hz for the headline sweep step"
+                % (f0_detect - f0_guess))
+               if abs(f0_detect - f0_guess) > 1e-9 else "", w_ref))
 
     # ---- 4. RG ladder
     ladder = analyze_rg_ladder(bundle, meta, f0_guess, fs_default)
@@ -1791,7 +2333,9 @@ def main(argv=None):
            "ladder": ladder, "detection": detection, "headline": headline,
            "temp_contrast": temp_contrast, "floor_cal": floor_cal,
            "qa": qa, "figs": figs, "honesty": honesty,
-           "names": sorted(bundle.names), "clock": clock}
+           "names": sorted(bundle.names), "clock": clock,
+           "field_sweep": sweep_analysis,
+           "rd_optimize": (meta.get("calibration") or {}).get("rd_optimize")}
     html = render_html(ctx)
 
     report["science"] = strip_private({
@@ -1800,6 +2344,8 @@ def main(argv=None):
         "noise": noise_res, "references": refs, "rg_ladder": ladder,
         "detection": detection, "headline": headline,
         "temperature_contrast": temp_contrast, "floor_calibration": floor_cal,
+        "field_sweep": sweep_analysis,
+        "rd_optimize": (meta.get("calibration") or {}).get("rd_optimize"),
         "qa_flags": qa, "honesty": honesty,
     })
     _write(out_dir, html, report)

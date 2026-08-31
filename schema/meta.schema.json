@@ -501,6 +501,10 @@
     "topshim_ok": {
      "type": "boolean",
      "description": "True if automated shimming ran and converged (topshim on Bruker; the vendor's equivalent elsewhere); false if unavailable or skipped."
+    },
+    "rd_optimize": {
+     "type": "object",
+     "description": "OPTIONAL (documented 2026-08-31, no schema-version bump: an additive, never-required object that changes no validation outcome for any existing bundle). Written by spin_noise_run.py when the 'rdopt' option ran: the probe-tuning scan for maximum radiation damping. Keys: enabled, offsets_khz, decay_rates_per_s (FID envelope decay = 1/T2* + lambda_r per offset; null where unmeasurable), amplitudes, scan_expnos, chosen_offset_khz, improvement_frac, final_retune_ok, p90_us_at_setup / p90_us_at_chosen (P90 is recalibrated at the chosen tuning; the session's calibration.p90_us is the recalibrated value), note."
     }
    }
   },
@@ -535,8 +539,12 @@
        "rg_ladder",
        "reference_open",
        "noise",
-       "reference_close"
-      ]
+       "reference_close",
+       "rdopt_scan",
+       "sweep_verify",
+       "noise_sweep"
+      ],
+      "description": "Experiment role. rdopt_scan (small-flip 1Ds of the rd-optimize tuning scan), sweep_verify (field-step verification 1Ds), and noise_sweep (per-step pulse-free noise blocks of the field-stepped sweep) were added for the optional rdopt/sweep features; enum extension only, all earlier bundles remain valid."
      },
      "pulprog": {
       "type": "string",
@@ -615,8 +623,12 @@
          "rg_ladder",
          "reference_open",
          "noise",
-         "reference_close"
-        ]
+         "reference_close",
+         "rdopt_scan",
+         "sweep_verify",
+         "noise_sweep"
+        ],
+        "description": "Same role vocabulary as experiments[].role, including the optional rdopt/sweep feature roles (enum extension; earlier bundles remain valid)."
        },
        "wall_start_ms": {
         "type": "integer",
@@ -646,6 +658,10 @@
      "description": "Short label of the tool that answered the time-sync probe (e.g. 'chrony', 'ntpd (ntpq)', 'w32time'); 'unknown' if none did."
     }
    }
+  },
+  "field_sweep": {
+   "type": "object",
+   "description": "OPTIONAL (documented 2026-08-31, no schema-version bump: additive and never required). Written by spin_noise_run.py when the 'sweep' option ran: field-stepped noise blocks, each step a distinct axion mass point. The field is stepped through the 2H lock reference (1 ppm = BF1 Hz at 1H, exact) with unlocked FIELD-DAC steps as fallback; MEASURED offsets, never targets, are the record. Keys: enabled, requested_half_span_hz, per_step_secs, baseline_line_offset_hz, sign_convention_flip (pulse-pair estimator sign resolved against the operator's shift direction), steps[] {index, target_offset_hz, measured_offset_hz (null = unverified: analysis must not substitute the target), measured_offset_hz_raw, verify_expno, noise_expno, rows, skipped}, restored_offset_hz, field_restored, ended_early, note."
   },
   "checksums": {
    "type": "object",

@@ -38,6 +38,13 @@ spin-noise-limited records relevant to fundamental-sensitivity and dark-matter
    **resumes where it left off** if the network drops or the machine reboots — just
    rerun the same command.
 
+**Using Claude Code (or another AI coding agent)?** Point it at
+[docs/CLAUDE_INSTALL.md](docs/CLAUDE_INSTALL.md) — an agent-facing runbook that
+walks it through install, configuration, validation, packing, and upload, with
+verification gates at every step (and hard rules: agents never run acquisition
+commands and never expose your upload token). The acquisition session itself
+stays yours.
+
 The script never touches your lock/sweep settings silently — it asks you to confirm
 the BSMS field sweep is OFF and records your answer. It has a `SIMULATE` flag for a
 dry run without touching hardware, and a `DESKTEST` flag that exercises the real

@@ -32,11 +32,19 @@ the report generator runs its full science path on such bundles but
 watermarks the report as validation, never as a measurement.
 
 With --clock-offset F the bundle also carries a schema-1.2 clock_audit
-object whose block wall-clock durations equal the OCXO-implied durations
-times (1 + F), plus a constant per-block overhead and ms-scale jitter --
-so the report's clock-audit fit must recover F within its stated
-uncertainty. The default session is short (~10 min of audited time), so
-the report correctly flags the audit 'inconclusive (short session)' while
+object built on the PHYSICAL timing model: each block's recorded
+ocxo_expected_s uses the acquisition-side formula rows*(AQ + n_d1*D1)
+(mirroring spin_noise_run.py), while its wall-clock duration follows
+the pulse-program texts written into each expno (see PP_TEXTS: extra
+30m/p1/DE terms, and a second d1 per zg2d reference row) times (1 + F),
+plus a constant per-block overhead and ms-scale jitter. The report's
+pulse-program-derived fit must recover F within its stated uncertainty;
+without refinement the mis-modeled reference blocks are gate-excluded,
+so --expect-refined catches a dead refinement. --de-us sets DE (default
+6.5 us, the stock value; crank it, e.g. 20000, to make the per-row DE
+shortfall itself many sigma).
+The default session is short (~10 min of audited time), so the report
+correctly flags the audit 'inconclusive (short session)' while
 still reporting the fitted offset; that flag is part of what this bundle
 validates.
 
@@ -89,28 +97,93 @@ FLOOR_C2HZ = 40000.0       # flat noise floor, counts^2/Hz (comfortably int32)
 REF_A0 = 2.0e6             # injected reference amplitude, counts
 REF_DECAY_S = 3.0          # reference decay rate 1/s (line ~1 Hz + inhomog.)
 REF_FWHM_HZ = 6.0          # reference line FWHM via extra Lorentzian decay
+D1_REF_S = 2.0             # relaxation delay, references/ladder (run script)
+D1_NOISE_S = 0.05          # zgnoise2d loop delay (spent TWICE per row)
+DE_US_DEFAULT = 6.5        # stock pre-acquisition delay DE, microseconds
+P1_US = 10.0               # small-flip pulse length in the pulsed sequences
+
+# Pulse-program texts written into each expno, mirroring what real
+# TopSpin stores in data/<expno>/pulseprogram. The report's clock-audit
+# refinement parses these texts (NOT a name-keyed table) to derive each
+# block's true OCXO duration, so the fixture's wall clocks below are
+# built from the same structures. zgnoise2d is the repo-shipped
+# sequence verbatim (2 x d1 per row); the zg2d stand-in follows its
+# documented lineage ('zg2d with the pulse line deleted') and spends
+# 2 x d1 + p1 per row; the zg stand-in carries the library sequence's
+# 30m loop/write delays.
+PP_TEXT_ZGNOISE2D = (
+    ";zgnoise2d (fixture copy of topspin/pp/zgnoise2d)\n"
+    "#include <Avance.incl>\n"
+    "1 ze\n"
+    "2 d1\n"
+    "  go=2 ph31\n"
+    "  d1 wr #0 if #0 ze\n"
+    "  lo to 2 times td1\n"
+    "exit\n"
+    "ph31=0\n").encode("ascii")
+PP_TEXT_ZG2D = (
+    ";zg2d (fixture stand-in: zgnoise2d lineage WITH the pulse line)\n"
+    "1 ze\n"
+    "2 d1\n"
+    "  p1 ph1\n"
+    "  go=2 ph31\n"
+    "  d1 wr #0 if #0 zd\n"
+    "  lo to 2 times td1\n"
+    "exit\n"
+    "ph1=0\n"
+    "ph31=0\n").encode("ascii")
+PP_TEXT_ZG = (
+    ";zg (fixture stand-in for the library 1D sequence, with its 30m\n"
+    ";loop and write delays)\n"
+    "1 ze\n"
+    "2 30m\n"
+    "  d1\n"
+    "  p1 ph1\n"
+    "  go=2 ph31\n"
+    "30m mc #0 to 2 F0(zd)\n"
+    "exit\n"
+    "ph1=0\n"
+    "ph31=0\n").encode("ascii")
+PP_TEXTS = {"zg": PP_TEXT_ZG, "zg2d": PP_TEXT_ZG2D,
+            "zgnoise2d": PP_TEXT_ZGNOISE2D}
 
 
 def info(msg):
     print(msg, file=sys.stderr)
 
 
-def acqus_text(td, sw, rg, o1=0.0, pulprog="zgnoise2d", grpdly=GRPDLY):
+def acqus_text(td, sw, rg, o1=0.0, pulprog="zgnoise2d", grpdly=GRPDLY,
+               d1_s=D1_NOISE_S, de_us=DE_US_DEFAULT, p1_us=P1_US):
+    # D and P arrays formatted like real Bruker acqus: "(0..63)" header,
+    # values on continuation lines (element 1 carries D1/P1; rest zero).
+    # FRQLO3 is a DBL_MAX sentinel: real consoles write these for unset
+    # doubles, and parse_jcamp must survive them (regression coverage
+    # for the OverflowError found in review against the 2020 dataset).
+    d_line = "0 %.6g " % d1_s + " ".join(["0"] * 62)
+    p_line = "0 %.6g " % p1_us + " ".join(["0"] * 62)
     return (
         "##TITLE= Parameter file, synthetic injection bundle\n"
         "##$PULPROG= <%s>\n"
         "##$TD= %d\n"
         "##$SW_h= %.10g\n"
         "##$SFO1= 600.13\n"
+        "##$FRQLO3= 1.79769313486232e+308\n"
         "##$O1= %.6g\n"
         "##$RG= %.6g\n"
         "##$NS= 1\n"
+        "##$DS= 0\n"
+        "##$DE= %.6g\n"
+        "##$D= (0..63)\n"
+        "%s\n"
+        "##$P= (0..63)\n"
+        "%s\n"
         "##$BYTORDA= 0\n"
         "##$DTYPA= 0\n"
         "##$DECIM= 1664\n"
         "##$DSPFVS= 20\n"
         "##$GRPDLY= %.6g\n"
-        "##END=\n" % (pulprog, td, sw, o1, rg, grpdly)
+        "##END=\n" % (pulprog, td, sw, o1, rg, de_us, d_line, p_line,
+                      grpdly)
     ).encode("ascii")
 
 
@@ -162,27 +235,51 @@ def synth_reference_row(rng, n, fs, a0, f0, fwhm, decay_s, floor_c2hz):
     return x
 
 
-def build_clock_audit(offset, rng):
+def build_clock_audit(offset, rng, de_us=DE_US_DEFAULT):
     """Schema-1.2 clock_audit object with a KNOWN injected fractional
     clock offset: each acquisition block's wall duration is its OCXO-implied
     duration times (1 + offset), plus a constant 0.18 s per-block overhead
     (disk writes; the fit's intercept must absorb it) and +/-4 ms jitter
     (NTP timestamp granularity). A setup block with no OCXO prediction is
-    included to exercise the fit's exclusion path."""
+    included to exercise the fit's exclusion path.
+
+    PHYSICAL timing model (mirrors the fixture PP_TEXTS, which the
+    report's refinement parses): the RECORDED ocxo_expected_s is the
+    acquisition-side formula rows*(AQ + n_d1*D1), exactly like
+    spin_noise_run.py (ladder/refs n_d1=1, noise n_d1=2) -- while the
+    TRUE (wall) duration follows the pulse-program text: the zg ladder
+    additionally spends 2x30m + p1 + DE per pass, the zg2d references a
+    SECOND d1 + p1 + DE per row (their recorded expectation is ~9.5%
+    short, so a fit without refinement gate-excludes them; that is what
+    --expect-refined guards), and zgnoise2d spends DE per row. The
+    report's pulse-program-derived fit removes the shortfalls; its
+    recorded-model comparison fit keeps them."""
+    de_s = de_us * 1e-6
+    p1_s = P1_US * 1e-6
     aq_lad = TD_LADDER / 2 / SW_HZ
     aq_row = TD_ROW / 2 / SW_HZ
-    plan = [(1, "setup", None)]
-    plan += [(e, "rg_ladder", aq_lad) for e, _rg in RG_LADDER]
-    plan += [(11, "reference_open", REF_ROWS * aq_row),
-             (12, "noise", N_NOISE_ROWS * aq_row),
-             (13, "reference_close", REF_ROWS * aq_row)]
+    lad_rec = aq_lad + D1_REF_S
+    lad_true = aq_lad + D1_REF_S + p1_s + de_s + 0.060   # two 30m lines
+    ref_rec = aq_row + D1_REF_S
+    ref_true = aq_row + 2.0 * D1_REF_S + p1_s + de_s
+    noi_rec = aq_row + 2.0 * D1_NOISE_S
+    noi_true = noi_rec + de_s
+    # (expno, role, rows, rec_per_row, true_per_row); rows None = setup
+    plan = [(1, "setup", None, None, None)]
+    plan += [(e, "rg_ladder", 1, lad_rec, lad_true) for e, _rg in RG_LADDER]
+    plan += [(11, "reference_open", REF_ROWS, ref_rec, ref_true),
+             (12, "noise", N_NOISE_ROWS, noi_rec, noi_true),
+             (13, "reference_close", REF_ROWS, ref_rec, ref_true)]
     t_ms = 1787000000000            # arbitrary 2026-ish epoch
     blocks = []
-    for expno, role, ocxo_s in plan:
-        if ocxo_s is None:
+    for expno, role, rows, rec_row, true_row in plan:
+        if rows is None:
+            ocxo_s = None
             dur_ms = 120000         # setup: tune/shim/dialogs, wall only
         else:
-            dur_ms = int(round(ocxo_s * 1000.0 * (1.0 + offset)
+            ocxo_s = rows * rec_row
+            true_s = rows * true_row
+            dur_ms = int(round(true_s * 1000.0 * (1.0 + offset)
                                + 180.0 + rng.integers(-4, 5)))
         blocks.append({"expno": expno, "role": role,
                        "wall_start_ms": t_ms,
@@ -208,7 +305,9 @@ def build_bundle(args):
 
     # setup expno 1: acqus only
     files.append(("data/1/acqus",
-                  acqus_text(TD_LADDER, SW_HZ, 1.0, pulprog="zg")))
+                  acqus_text(TD_LADDER, SW_HZ, 1.0, pulprog="zg",
+                             d1_s=D1_REF_S, de_us=args.de_us)))
+    files.append(("data/1/pulseprogram", PP_TEXTS["zg"]))
 
     # RG ladder: amplitude exactly linear in RG
     ladder_meta = []
@@ -222,7 +321,9 @@ def build_bundle(args):
                                   REF_FWHM_HZ, REF_DECAY_S,
                                   FLOOR_C2HZ * (rg / RG_NOISE) ** 2)
         files.append(("data/%d/acqus" % expno,
-                      acqus_text(TD_LADDER, SW_HZ, rg, pulprog="zg")))
+                      acqus_text(TD_LADDER, SW_HZ, rg, pulprog="zg",
+                                 d1_s=D1_REF_S, de_us=args.de_us)))
+        files.append(("data/%d/pulseprogram" % expno, PP_TEXTS["zg"]))
         files.append(("data/%d/fid" % expno, to_bruker_int32([row])))
         ladder_meta.append({"expno": expno, "rg": rg, "tip_deg": 1.0})
 
@@ -235,7 +336,9 @@ def build_bundle(args):
                 for _ in range(REF_ROWS)]
         ref_rows[expno] = rows
         files.append(("data/%d/acqus" % expno,
-                      acqus_text(TD_ROW, SW_HZ, RG_REF, pulprog="zg2d")))
+                      acqus_text(TD_ROW, SW_HZ, RG_REF, pulprog="zg2d",
+                                 d1_s=D1_REF_S, de_us=args.de_us)))
+        files.append(("data/%d/pulseprogram" % expno, PP_TEXTS["zg2d"]))
         files.append(("data/%d/acqu2s" % expno, acqu2s_text(REF_ROWS)))
         files.append(("data/%d/ser" % expno, to_bruker_int32(rows)))
 
@@ -243,7 +346,10 @@ def build_bundle(args):
     noise_rows = [synth_noise_row(rng, n_row, SW_HZ, FLOOR_C2HZ,
                                   a_inj, b_inj, F0_HZ, args.fwhm)
                   for _ in range(N_NOISE_ROWS)]
-    files.append(("data/12/acqus", acqus_text(TD_ROW, SW_HZ, RG_NOISE)))
+    files.append(("data/12/acqus",
+                  acqus_text(TD_ROW, SW_HZ, RG_NOISE,
+                             d1_s=D1_NOISE_S, de_us=args.de_us)))
+    files.append(("data/12/pulseprogram", PP_TEXTS["zgnoise2d"]))
     files.append(("data/12/acqu2s", acqu2s_text(N_NOISE_ROWS)))
     files.append(("data/12/ser", to_bruker_int32(noise_rows)))
 
@@ -305,14 +411,18 @@ def build_bundle(args):
             "b_over_a": args.b_over_a, "f0_hz": F0_HZ,
             "fwhm_hz": args.fwhm, "floor_counts2perhz": FLOOR_C2HZ,
             "ref_a0_counts": REF_A0, "seed": args.seed,
-            "clock_fractional_offset": args.clock_offset},
+            "clock_fractional_offset": args.clock_offset,
+            "clock_de_us": args.de_us},
     }
 
     # ---- optional clock audit with a known injected fractional offset
     if args.clock_offset is not None:
-        meta["clock_audit"] = build_clock_audit(args.clock_offset, rng)
-        info("clock audit injected: fractional offset %.3e over %d blocks"
-             % (args.clock_offset, len(meta["clock_audit"]["blocks"])))
+        meta["clock_audit"] = build_clock_audit(args.clock_offset, rng,
+                                                args.de_us)
+        info("clock audit injected: fractional offset %.3e over %d blocks "
+             "(DE = %.6g us)"
+             % (args.clock_offset, len(meta["clock_audit"]["blocks"]),
+                args.de_us))
     for arc, payload in files:
         meta["checksums"][arc] = "sha256:" + hashlib.sha256(payload).hexdigest()
 
@@ -348,6 +458,13 @@ def main(argv=None):
                          "carry this KNOWN fractional console-clock offset "
                          "(e.g. 3e-7); omit for no clock_audit (pre-1.2 "
                          "behavior)")
+    ap.add_argument("--de-us", type=float, default=DE_US_DEFAULT,
+                    help="pre-acquisition delay DE in microseconds, written "
+                         "to acqus AND spent per scan in the clock-audit "
+                         "wall durations but ABSENT from the recorded "
+                         "expectations (the physical shortfall the report's "
+                         "acqus-refined fit must remove); default %.3g"
+                         % DE_US_DEFAULT)
     ap.add_argument("--out-dir", default=None)
     args = ap.parse_args(argv)
     if args.feature == "dip" and abs(args.amp) >= 1.0:

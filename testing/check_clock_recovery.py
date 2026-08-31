@@ -23,6 +23,13 @@ clock_audit object. Two distinct test roles (see run_jython_harness.sh):
     a >= 5-sigma DETECTION of the nonzero offset: |fit| > 5*err. The
     zero-offset null (--injected 0 --within-nsigma 3) closes the other
     side: a fit biased away from zero fails it.
+  * DE-DISCRIMINATION check (--injected 0 --expect-refined 7
+    --recorded-model-biased-nsigma 5, on a bundle built with a large
+    --de-us): the headline (acqus-refined) fit must recover the truth
+    while the recorded-model comparison fit must sit many sigma AWAY
+    from it -- proving the DE refinement engaged and did real work,
+    not just that both fits agree. --expect-refined alone asserts the
+    refinement engaged on at least N usable blocks.
 
 Exit 0 iff every requested assertion holds. Prints the fitted numbers
 either way.
@@ -49,6 +56,14 @@ def main(argv=None):
     ap.add_argument("--require-conclusive", action="store_true",
                     help="require the audit's conclusive flag (session span "
                          "past the report's minimum)")
+    ap.add_argument("--expect-refined", type=int, default=None,
+                    help="require the acqus-DE expectation refinement to "
+                         "have engaged on at least N usable blocks")
+    ap.add_argument("--recorded-model-biased-nsigma", type=float,
+                    default=None,
+                    help="require the recorded-model comparison fit to sit "
+                         "MORE than N of its sigma away from the injected "
+                         "offset (proves the DE refinement did real work)")
     args = ap.parse_args(argv)
 
     with open(args.report_json, "r") as fh:
@@ -101,6 +116,35 @@ def main(argv=None):
               % args.detect_nsigma,
               abs(fit) > args.detect_nsigma * err,
               "|%.3e| <= %.3e" % (fit, args.detect_nsigma * err))
+
+    er = ca.get("expectation_refinement") or {}
+    rm = ca.get("recorded_model") or {}
+    if er.get("n_refined") is not None:
+        med = er.get("median_fractional_correction")
+        print("       refinement: %d refined / %d recorded-only%s"
+              % (er.get("n_refined", 0), er.get("n_recorded_only", 0),
+                 (" | median DE correction %+.3e" % med)
+                 if med is not None else ""))
+    if rm.get("fractional_offset") is not None:
+        print("       recorded-model fit %.6e +/- %.3e"
+              % (rm["fractional_offset"], rm["fractional_offset_err"]))
+    if args.expect_refined is not None:
+        check("refinement engaged on >= %d usable blocks"
+              % args.expect_refined,
+              int(er.get("n_refined") or 0) >= args.expect_refined,
+              "n_refined = %s" % er.get("n_refined"))
+    if args.recorded_model_biased_nsigma is not None:
+        rfit = rm.get("fractional_offset")
+        rerr = rm.get("fractional_offset_err")
+        ok = (isinstance(rfit, (int, float))
+              and isinstance(rerr, (int, float)) and rerr > 0
+              and abs(rfit - args.injected)
+              > args.recorded_model_biased_nsigma * rerr)
+        check("recorded-model fit biased > %.3g sigma from the injected "
+              "offset (DE refinement did real work)"
+              % args.recorded_model_biased_nsigma, ok,
+              "recorded-model %s +/- %s vs injected %.3e"
+              % (rfit, rerr, args.injected))
 
     if failures:
         print("CLOCK RECOVERY: FAIL (%d check(s))" % len(failures))
