@@ -63,7 +63,7 @@ except ImportError:  # pragma: no cover - cannot happen on py3, but stay polite
 # Kept in sync with the repository VERSION file (a literal, not a file
 # read, because this script is copied standalone to facility machines);
 # testing/static_check.py enforces the sync.
-UPLOADER_VERSION = "0.5.1"
+UPLOADER_VERSION = "0.5.2"
 
 # Metadata schema versions this uploader understands.  The shipped
 # schema/meta.schema.json describes the CURRENT version (2.0, which made
@@ -1093,13 +1093,148 @@ def do_abort(bundle_path, cfg):
 
 
 # --------------------------------------------------------------------------
+# --doctor: install-time preflight (no bundle needed)
+# --------------------------------------------------------------------------
+
+def do_doctor(cfg_path, schema_path):
+    """Self-diagnose the installation: Python, config, schema, network
+    path, TLS trust, and system clock -- each check names the fix. This
+    is the first thing to run on a fresh install (the agent runbook does)
+    and the first thing to run when an upload misbehaves.
+
+    Exit code 0 = everything usable; 1 = at least one problem."""
+    problems = []
+
+    def report(ok, name, detail):
+        tag = "OK  " if ok else "FAIL"
+        print("%s : %s -- %s" % (tag, name, detail))
+        if not ok:
+            problems.append(name)
+
+    # 1. Python
+    v = sys.version_info
+    report(v >= (3, 6), "python version",
+           "%d.%d.%d%s" % (v[0], v[1], v[2],
+                           "" if v >= (3, 6) else
+                           " (need 3.6+; on old CentOS try "
+                           "'python3.6' or another machine)"))
+
+    # 2. Config
+    cfg, err = load_config(cfg_path)
+    if cfg is None:
+        report(False, "config.json", err)
+    else:
+        slug = cfg.get("facility_slug", "")
+        slug_ok = re.match(r"^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$",
+                           slug) is not None
+        report(True, "config.json", "%s (token: set, %d chars, not shown)"
+               % (cfg_path, len(cfg.get("token", ""))))
+        report(slug_ok, "facility slug",
+               "'%s'%s" % (slug, "" if slug_ok else
+                           " does not match the slug pattern -- check "
+                           "with the maintainer"))
+
+    # 3. Schema (validation capability)
+    report(os.path.isfile(schema_path), "schema file",
+           schema_path if os.path.isfile(schema_path) else
+           "%s missing -- --selftest will refuse; run from a full "
+           "checkout" % schema_path)
+
+    # 4/5. Network path + TLS + clock, against the endpoint origin.
+    if cfg is None:
+        report(False, "network", "skipped (no readable config)")
+        print("DOCTOR: %d problem(s)" % len(problems))
+        return 1
+    origin = "/".join(cfg["endpoint_url"].split("/")[:3])
+    tls_ctx = ssl.create_default_context()
+    headers = None
+    try:
+        resp = urlrequest.urlopen(
+            urlrequest.Request(origin, headers={
+                "User-Agent": "spin-noise-doctor/%s" % UPLOADER_VERSION}),
+            context=tls_ctx, timeout=20)
+        headers = resp.headers
+        report(True, "network path",
+               "%s answered HTTP %d" % (origin, resp.status
+                                        if hasattr(resp, "status")
+                                        else resp.getcode()))
+    except urlerror.HTTPError as exc:
+        # ANY HTTP status proves the full network + TLS path works.
+        headers = exc.headers
+        report(True, "network path",
+               "%s answered HTTP %d (any answer is fine here)"
+               % (origin, exc.code))
+    except Exception as exc:
+        hint = cert_error_hint(exc)
+        if hint:
+            report(False, "TLS trust", hint)
+        else:
+            text = str(getattr(exc, "reason", exc)).lower()
+            if "name or service" in text or "nodename" in text \
+                    or "getaddrinfo" in text:
+                detail = ("DNS cannot resolve %s -- this machine likely "
+                          "has no route to the internet (isolated "
+                          "instrument subnet). Upload from another "
+                          "machine; the zip travels fine on a USB stick."
+                          % origin)
+            else:
+                detail = ("cannot reach %s (%s) -- likely an institutional "
+                          "firewall or an offline subnet. Upload from "
+                          "another machine on a normal network."
+                          % (origin, getattr(exc, "reason", exc)))
+            report(False, "network path", detail)
+
+    # 5. Clock sanity from the server's Date header (a wildly wrong
+    # clock breaks TLS elsewhere and pollutes the clock audit).
+    if headers is not None:
+        try:
+            import email.utils
+            server_dt = email.utils.parsedate_to_datetime(headers["Date"])
+            skew = abs(time.time() - server_dt.timestamp())
+            report(skew < 300, "system clock",
+                   "%.0f s from server time%s"
+                   % (skew, "" if skew < 300 else
+                      " -- fix the clock (check the YEAR with 'date'); "
+                      "a wrong clock breaks TLS and taints timestamps"))
+        except Exception:
+            print("OK?  : system clock -- could not parse the server's "
+                  "Date header; skipping")
+
+    # Informational ONLY -- never a problem: uploading an existing zip
+    # needs essentially no free space (it is streamed), and the cwd here
+    # is the uploader machine, not where bundles land. Printed because
+    # it is cheap context for the ACQUISITION side.
+    try:
+        import shutil
+        free_gib = shutil.disk_usage(os.getcwd()).free / (1024.0 ** 3)
+        print("INFO : disk space (cwd) -- %.1f GiB free (uploading needs "
+              "almost none; an overnight ACQUISITION can need up to 5 GiB "
+              "on the spectrometer side)" % free_gib)
+    except Exception:
+        pass
+
+    if problems:
+        print("DOCTOR: %d problem(s) -- see FAIL lines above" % len(problems))
+        return 1
+    print("DOCTOR: all checks passed -- this machine can upload")
+    return 0
+
+
+# --------------------------------------------------------------------------
 # main
 # --------------------------------------------------------------------------
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Upload a spin-noise bundle zip to the central repository.")
-    parser.add_argument("bundle", help="path to spinnoise_*.zip")
+    parser.add_argument("bundle", nargs="?", default=None,
+                        help="path to spinnoise_*.zip (not needed for "
+                             "--doctor)")
+    parser.add_argument("--doctor", action="store_true",
+                        help="install-time preflight: check Python, "
+                             "config.json, schema, network path, TLS "
+                             "trust, and the system clock -- no bundle "
+                             "needed, nothing uploaded")
     parser.add_argument("--config", default=None,
                         help="path to config.json (default: next to this script)")
     parser.add_argument("--dry-run", action="store_true",
@@ -1123,8 +1258,14 @@ def main(argv=None):
                              "--selftest/--verify-only)")
     args = parser.parse_args(argv)
 
-    bundle_path = args.bundle
     schema_path = args.schema or default_schema_path()
+
+    if args.doctor:
+        return do_doctor(args.config or default_config_path(), schema_path)
+
+    bundle_path = args.bundle
+    if not bundle_path:
+        parser.error("a bundle path is required (or use --doctor)")
 
     if not os.path.isfile(bundle_path):
         print("ERROR: no such file: %s" % bundle_path)

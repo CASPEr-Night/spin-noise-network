@@ -78,34 +78,17 @@ Place the maintainer's file at `uploader/config.json` and restrict it:
 
     chmod 600 uploader/config.json
 
-VERIFY (without exposing the token — note the redaction):
+VERIFY -- run the built-in preflight:
 
-    python3 - <<'EOF'
-    import json
-    cfg = json.load(open("uploader/config.json"))
-    missing = [k for k in ("endpoint_url", "token", "facility_slug")
-               if not cfg.get(k)]
-    print("missing keys:", missing or "none")
-    print("facility_slug:", cfg.get("facility_slug"))
-    print("endpoint:", cfg.get("endpoint_url"))
-    print("token: <set, %d chars, not shown>" % len(cfg.get("token", "")))
-    EOF
+    python3 uploader/upload_bundle.py --doctor
 
-VERIFY connectivity: any HTTP response (including 404/405) from the
-endpoint origin proves the network path; do not POST anything:
-
-    python3 - <<'EOF'
-    import json, urllib.request, urllib.error
-    url = json.load(open("uploader/config.json"))["endpoint_url"]
-    origin = "/".join(url.split("/")[:3])
-    try:
-        urllib.request.urlopen(origin, timeout=15)
-        print("reachable")
-    except urllib.error.HTTPError as e:
-        print("reachable (HTTP %d is fine here)" % e.code)
-    except Exception as e:
-        print("NOT reachable:", e)
-    EOF
+It checks Python, the config (reporting the token only as "set, N
+chars, not shown"), the schema file, the network path to the endpoint,
+TLS trust, and the system clock -- and every FAIL line names its own
+fix. All OK = this machine can upload. A FAIL is a finding, not a dead
+end: `docs/TROUBLESHOOTING.md` is indexed by these exact messages, and
+a network-path FAIL on an isolated instrument subnet just means the
+upload step later runs from a different machine.
 
 ## Step 5 — vendor-specific setup
 
@@ -226,9 +209,11 @@ CITATION.cff), using this template:
       python3 -c "print(open('fid','rb').read(64).hex())"
     Anything odd the human noticed during acquisition:
 
-If you get BLOCKED at any step: collect the exact command, its full
-output, the procpar, the hex dump above, and `python3 --version`, and
-send that instead of a completed checklist. Do not retry blindly and
+If you get BLOCKED at any step: check `docs/TROUBLESHOOTING.md`
+first (symptom-indexed; quotes the exact error texts), then collect
+the exact command, its full output, the procpar, the hex dump above,
+and `python3 --version`, and send that instead of a completed
+checklist. Do not retry blindly and
 do not patch the code (hard rule 3) — a precise failure report from a
 real console is one of the most valuable artifacts this project
 receives.
