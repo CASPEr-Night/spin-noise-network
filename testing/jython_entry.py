@@ -150,6 +150,13 @@ DIALOG_ANSWERS = {
     # so a failure shows up as a wrong outcome, not a stuck harness.
     "spin_noise_run: pulse program directory": [u""],
     "spin_noise_run: receiver gain": [u"101"],
+    # Optional-feature dialogs (rdopt / sweep variant): 3 tuning offsets
+    # and a 3-step +/-1200 Hz sweep keep that variant fast.
+    "spin-noise rd-optimize: offsets": [u"0, -60, 60"],
+    # Must NOT fire in mock modes (chosen offset is always 0 there);
+    # scripted so a regression shows as a wrong outcome, not a hang.
+    "spin-noise rd-optimize: P90 at chosen tuning": [u"8.5"],
+    "spin-noise sweep: plan": [u"3", u"1200"],
 }
 
 SELECT_ANSWERS = {
@@ -162,14 +169,34 @@ SELECT_ANSWERS = {
     "spin-noise run: lock": 0,                          # lock OFF
     "spin-noise run: BSMS FIELD SWEEP -- IMPORTANT": 0, # sweep OFF
     "spin-noise run: probe type": 1,                    # N2-cryo (Prodigy)
+    # Field-sweep operator steps (SELECT dialogs; 0 = proceed). The
+    # off-target adjudication never fires in mock modes (no measured
+    # shift exists) -- scripted so a regression surfaces as a wrong
+    # outcome instead of an unscripted dialog.
+    "spin-noise sweep: baseline": 0,
+    "spin-noise sweep: set field step": 0,
+    "spin-noise sweep: restore field": 0,
+    "spin-noise sweep: off target": 0,
+}
+
+CONFIRM_ANSWERS = {
+    # Failure-path fallbacks that must NOT fire in a clean run.
+    "spin_noise_run: make dataset 1D": 1,
 }
 
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] not in ("simulate", "desktest"):
-        print "usage: jython jython_entry.py {simulate|desktest}"
+        print "usage: jython jython_entry.py {simulate|desktest} " \
+              "[rdopt] [sweep]"
         return 2
     mode = sys.argv[1]
+    features = []
+    for a in sys.argv[2:]:
+        if a in ("rdopt", "sweep"):
+            features.append(a)
+    rdopt_on = "rdopt" in features
+    sweep_on = "sweep" in features
 
     workdir = os.environ.get("HARNESS_WORKDIR")
     if not workdir:
@@ -178,12 +205,14 @@ def main():
     if not os.path.isdir(workdir):
         os.makedirs(workdir)
 
-    print "harness: mode=%s workdir=%s" % (mode, workdir)
+    print "harness: mode=%s features=%s workdir=%s" \
+        % (mode, ",".join(features) or "none", workdir)
     datadir, tshome = build_world(workdir)
 
     template = [u"WATERTEST", u"1", u"1", datadir.decode("utf-8")]
     topspin_stub.configure(template, TEMPLATE_PARAMS,
-                           DIALOG_ANSWERS, SELECT_ANSWERS)
+                           DIALOG_ANSWERS, SELECT_ANSWERS,
+                           CONFIRM_ANSWERS)
 
     # Register the stub as TopCmds (so `from TopCmds import *` succeeds
     # and IN_TOPSPIN=1 -> real java zip/digest paths) AND inject the API
@@ -194,7 +223,7 @@ def main():
         setattr(__builtin__, name, getattr(topspin_stub, name))
 
     # Run the real script, unmodified, the way xpy would.
-    sys.argv = ["spin_noise_run", mode]
+    sys.argv = ["spin_noise_run", mode] + features
     script_globals = {"__name__": "__main__", "__file__": SCRIPT}
     run_error = None
     try:
@@ -233,9 +262,33 @@ def main():
                  if t is not None and "complete" in t]
     check("final 'complete' MSG shown", len(completes) == 1)
 
+    # Expected session shape (execution order), parameterized by the
+    # optional features: rdopt adds 3 scan 1Ds (fixture offsets 0/-60/60,
+    # expnos 20..22) after setup; sweep replaces the single noise block
+    # with baseline verify + 3 x (verify + noise) + restore verify
+    # (expnos 30..34 and 50..52).
+    expected_expnos = [1]
+    expected_roles = ["setup"]
+    if rdopt_on:
+        expected_expnos += [20, 21, 22]
+        expected_roles += ["rdopt_scan"] * 3
+    expected_expnos += [10, 14, 15, 16, 11]
+    expected_roles += ["rg_ladder"] * 4 + ["reference_open"]
+    if sweep_on:
+        expected_expnos += [30, 31, 50, 32, 51, 33, 52, 34]
+        expected_roles += ["sweep_verify"]
+        for _k in range(3):
+            expected_roles += ["sweep_verify", "noise_sweep"]
+        expected_roles += ["sweep_verify"]
+    else:
+        expected_expnos += [12]
+        expected_roles += ["noise"]
+    expected_expnos += [13]
+    expected_roles += ["reference_close"]
+
     dsname = "SPINNOISE_" + time.strftime("%Y%m%d", time.localtime())
     name_dir = os.path.join(datadir, dsname)
-    for expno in (1, 10, 14, 15, 16, 11, 12, 13):
+    for expno in expected_expnos:
         d = os.path.join(name_dir, str(expno))
         check("expno %d dataset dir with acqus" % expno,
               os.path.isfile(os.path.join(d, "acqus")), d)
@@ -291,13 +344,45 @@ def main():
               and len(ca.get("ntp_status_raw")) > 0)
         check("clock_audit names the workstation time source",
               isinstance(ca.get("workstation_time_source"), basestring))
-    check("clock_audit has 8 blocks (setup + 4 ladder + refs + noise)",
-          len(blocks) == 8, "found %d" % len(blocks))
+    check("clock_audit has %d blocks for this variant"
+          % len(expected_roles),
+          len(blocks) == len(expected_roles), "found %d" % len(blocks))
     roles = [b.get("role") for b in blocks]
-    check("clock_audit block roles cover the session",
-          roles == ["setup", "rg_ladder", "rg_ladder", "rg_ladder",
-                    "rg_ladder", "reference_open", "noise",
-                    "reference_close"], str(roles))
+    check("clock_audit block roles cover the session in order",
+          roles == expected_roles, str(roles))
+
+    # Feature meta objects (rdopt/sweep variant only).
+    if rdopt_on or sweep_on:
+        mo = {}
+        try:
+            import json as _json
+            mo = _json.loads(meta_text)
+        except Exception:
+            mo = {}
+        if rdopt_on:
+            ro = (mo.get("calibration") or {}).get("rd_optimize") or {}
+            check("meta.calibration.rd_optimize present with 3 scan "
+                  "expnos and a mocked note",
+                  ro.get("enabled") is True
+                  and ro.get("scan_expnos") == [20, 21, 22]
+                  and ro.get("chosen_offset_khz") == 0.0
+                  and "mocked" in (ro.get("note") or ""), str(ro))
+        if sweep_on:
+            fs = mo.get("field_sweep") or {}
+            steps = fs.get("steps") or []
+            check("meta.field_sweep present with 3 unskipped steps and "
+                  "the expected expnos",
+                  fs.get("enabled") is True and len(steps) == 3
+                  and [s.get("noise_expno") for s in steps] == [50, 51, 52]
+                  and [s.get("verify_expno") for s in steps] == [31, 32, 33]
+                  and not [s for s in steps if s.get("skipped")],
+                  str(fs)[:400])
+            check("meta.field_sweep targets span the requested +/-1200 Hz",
+                  len(steps) == 3
+                  and abs(steps[0].get("target_offset_hz", 0) + 1200.0) < 1
+                  and abs(steps[1].get("target_offset_hz", 1)) < 1
+                  and abs(steps[2].get("target_offset_hz", 0) - 1200.0) < 1,
+                  str([s.get("target_offset_hz") for s in steps]))
     setup_ok = bool(blocks) and blocks[0].get("ocxo_expected_s") is None
     check("setup block has ocxo_expected_s null (not OCXO-predictable)",
           setup_ok)

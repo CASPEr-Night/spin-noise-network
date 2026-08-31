@@ -1,0 +1,385 @@
+% =============================================================================
+% CASPEr@night --- Agilent/VnmrJ Quickstart (SIU Carbondale)
+% Single-recipient quickstart for the first Agilent validation session
+% (Boyd Goodson's 400 MHz DD2, VnmrJ 3.2, 5 mm HCN, room temperature).
+% Distilled from vendors/agilent/README.md (Tier 1 + partner checklist),
+% packer/answers.example.json, and uploader/upload_bundle.py.
+% Build: pdflatex x2.
+% =============================================================================
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage[margin=2.4cm]{geometry}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{listings}
+\usepackage{tcolorbox}
+\usepackage[hidelinks]{hyperref}
+
+\definecolor{cmdbg}{gray}{0.955}
+\definecolor{cmdframe}{gray}{0.70}
+\definecolor{boxframe}{rgb}{0.15,0.30,0.45}
+\definecolor{boxbg}{rgb}{0.945,0.965,0.98}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{cmdbg},
+  frame=single,
+  rulecolor=\color{cmdframe},
+  framesep=4pt,
+  xleftmargin=6pt,
+  xrightmargin=6pt,
+  breaklines=true,
+  breakatwhitespace=true,
+  postbreak=\mbox{\space\space},
+  columns=fullflexible,
+  keepspaces=true,
+  aboveskip=4pt,
+  belowskip=4pt,
+  literate={~}{\textasciitilde}{1}
+}
+
+\newcommand{\hnmr}{\textsuperscript{1}H}
+\newcommand{\dtwo}{D\textsubscript{2}O}
+\newcommand{\htwo}{H\textsubscript{2}O}
+\newcommand{\file}[1]{\texttt{#1}}
+
+\setlist[itemize]{topsep=3pt, itemsep=2pt, parsep=0pt}
+\setlist[enumerate]{topsep=3pt, itemsep=3pt, parsep=0pt}
+
+\emergencystretch=1.5em
+
+\title{\textbf{CASPEr@night --- Agilent/VnmrJ Quickstart}\\
+\large (SIU Carbondale --- 400\,MHz DD2, VnmrJ 3.2)}
+\author{John W. Blanchard (\href{mailto:jwbquantum@gmail.com}{jwbquantum@gmail.com})
+\and Reza Ebadi \and Claude (Anthropic)}
+\date{Software v0.4.0 --- August 28, 2026}
+
+\begin{document}
+\maketitle
+
+\section{What this is}
+
+This guide covers one specific session: a receive-only spin-noise
+measurement on the SIU Carbondale 400\,MHz Agilent DD2 (VnmrJ~3.2, 5\,mm
+HCN probe, room temperature). It is the Agilent leg of the CASPEr@night
+network --- the same physics protocol the Bruker fleet runs, recording
+the Gu\'eron absorption dip of water on a room-temperature probe ---
+acquired by hand with ordinary VnmrJ tools (\texttt{s2pul},
+\texttt{go}, \texttt{svf}) and converted into a network bundle
+afterward on any laptop. Nothing in the session pulses the sample above
+tune-and-match power: the calibration steps use ${\sim}1^{\circ}$ tips
+at your ordinary observe power, and the noise blocks use
+\texttt{pw=0} at the bottom of the transmitter power scale. One thing
+to know going in: \textbf{yours is the first real Agilent data this software will
+ever see.} The converter has passed synthetic-session and file-format
+tests against the documented VnmrJ file layout, but it has never
+parsed a byte from a real spectrometer --- so if your files make it
+choke, that is exactly the data we need. Ugly output is useful output,
+and Section~\ref{sec:wrong} says what to send. You never need the
+GitHub repository, git, or a README: this PDF plus the
+\file{config.json} attached to the same e-mail is everything.
+
+\begin{tcolorbox}[colback=boxbg, colframe=boxframe,
+  title=\textbf{What you need}, fonttitle=\bfseries]
+\begin{enumerate}[leftmargin=1.4em]
+\item \textbf{Any laptop or desktop with Python 3.6 or newer} ---
+      macOS, Linux, and Windows all work; nothing is installed on the
+      spectrometer. Check with:
+\begin{lstlisting}
+python3 --version
+\end{lstlisting}
+\item \textbf{The software --- one download, no git.} Open
+\begin{lstlisting}
+https://github.com/CASPEr-Night/spin-noise-network/releases/latest
+\end{lstlisting}
+      and under \emph{Assets} click \textbf{Source code (zip)}. Unzip
+      it anywhere.
+\item \textbf{The \file{config.json} from John's e-mail} --- drop it
+      into the unzipped folder at exactly
+      \file{uploader/config.json} (next to
+      \file{upload\_bundle.py}). It is your facility's upload key ---
+      treat it like a password.
+\item \textbf{A 5\,mm tube of 90\% \htwo{} / 10\% \dtwo, lightly
+      doped} --- a retired shim/lineshape sample is fine, as long as
+      you know (or can best-guess) the composition. The \htwo{}
+      fraction \emph{is} the measurement.
+\item \textbf{About 1 hour of instrument time} --- roughly 15\,min of
+      setup you attend, then ${\geq}30$\,min of noise blocks the
+      console mostly runs itself.
+\end{enumerate}
+\end{tcolorbox}
+
+\section{At the spectrometer}
+\label{sec:spectrometer}
+
+Everything below is standard VnmrJ operation --- no macro, nothing
+installed on the console. Save every experiment with \texttt{svf} into
+one session directory, one \file{.fid} per step; the leading number in
+each save name is what the converter reads (the rest of the name is
+free).
+
+\subsection*{2.1\quad Setup (nothing new here, ${\sim}15$\,min)}
+
+Insert the water tube, set or record the temperature (298\,K if VT is
+off and the bore is at room temperature), and let it equilibrate a few
+minutes. Tune and match \hnmr{} by your normal manual wobble procedure
+--- no autotune on this probe, and none needed. Shim as usual. Lock is
+your choice, on or off --- you will record which in the questionnaire.
+Calibrate the \hnmr{} 90$^{\circ}$ pulse or take the probe-file value,
+and \textbf{write down pw90 and tpwr} --- the questionnaire wants
+both. Start from your standard \hnmr{} water setup in \texttt{s2pul}
+and leave \texttt{sw} at your usual value throughout.
+
+\subsection*{2.2\quad Gain ladder (${\sim}5$\,min)}
+
+Four one-scan 1Ds at ascending receiver gain, with a tiny flip so
+nothing saturates. Set \texttt{pw} to pw90/90 --- 0.11\,$\mu$s for a
+10\,$\mu$s pw90, about a $1^{\circ}$ tip --- never use
+\texttt{gain='n'} (autogain), and wait for each acquisition to finish
+before saving:
+
+\begin{lstlisting}
+pw=0.11
+nt=1
+gain=0
+go
+svf('10_sn_ladder_a')
+gain=20
+go
+svf('14_sn_ladder_b')
+gain=40
+go
+svf('15_sn_ladder_c')
+gain=60
+go
+svf('16_sn_ladder_d')
+\end{lstlisting}
+
+Documentation says \texttt{gain} runs 0--60\,dB on this hardware
+family, but nobody has verified the DD2's legal values or overflow
+point for us: \textbf{if the console rejects \texttt{gain=60} or the
+receiver overflows, step down in 5\,dB until it runs clean}, note the
+values you actually used in the questionnaire, and read every
+\texttt{gain=60} below as that ladder-max value.
+
+\subsection*{2.3\quad Opening reference (${\sim}1$\,min)}
+
+One more tiny-flip 1D at the ladder-max gain, with a 2\,s record:
+
+\begin{lstlisting}
+at=2
+gain=60
+go
+svf('11_sn_ref_open')
+\end{lstlisting}
+
+\subsection*{2.4\quad Noise blocks (${\geq}30$\,min --- the point of the session)}
+
+No pulse at all --- these lines are the receiver-only idiom of
+Agilent's own \texttt{cryo\_noisetest} macro, with \texttt{tpwr=-16}
+the bottom of the standard transmitter power scale:
+
+\begin{lstlisting}
+pw=0
+tpwr=-16
+nt=1
+ss=0
+pad=0
+wshim='n'
+alock='n'
+gain=60
+at=60
+go
+svf('12_sn_noise')
+\end{lstlisting}
+
+Then repeat until you have at least 30 minutes of noise data in total,
+counting up from 17 (13 is reserved for the closing reference):
+
+\begin{lstlisting}
+go
+svf('17_sn_noise')
+go
+svf('18_sn_noise')
+\end{lstlisting}
+
+Three places your judgment is needed --- each is an unverified point
+we ask you to settle:
+\begin{itemize}
+\item \textbf{Record length.} Try \texttt{at=60} (30 blocks reach
+      30\,min); if the console refuses --- a maximum-points ceiling we
+      have not measured on the DD2 --- halve \texttt{at} until it
+      accepts and note the largest value that worked. If it caps near
+      10\,s, do not grind out 180 saves: take about 20 blocks, note
+      the cap, and stop --- on this first session a parseable short
+      set beats a long one.
+\item \textbf{Transmitter silence.} Whether the DD2's transmitter
+      chain is measurably silent at \texttt{pw=0 tpwr=-16} has never
+      been checked. If the noise floor shows something odd --- a
+      carrier spike, a ridge --- do not chase it: finish the session
+      and describe it in the questionnaire notes.
+\item \textbf{Save names.} If \texttt{svf} objects to a name starting
+      with a digit, save under any name and rename the \file{.fid}
+      directories to the \file{NN\_\ldots} pattern when you copy them
+      off (only the leading number is parsed) --- and note it for us.
+\end{itemize}
+
+\subsection*{2.5\quad Closing reference (${\sim}1$\,min)}
+
+Restore the reference parameters --- \texttt{tpwr=57} below standing
+in for your calibrated value from setup --- and save as 13:
+
+\begin{lstlisting}
+pw=0.11
+tpwr=57
+at=2
+go
+svf('13_sn_ref_close')
+\end{lstlisting}
+
+That is the whole session. A VnmrJ macro that runs all of it
+unattended (\file{spin\_noise\_run.mac}) exists in draft --- once this
+first manual session validates the converter, we will ask for one more
+hour of bench time to try it.
+
+\section{Back at your desk}
+
+\subsection*{3.1\quad Copy the data}
+
+Copy the whole session directory --- every \file{NN\_*.fid} folder ---
+onto the laptop, any path. A USB stick is fine; the console never
+needs internet access.
+
+\subsection*{3.2\quad Fill in \file{answers.json}}
+
+In the unzipped \file{spin-noise-network} folder, create
+\file{answers.json} with the content below --- it is pre-filled for
+SIU, so only the \texttt{FILL IN} lines (and \texttt{"locked"},
+\texttt{"p90\_us"}, and \texttt{"vt\_setpoint\_k"} if yours differed)
+are yours to edit:
+
+\begin{lstlisting}[basicstyle=\ttfamily\footnotesize]
+{
+  "vendor": "agilent",
+  "run_mode": "external-acquisition",
+  "facility": {
+    "institution": "Southern Illinois University",
+    "city": "Carbondale, Illinois",
+    "country": "USA",
+    "facility_slug": "siu-carbondale",
+    "contact_email": "bgoodson@chem.siu.edu",
+    "contact_consent": true
+  },
+  "sample": {
+    "description": "FILL IN (e.g. retired lineshape sample, 90% H2O / 10% D2O, Gd-doped)",
+    "h2o_fraction_pct": 90,
+    "d2o_pct": 10,
+    "additives": "FILL IN (dopant, if known)",
+    "tube_od_mm": 5,
+    "sample_volume_ul": 550,
+    "vt_setpoint_k": 298
+  },
+  "environment": {
+    "locked": false,
+    "operator_notes": "FILL IN (date; anything unusual during the run)"
+  },
+  "spectrometer": {
+    "probe_type": "RT",
+    "console": "Agilent DD2 400",
+    "probe_string": "5 mm HCN"
+  },
+  "instrument": {
+    "vnmrj_version": "3.2",
+    "spectrometer_model": "Agilent DD2 400",
+    "field_state_notes": "FILL IN (lock on/off during the noise blocks; z0 stable?)"
+  },
+  "calibration": {
+    "p90_us": 10.0,
+    "p90_power_db_or_w": "FILL IN (tpwr, dB)",
+    "topshim_ok": false,
+    "rg_ladder": [
+      { "expno": 10, "rg": 1.0,    "tip_deg": 1.0 },
+      { "expno": 14, "rg": 10.0,   "tip_deg": 1.0 },
+      { "expno": 15, "rg": 100.0,  "tip_deg": 1.0 },
+      { "expno": 16, "rg": 1000.0, "tip_deg": 1.0 }
+    ]
+  },
+  "experiments": [
+    { "expno": 10, "role": "rg_ladder" },
+    { "expno": 14, "role": "rg_ladder" },
+    { "expno": 15, "role": "rg_ladder" },
+    { "expno": 16, "role": "rg_ladder" },
+    { "expno": 11, "role": "reference_open" },
+    { "expno": 12, "role": "noise" },
+    { "expno": 17, "role": "noise" },
+    { "expno": 18, "role": "noise" },
+    { "expno": 13, "role": "reference_close" }
+  ]
+}
+\end{lstlisting}
+
+Two mechanical notes: add one
+\texttt{\{ "expno": NN, "role": "noise" \}} line per noise block you
+saved beyond 18, and the ladder \texttt{"rg"} values are
+$10^{\mathrm{dB}/20}$ of the four gains --- pre-filled for
+0/20/40/60\,dB, so correct them if your ladder used different values.
+
+\subsection*{3.3\quad Pack, check, upload}
+
+Three commands, run from inside the unzipped
+\file{spin-noise-network} folder:
+
+\begin{lstlisting}
+python3 packer/pack_bundle.py --vendor agilent --answers answers.json /path/to/the/data/folder
+\end{lstlisting}
+Success looks like: the packer validates the session and prints the
+path of one \file{spinnoise\_siu-\allowbreak carbondale\_*.zip} ---
+and if anything is missing, it lists exactly what, in plain text, so
+you fix it and re-run.
+
+\begin{lstlisting}
+python3 uploader/upload_bundle.py --selftest spinnoise_*.zip
+\end{lstlisting}
+Success looks like: the last line reads \texttt{RESULT: PASS} ---
+entirely local, no network involved yet.
+
+\begin{lstlisting}
+python3 uploader/upload_bundle.py spinnoise_*.zip
+\end{lstlisting}
+Success looks like: the last line reads \texttt{RECEIPT: <id>} ---
+the server has your bundle, checksum-verified on arrival; uploads are
+chunked and resumable, so if the connection drops, re-run the same
+command and it picks up where it left off.
+
+\section{If anything goes wrong}
+\label{sec:wrong}
+
+\begin{tcolorbox}[colback=boxbg, colframe=boxframe,
+  title=\textbf{One rule: send it, don't fix it}, fonttitle=\bfseries]
+Send the \textbf{exact error text} (copy-paste, not a paraphrase) and
+the file it choked on --- the offending \file{NN\_*.fid} folder
+zipped, or the bundle zip --- to
+\href{mailto:jwbquantum@gmail.com}{jwbquantum@gmail.com}.
+Troubleshooting data is the point of this first run: the converter has
+never met a real Agilent file, and your session is how it becomes
+trustworthy. Nothing you can do here damages anything --- the software
+only reads your data, the uploader never deletes your zip, and the
+worst case at every step is re-running one command. If the whole chain
+fights you, zip the entire session directory and e-mail that (a share
+link is fine if it is large); we take it from there.
+\end{tcolorbox}
+
+\vspace{0.8em}
+\noindent\rule{\textwidth}{0.4pt}\\[2pt]
+{\small Contact: John W. Blanchard
+(\href{mailto:jwbquantum@gmail.com}{jwbquantum@gmail.com}) ---
+CASPEr@night software v0.4.0 --- August 28, 2026. Your raw data remain
+yours, and contributing facilities are co-authors on network
+publications their data enter.}
+
+\end{document}

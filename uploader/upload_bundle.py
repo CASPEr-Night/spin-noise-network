@@ -63,7 +63,7 @@ except ImportError:  # pragma: no cover - cannot happen on py3, but stay polite
 # Kept in sync with the repository VERSION file (a literal, not a file
 # read, because this script is copied standalone to facility machines);
 # testing/static_check.py enforces the sync.
-UPLOADER_VERSION = "0.4.0"
+UPLOADER_VERSION = "0.5.0"
 
 # Metadata schema versions this uploader understands.  The shipped
 # schema/meta.schema.json describes the CURRENT version (2.0, which made
@@ -470,12 +470,15 @@ def verify_bundle(bundle_path, schema_path, check_data_hashes=True):
                     msgs.append("OK   : verified sha256 of %d data file(s)." % n_checked)
 
         # Friendly reminder if the noise experiment looks absent.
+        # noise_sweep counts: the field-stepped sweep replaces the single
+        # noise block with per-step noise blocks.
         if isinstance(meta, dict):
             roles = [e.get("role") for e in meta.get("experiments", [])
                      if isinstance(e, dict)]
-            if "noise" not in roles:
-                msgs.append("WARN : no experiment with role 'noise' in meta.json -- "
-                            "is this bundle complete?")
+            if "noise" not in roles and "noise_sweep" not in roles:
+                msgs.append("WARN : no experiment with role 'noise' or "
+                            "'noise_sweep' in meta.json -- is this bundle "
+                            "complete?")
 
     return (not fatal), msgs
 

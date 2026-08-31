@@ -108,6 +108,32 @@ nothing touches your probe beyond ordinary tune/match and shimming.
 **Expected wall-clock time:** ~45 minutes for the default run, of which you
 are needed for the first ~5 (the dialogs). Then walk away.
 
+### Optional modes (off by default)
+
+Two optional flags extend the standard run — both composable, both
+documented in `docs/design_rdopt_locksweep.md`:
+
+- `xpy spin_noise_run rdopt` — **rd-optimize**: after setup, the script
+  scans a ladder of probe-tuning offsets (via ATM: `atma` at a shifted
+  carrier), measures the small-flip FID decay rate at each (the decay is
+  1/T2* + the radiation-damping rate), and runs the whole session at the
+  offset with the strongest radiation damping. Needs an ATM probe;
+  without one it skips itself with a note.
+- `xpy spin_noise_run sweep` — **field-stepped sweep**: instead of one
+  long noise block, a ladder of noise blocks at stepped fields. Every
+  step is a distinct axion mass point, so one overnight session
+  locally scans several adjacent masses. The field is stepped through
+  the **lock reference**: with a lockable sample (e.g. 90/10 H₂O/D₂O),
+  set the Lock Shift by the quoted ppm (1 ppm = BF1 Hz at ¹H, exact),
+  re-lock — the servo carries the field to the new setpoint — then
+  lock OFF for the acquisition as always. (Fallback for consoles
+  without accessible shift mode: step the FIELD value unlocked,
+  ~8 Hz/unit at ¹H standard bore, and don't re-lock mid-sweep — at a
+  fixed reference autolock would pull the field straight back.) The
+  script verifies each step by measuring the water line — the
+  *measured* shift is what enters the record — and verifies the
+  restoration too. The BSMS field sweep stays off throughout.
+
 ## What gets uploaded
 
 At the end, the script zips the complete Bruker experiment directories
