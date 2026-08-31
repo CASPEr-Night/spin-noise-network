@@ -106,7 +106,7 @@ SWEEP = False             # True: replace the single noise block with a
 
 # Single source of truth for the script version.  KEEP IN SYNC with the
 # repository VERSION file (testing/static_check.py enforces the match).
-SCRIPT_VERSION  = "0.5.0"
+SCRIPT_VERSION  = "0.5.1"
 PROGRAM_VERSION = SCRIPT_VERSION  # alias kept for meta.json 'program_version'
 # This TopSpin orchestrator still writes schema 1.2 bundles (the last
 # Bruker-only schema).  The repository schema is 2.0 (vendor-neutral:
@@ -545,6 +545,13 @@ def _json_escape(s):
     return "".join(out)
 
 
+try:
+    _INF = float("inf")
+except ValueError:
+    # Jython 2.2 (TopSpin 2.x): float("inf") raises; overflow works.
+    _INF = 1e300 * 1e300
+
+
 def json_dumps(obj, indent=0):
     """Minimal JSON serializer: dict / list / str / int / float / bool /
     None.  Dict key order is whatever the dict yields (fine for us)."""
@@ -561,7 +568,9 @@ def json_dumps(obj, indent=0):
         return str(obj)
     if t is float:
         # repr() keeps precision; JSON forbids NaN/Inf -> null them.
-        if obj != obj:
+        # _INF is module-level: Jython 2.2 (TopSpin 2.x) rejects
+        # float("inf"), so it is computed once with a portable fallback.
+        if obj != obj or obj == _INF or obj == -_INF:
             return "null"
         return repr(obj)
     if t is dict:
@@ -692,12 +701,20 @@ def zip_directory(src_dir, zip_path):
 
 
 def copy_file(src, dst):
+    """Stream in 64 KiB chunks -- NEVER slurp: an overnight noise ser is
+    multi-GB, which blows the JVM heap (and a Neo's float64 ser exceeds
+    Java's hard 2 GiB array ceiling, unfixable by heap size)."""
     fi = open(src, "rb")
-    data = fi.read()
-    fi.close()
     fo = open(dst, "wb")
-    fo.write(data)
-    fo.close()
+    try:
+        while 1:
+            block = fi.read(65536)
+            if not block:
+                break
+            fo.write(block)
+    finally:
+        fi.close()
+        fo.close()
 
 
 def copy_tree(src, dst):
@@ -765,6 +782,16 @@ def safe_xcmd(cmd, describe=None):
                 res = ct.getResult()
         except Exception:
             res = None
+        # The manual: getResult() is negative on failure.  Without this
+        # check a console lacking the command (no ATM unit, no topshim
+        # licence) sails on as "success", the promised operator-dialog
+        # fallbacks never fire, and meta records fiction.
+        try:
+            if res is not None and int(res) < 0:
+                say("command '%s' reported failure (%s)" % (cmd, res))
+                return (0, res)
+        except Exception:
+            pass
         return (1, res)
     except Exception:
         print "spin_noise_run: hardware command '%s' failed:" % cmd
@@ -2003,6 +2030,20 @@ def main():
         "enter 298 if VT is off and the bore is at room temperature).",
         ["VT setpoint (K)"], [getpar("TE", "298")])
     vt_k = to_float(f4[0], 298.0)
+    if vt_k < 200.0 or vt_k > 400.0:
+        # Almost always a units slip ('25' meaning Celsius) or template
+        # junk ('0'); a 0 K value would fail schema validation only
+        # AFTER the whole run.  One re-ask with the hint.
+        f4b = ask_fields(
+            "spin-noise network 4/5: temperature (please check)",
+            "You entered %.6g K, which is outside 200-400 K.\n"
+            "Did you mean degrees Celsius?  Please enter the setpoint\n"
+            "in KELVIN (e.g. 25 C = 298 K)." % vt_k,
+            ["VT setpoint (K)"], ["298"])
+        vt_k = to_float(f4b[0], 298.0)
+        if vt_k <= 0.0:
+            say("VT setpoint %.6g invalid; recording 298 K" % vt_k)
+            vt_k = 298.0
 
     # ---------------------------------------------------------------- 3
     # Duration.
@@ -2033,10 +2074,14 @@ def main():
         "The BSMS FIELD SWEEP MUST BE OFF during the noise block.\n"
         "(In 2022 a sweeping field quietly contaminated weeks of noise\n"
         "records -- this dialog exists so that never happens again.)\n\n"
-        "Open the BSMS display ('bsmsdisp') and verify SWEEP is OFF.\n\n"
+        "CAUTION: on many consoles turning the LOCK OFF (the previous\n"
+        "dialog) re-enables the sweep.  Open the BSMS display\n"
+        "('bsmsdisp') NOW -- after unlocking -- and LOOK; do not answer\n"
+        "from memory.\n\n"
         "Is the field sweep confirmed OFF?",
-        ["Yes -- SWEEP is OFF", "No / cannot verify"])
-    sweep_off = (ssel == 0)
+        ["No / cannot verify (check bsmsdisp first)",
+         "Yes -- I checked just now, SWEEP is OFF"])
+    sweep_off = (ssel == 1)
     if not sweep_off:
         v2 = ask_select(
             "spin-noise run: proceed without sweep confirmation?",
@@ -2115,7 +2160,10 @@ def main():
     say("checking workstation time-sync (NTP) status")
     ntp_raw, ntp_source = capture_ntp_status()
 
-    dsname = "SPINNOISE_" + time.strftime("%Y%m%d", time.localtime())
+    # Date AND time: a second run on the same day must land in its own
+    # dataset -- WR() overwrites, and a rerun into the morning's dataset
+    # would silently destroy acquired data.
+    dsname = "SPINNOISE_" + time.strftime("%Y%m%d_%H%M", time.localtime())
     meta = {
         "schema_version": SCHEMA_VERSION,
         "program_version": PROGRAM_VERSION,
@@ -2355,15 +2403,17 @@ def main():
         putpar("RG", str(noise_rg))
         clear_raw_data(ds_path(cd))
         t0 = now_local()
-        MSG("The pulse-free noise block starts when you close this message.\n\n"
-            "  rows      : %d\n"
-            "  per row   : %.0f s\n"
-            "  total     : ~%.0f min\n"
-            "  RG        : %s\n\n"
-            "You can walk away now.  A final dialog will appear when the\n"
-            "bundle zip is ready." % (n_rows, row_secs,
-                                      n_rows * row_secs / 60.0, noise_rg),
-            "spin-noise run: noise block starting")
+        # NON-modal by design: a blocking dialog here stranded overnight
+        # sessions when the operator walked away after the last question
+        # (the ladder + references run ~15 min in between).  Auto-start
+        # after a short countdown instead.
+        say("NOISE BLOCK starting in 30 s: %d rows x %.0f s (~%.0f min), "
+            "RG=%s -- no further dialogs until the run completes"
+            % (n_rows, row_secs, n_rows * row_secs / 60.0, noise_rg))
+        try:
+            SLEEP(30)
+        except Exception:
+            pass
         # zgnoise2d spends TWO d1 delays per row (before go, before wr).
         ocxo_s = ocxo_expected_s(TD_ROW, SWH_HZ, 1, n_rows, D1_NOISE_S, 2)
         cb = clock_block_begin(EXP_NOISE, "noise", ocxo_s)
@@ -2468,11 +2518,12 @@ def main():
         "Bundle written to:\n  %s\n\n"
         "To upload it, run on any computer with Python 3:\n\n"
         "  python3 uploader/upload_bundle.py %s\n\n"
-        "(uploader/ is in the spin-noise-network distribution you got\n"
-        "this script from; see its config.example.json for the endpoint\n"
-        "and token.)  If upload is impossible, KEEP THE ZIP and e-mail\n"
+        "(Windows: use  py -3  instead of python3.  uploader/ is in\n"
+        "the spin-noise-network distribution you got this script\n"
+        "from; see its config.example.json for the endpoint and\n"
+        "token.)  If upload is impossible, KEEP THE ZIP and e-mail\n"
         "the maintainers.\n\nThank you for contributing your probe's "
-        "noise!" % (t_run_start, now_local(), bundle_path, bundle_name),
+        "noise!" % (t_run_start, now_local(), bundle_path, bundle_path),
         "spin-noise run: complete")
 
 

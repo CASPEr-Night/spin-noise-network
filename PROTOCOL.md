@@ -94,7 +94,7 @@ is stored at all.
 
 ## What the run actually does
 
-The script creates a dataset `SPINNOISE_<date>` containing: a setup
+The script creates a dataset `SPINNOISE_<date>_<time>` containing: a setup
 experiment (tune/match, shim, ¹H 90° calibration — automated where your
 TopSpin supports it, dialog-driven where it does not); a four-step
 receiver-gain ladder of tiny-flip 1D spectra (linearity check); a small-flip

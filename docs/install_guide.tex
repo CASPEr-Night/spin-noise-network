@@ -242,7 +242,7 @@ it at your desk. Pass criteria, from the release's desk-test checklist:
 \item terminal shows \texttt{DESKTEST -> mocked 'atma'}, \texttt{'topshim'},
       \texttt{'pulsecal'}, \texttt{'rga'} --- and no manual-fallback dialog
       appears for any of them, and no Jython traceback anywhere.
-\item a dataset \file{SPINNOISE\_<yyyymmdd>} exists with expnos
+\item a dataset \file{SPINNOISE\_<yyyymmdd>\_<hhmm>} exists with expnos
       \textbf{1, 10, 14, 15, 16, 11, 12, 13}.
 \item \file{meta.json} is written twice (dataset directory and bundle) and
       contains a \texttt{software} block with
@@ -253,7 +253,7 @@ it at your desk. Pass criteria, from the release's desk-test checklist:
       \texttt{"run\_mode": "desktest"} --- plus a \texttt{clock\_audit} block
       with one timing entry per acquisition.
 \item the bundle zip,
-      \file{SPINNOISE\_<date>/}\allowbreak\file{spinnoise\_<slug>\_<YYYYMMDD\_HHMMSS>Z\_<hex>.zip},
+      \file{SPINNOISE\_<date>\_<time>/}\allowbreak\file{spinnoise\_<slug>\_<YYYYMMDD\_HHMMSS>Z\_<hex>.zip},
       opens in any zip tool, and the validator passes on any Python-3 machine:
 \begin{lstlisting}
 python3 uploader/upload_bundle.py <bundle.zip> --selftest
@@ -328,9 +328,12 @@ xpy spin_noise_run
 \item \dialog{90-degree pulse} --- confirm P90 ($\mu$s) and its power (dB),
       pre-filled from \texttt{pulsecal} or the current P1. Sanity-check it
       (${\sim}$7--15\,$\mu$s is typical) before confirming.
-\item \dialog{Noise block starting} --- shows rows, seconds per row, total
-      time, and RG. The pulse-free block starts when you close it ---
-      \emph{this is the walk-away point}.
+\item \emph{Noise block auto-start} --- after the references the script
+      prints the row count, per-row time, and RG to the status line and
+      starts the pulse-free block by itself 30\,s later. There is no
+      dialog to click: \emph{the P90 confirmation above is the
+      walk-away point} (the RG ladder and opening reference run
+      unattended in between, ${\sim}$15\,min).
 \item \dialog{Final notes} --- anything unusual during the run (construction,
       elevator, He fill, lock left on, \ldots). Blank if all was quiet.
 \item \dialog{Done} --- the bundle path and the one-line upload command.
@@ -342,7 +345,7 @@ perform that one step manually and press OK.
 
 \subsection*{6.3\quad What it does, and what it will not touch}
 
-The run creates one dataset, \file{SPINNOISE\_<date>}, in your current data
+The run creates one dataset, \file{SPINNOISE\_<date>\_<time>}, in your current data
 directory:
 
 \begin{center}
@@ -364,11 +367,11 @@ Pulsing is limited to the standard pulse calibration and ${\sim}1^{\circ}$
 tips at the calibrated observe power --- no long or repeated high-power
 irradiation. The script never changes instrument configuration, never touches
 your lock or sweep settings silently (it asks you and records your answer),
-and reads and writes nothing outside the \file{SPINNOISE\_<date>} dataset
+and reads and writes nothing outside the \file{SPINNOISE\_<date>\_<time>} dataset
 plus the two installed files. Complete removal, if you ever want everything
 gone:
 \begin{lstlisting}
-rm -rf <DATADIR>/SPINNOISE_<yyyymmdd>
+rm -rf <DATADIR>/SPINNOISE_<yyyymmdd>_<hhmm>
 rm <TSHOME>/exp/stan/nmr/py/user/spin_noise_run.py
 rm <TSHOME>/exp/stan/nmr/lists/pp/user/zgnoise2d
 \end{lstlisting}
@@ -376,7 +379,7 @@ rm <TSHOME>/exp/stan/nmr/lists/pp/user/zgnoise2d
 data directory of the template dataset you had open.)
 
 The final dialog prints the full path of the finished bundle, which lands
-inside the \file{SPINNOISE\_<date>} dataset directory as
+inside the \file{SPINNOISE\_<date>\_<time>} dataset directory as
 \file{spinnoise\_<slug>\_<timestamp>Z\_<hex>.zip}. You keep this local copy
 no matter what happens during upload.
 
@@ -453,9 +456,9 @@ python3 uploader/upload_bundle.py <bundle.zip> --selftest
       and confirm in a dialog.
 \item \textbf{A hardware command hangs with no progress for over 5 minutes}
       --- kill the script window. Any acquisition already started finishes on
-      its own and all data stays in \file{SPINNOISE\_<date>}.
+      its own and all data stays in \file{SPINNOISE\_<date>\_<time>}.
 \item \textbf{A Jython error dialog appears} --- the run stopped, but started
-      acquisitions finish and the data stays in \file{SPINNOISE\_<date>}.
+      acquisitions finish and the data stays in \file{SPINNOISE\_<date>\_<time>}.
       Copy the error text verbatim into a support issue (below) --- a stuck
       run reported well is worth almost as much as a clean one.
 \item \textbf{Facility Python 3 older than 3.6} --- run the selftest and

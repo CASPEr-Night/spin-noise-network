@@ -93,7 +93,7 @@ import zipfile
 
 # Kept in sync with the repository VERSION file (a literal, because this
 # script may be copied standalone); testing/static_check.py enforces it.
-PACKER_VERSION = "0.5.0"
+PACKER_VERSION = "0.5.1"
 SCHEMA_VERSION = "2.0"
 
 GAMMA_1H_MHZ_PER_T = 42.5774806   # same constant spin_noise_run.py uses
@@ -229,8 +229,9 @@ class BrukerReader(VendorReader):
                 "no Bruker experiments found under %s -- expected numeric "
                 "expno subdirectories each containing an 'acqus' file "
                 "(point me at the dataset NAME directory, e.g. "
-                ".../SPINNOISE_20260826, or at an unpacked bundle's data/ "
-                "directory)" % data_dir)
+                ".../SPINNOISE_20260826_1802, or at an unpacked bundle's "
+                "data/ directory).%s"
+                % (data_dir, sniff_vendor_hint(data_dir)))
         out.sort()
         return out
 
@@ -384,7 +385,19 @@ class JeolReader(VendorReader):
             else:
                 unprefixed.append(n)
         out = []
-        if prefixed and not unprefixed:
+        if prefixed:
+            # One stray unprefixed file must NEVER flip the whole
+            # directory to positional renumbering -- that silently
+            # relabels every experiment. Keep the prefixed numbering and
+            # skip strays loudly.
+            if unprefixed:
+                self._warnings.append(
+                    "SKIPPED %d file(s) without the NN_ expno prefix "
+                    "(%s%s) -- when prefixed files exist, strays are "
+                    "never renumbered; rename them per the Tier-1 "
+                    "checklist if they belong to the session"
+                    % (len(unprefixed), ", ".join(unprefixed[:5]),
+                       ", ..." if len(unprefixed) > 5 else ""))
             for expno in sorted(prefixed):
                 group = prefixed[expno]
                 if len(group) > 1:
@@ -606,10 +619,27 @@ class MagritekReader(VendorReader):
                 "numeric experiment directories containing acqu.par or "
                 "data.1d (expected layout: the session tree written by "
                 "vendors/magritek/spin_noise_run_spinsolve.mac; see "
-                "vendors/magritek/README.md)" % data_dir)
+                "vendors/magritek/README.md). If you acquired with the "
+                "normal Spinsolve interface, COPY each experiment folder "
+                "into a numeric directory (1, 2, 3, ... in acquisition "
+                "order) first -- the timestamped folder names Spinsolve "
+                "invents are not portable expnos." % data_dir)
         return sorted(found)
 
     def read_experiment(self, dirpath):
+        # Spinsolve exports vary by firmware; a short data.1d or an odd
+        # acqu.par must surface as an actionable error naming the
+        # directory, not a bare ValueError traceback (the JEOL/Agilent
+        # adapters already behave this way).
+        try:
+            return self._read_experiment_inner(dirpath)
+        except PackError:
+            raise
+        except (OSError, ValueError, KeyError, IndexError) as exc:
+            raise PackError("cannot parse Spinsolve experiment %s: %s"
+                            % (dirpath, exc))
+
+    def _read_experiment_inner(self, dirpath):
         mod = self._reader()
         disc = {"td1_rows": 1, "o1_hz": 0.0}
         acqu_path = os.path.join(dirpath, "acqu.par")
@@ -791,7 +821,15 @@ class AgilentReader(VendorReader):
             else:
                 unprefixed.append(n)
         out = []
-        if prefixed and not unprefixed:
+        if prefixed:
+            if unprefixed:
+                self._warnings.append(
+                    "SKIPPED %d .fid dir(s) without the NN_ expno prefix "
+                    "(%s%s) -- when prefixed directories exist, strays "
+                    "are never renumbered; rename them per the Tier-1 "
+                    "checklist if they belong to the session"
+                    % (len(unprefixed), ", ".join(unprefixed[:5]),
+                       ", ..." if len(unprefixed) > 5 else ""))
             for expno in sorted(prefixed):
                 group = prefixed[expno]
                 if len(group) > 1:
@@ -997,7 +1035,10 @@ def _num_or_none(v):
 
 def load_answers(path):
     try:
-        with open(path, "r") as fh:
+        # utf-8-sig: tolerate the BOM that Windows Notepad historically
+        # prepends (a no-op on clean files) -- benchtop vendors live on
+        # Windows PCs.
+        with open(path, "r", encoding="utf-8-sig") as fh:
             answers = json.load(fh)
     except OSError as exc:
         raise PackError("cannot read answers file %s: %s" % (path, exc))
@@ -1005,7 +1046,42 @@ def load_answers(path):
         raise PackError("answers file %s is not valid JSON: %s" % (path, exc))
     if not isinstance(answers, dict):
         raise PackError("answers file %s must contain a JSON object" % path)
+    if "facility" not in answers and "institution" in answers:
+        # Two answers.json dialects exist in the wild: the vendor macros'
+        # FLAT session file and this packer's NESTED questionnaire.
+        raise PackError(
+            "answers file %s looks like a vendor macro/session file (flat "
+            "keys like 'institution' at top level); the packer needs the "
+            "NESTED questionnaire with 'facility', 'sample', ... blocks -- "
+            "start from packer/answers.example.json" % path)
     return answers
+
+
+def sniff_vendor_hint(data_dir):
+    """When discovery under the assumed vendor finds nothing, peek at the
+    directory for another vendor's fingerprints. The commonest cause is an
+    omitted --vendor flag (the packer defaults to bruker)."""
+    try:
+        names = os.listdir(data_dir)
+    except OSError:
+        return ""
+    hits = []
+    low = [x.lower() for x in names]
+    if any(x.endswith(".fid") for x in low):
+        hits.append("agilent")
+    if any(x.endswith(".jdf") for x in low):
+        hits.append("jeol")
+    if any(x.endswith(".dx") or x.endswith(".jdx") for x in low):
+        hits.append("nanalysis")
+    for x in names:
+        d = os.path.join(data_dir, x)
+        if os.path.isdir(d) and os.path.isfile(os.path.join(d, "acqu.par")):
+            hits.append("magritek")
+            break
+    if hits:
+        return (" NOTE: this directory contains what looks like %s data -- "
+                "did you mean --vendor %s?" % ("/".join(hits), hits[0]))
+    return ""
 
 
 def now_utc():

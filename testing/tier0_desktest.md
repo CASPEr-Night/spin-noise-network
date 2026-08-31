@@ -124,7 +124,9 @@ below. Expect:
       city / country / email) → facility slug → contact consent →
       sample → VT setpoint → duration → lock state → BSMS sweep
       confirmation → hardware check → probe type → probe temperatures →
-      P90 confirmation → noise-block start notice → final notes.
+      P90 confirmation → final notes. (The noise block AUTO-STARTS
+      after a 30 s status-line countdown -- no dialog; the old
+      "noise block starting" dialog was removed deliberately.)
 - [ ] Terminal shows `SIMULATE -> ...` / `SIMULATE: zg mocked ...` lines
       and **no** errors.
 - [ ] Final dialog reports the bundle path.
@@ -132,7 +134,8 @@ below. Expect:
 Suggested dialog answers (used in the pass criteria below): institution
 `Desk Test Lab`, slug `desktest-lab`, sample `distilled water`, H2O
 `100`, D2O `0`, duration `30 min (default)`, lock `OFF`, sweep
-`Yes — SWEEP is OFF`.
+`Yes — I checked just now, SWEEP is OFF` (the SECOND button: the safe
+"cannot verify" answer is deliberately first/default now).
 
 ## 5. Run DESKTEST mode
 
@@ -169,7 +172,7 @@ java-zip bundling — and mocks **only** the hardware commands, inside
 2. **meta.json written twice**: once in the `SPINNOISE_<date>` dataset
    directory, once inside the bundle staging dir — and it contains a
    `software` object with `"script_version"` equal to the repository
-   `VERSION` file (currently `"0.3.0-dev"`), `"schema_version"` equal
+   `VERSION` file (testing/static_check.py enforces the sync -- do not hard-code the number here), `"schema_version"` equal
    to the schema the orchestrator writes (`"1.2"`, the last Bruker-only
    vintage — still accepted under the current v2.0 vendor-neutral
    schema), `"script_sha256"` equal to

@@ -136,7 +136,7 @@ ok "small: $(basename "${SMALL_ZIP}") ($(du -m "${SMALL_ZIP}" | cut -f1) MB)"
 ok "big  : $(basename "${BIG_ZIP}") ($(du -m "${BIG_ZIP}" | cut -f1) MB)"
 
 step "1. single-shot path (<= 50 MiB -> POST /ingest)"
-OUT="$(python3 "${UPLOADER}" "${SMALL_ZIP}" ${CFG})" || { echo "${OUT}"; fail "small upload failed"; }
+OUT="$(python3 "${UPLOADER}" "${SMALL_ZIP}" ${CFG} --allow-test-bundle)" || { echo "${OUT}"; fail "small upload failed"; }
 echo "${OUT}" | grep -q "UPLOAD OK"  || { echo "${OUT}"; fail "no UPLOAD OK for small bundle"; }
 echo "${OUT}" | grep -q "RECEIPT: "  || { echo "${OUT}"; fail "no RECEIPT for small bundle"; }
 ok "$(echo "${OUT}" | grep 'RECEIPT: ')"
@@ -144,7 +144,7 @@ ok "$(echo "${OUT}" | grep 'RECEIPT: ')"
 step "2. chunked path: start, kill -9 after ~2 parts, resume"
 STATE="${BIG_ZIP}.upload-state.json"
 rm -f "${STATE}"
-python3 "${UPLOADER}" "${BIG_ZIP}" ${CFG} > "${WORK}/big_attempt1.log" 2>&1 &
+python3 "${UPLOADER}" "${BIG_ZIP}" ${CFG} --allow-test-bundle > "${WORK}/big_attempt1.log" 2>&1 &
 UP_PID=$!
 # Poll (10 ms) for the part-2 checkpoint, then kill -9 mid-transfer.
 KILLED=0
@@ -164,7 +164,7 @@ ok "killed -9 with ${DONE_PARTS} part(s) checkpointed in $(basename "${STATE}")"
 restart_server
 ok "dev server restarted against the same persisted R2 state"
 
-OUT="$(python3 "${UPLOADER}" "${BIG_ZIP}" ${CFG})" || { echo "${OUT}"; fail "resumed upload failed"; }
+OUT="$(python3 "${UPLOADER}" "${BIG_ZIP}" ${CFG} --allow-test-bundle)" || { echo "${OUT}"; fail "resumed upload failed"; }
 echo "${OUT}" | grep -q "RESUME: found" || { echo "${OUT}"; fail "rerun did not resume from state file"; }
 echo "${OUT}" | grep -q "UPLOAD OK"     || { echo "${OUT}"; fail "no UPLOAD OK after resume"; }
 echo "${OUT}" | grep -q "RECEIPT: "     || { echo "${OUT}"; fail "no RECEIPT after resume"; }
@@ -193,7 +193,7 @@ step "4. --abort cleans up a deliberately orphaned upload"
 sleep 1
 ORPHAN_ZIP="${WORK}/$(basename "${BIG_ZIP}" .zip | sed 's/_[0-9a-f]\{4\}$//')_ab0a.zip"
 cp "${BIG_ZIP}" "${ORPHAN_ZIP}"
-python3 "${UPLOADER}" "${ORPHAN_ZIP}" ${CFG} > "${WORK}/orphan.log" 2>&1 &
+python3 "${UPLOADER}" "${ORPHAN_ZIP}" ${CFG} --allow-test-bundle > "${WORK}/orphan.log" 2>&1 &
 UP_PID=$!
 OSTATE="${ORPHAN_ZIP}.upload-state.json"
 KILLED=0

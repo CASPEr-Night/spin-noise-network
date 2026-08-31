@@ -144,6 +144,9 @@ DIALOG_ANSWERS = {
          u"5 mm CryoProbe Prodigy BBO BB-H&F/D Z-GRD"],
     "spin-noise run: probe temperatures (optional)": [u"80", u"298"],
     "spin-noise run: 90-degree pulse": [u"8.5", u"-11.79"],
+    # Must NOT fire (harness answers 298 K, in range); scripted so a
+    # regression shows as a wrong outcome, not a stuck harness.
+    "spin-noise network 4/5: temperature (please check)": [u"298"],
     "spin-noise run: notes":
         [u"harness run — synthetic operator input"],
     # Fallback dialogs that must NOT fire in a clean run; scripted anyway
@@ -167,7 +170,9 @@ SELECT_ANSWERS = {
     # flag, and the harness clock is virtual so this costs nothing.
     "spin-noise network 5/5: noise-block duration": 1,
     "spin-noise run: lock": 0,                          # lock OFF
-    "spin-noise run: BSMS FIELD SWEEP -- IMPORTANT": 0, # sweep OFF
+    # Sweep-off is now the SECOND button (safe default flipped after
+    # the 2022-incident review): index 1 = "Yes -- I checked just now".
+    "spin-noise run: BSMS FIELD SWEEP -- IMPORTANT": 1, # sweep OFF
     "spin-noise run: probe type": 1,                    # N2-cryo (Prodigy)
     # Field-sweep operator steps (SELECT dialogs; 0 = proceed). The
     # off-target adjudication never fires in mock modes (no measured
@@ -286,7 +291,17 @@ def main():
     expected_expnos += [13]
     expected_roles += ["reference_close"]
 
-    dsname = "SPINNOISE_" + time.strftime("%Y%m%d", time.localtime())
+    # dsname now carries date AND time (same-day rerun protection), so
+    # discover it instead of recomputing the exact minute.
+    cand = []
+    if os.path.isdir(datadir):
+        for nd in os.listdir(datadir):
+            if nd.startswith("SPINNOISE_") and \
+                    os.path.isdir(os.path.join(datadir, nd)):
+                cand.append(nd)
+    check("exactly one SPINNOISE_* dataset created", len(cand) == 1,
+          str(cand))
+    dsname = cand[0] if cand else "SPINNOISE_MISSING"
     name_dir = os.path.join(datadir, dsname)
     for expno in expected_expnos:
         d = os.path.join(name_dir, str(expno))

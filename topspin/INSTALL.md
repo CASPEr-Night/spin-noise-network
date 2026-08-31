@@ -63,7 +63,7 @@ operator dialog when missing).
 
 ## What the run does (expno map)
 
-Dataset `SPINNOISE_<date>` in your current data directory:
+Dataset `SPINNOISE_<date>_<time>` in your current data directory:
 
 | expno | role |
 |---|---|
@@ -114,7 +114,7 @@ step-by-step checklist with pass criteria is
   is nothing to lose).
 - **Script window shows a Jython error dialog** — the run stopped, but
   any acquisition already started finishes on its own and all data stays
-  in `SPINNOISE_<date>`. Send the error text to the maintainers.
+  in `SPINNOISE_<date>_<time>`. Send the error text to the maintainers.
 - **Old TopSpin (2.x)** — everything is written for Jython 2.2-level
   syntax; if `Avance.incl` is missing, delete the `#include` line in
   `zgnoise2d` (it is not used).

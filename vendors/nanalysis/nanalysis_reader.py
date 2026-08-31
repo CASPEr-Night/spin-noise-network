@@ -361,6 +361,17 @@ def read_session(session_dir):
             "no NN_*.dx experiment files found under %s (expected the "
             "session layout of README.md: 10/14/15/16 ladder, 11 open "
             "reference, 20+ noise, 13 close reference)" % session_dir)
+    if all(not e["result"]["nan"]["is_fid"] for e in experiments):
+        # A session made ENTIRELY of processed spectra is unusable --
+        # refuse on this documented standalone-CLI path exactly as the
+        # central-packer adapter does, instead of packing a bundle that
+        # validates, uploads, and disappoints weeks later.
+        raise NanalysisReadError(
+            "every export in this session is a processed-SPECTRUM file, "
+            "not a raw FID export -- the network cannot use processed "
+            "spectra at all. On the NMReady choose the FID JCAMP-DX "
+            "export for each record (operator checklist in README.md) "
+            "and re-export.")
     return {"answers": answers, "experiments": experiments,
             "answers_path": apath if os.path.isfile(apath) else None,
             "warnings": warnings}
@@ -734,6 +745,7 @@ class NanalysisReader(object):
             raise self._err("cannot list data directory %s: %s"
                             % (data_dir, exc))
         out = []
+        skipped = []
         for n in names:
             full = os.path.join(data_dir, n)
             if not os.path.isfile(full) \
@@ -742,6 +754,18 @@ class NanalysisReader(object):
             m = _PREFIX_RE.match(n)
             if m:
                 out.append((int(m.group(1)), full))
+            else:
+                skipped.append(n)
+        if skipped:
+            # Parity with read_session(): NMReady's own default export
+            # names carry no prefix, so silence here would quietly drop
+            # real records from the bundle.
+            self._warnings.append(
+                "SKIPPED %d JCAMP file(s) without the NN_ expno prefix "
+                "(%s%s) -- rename per the operator checklist (e.g. "
+                "11_sn_ref_open.dx) or they will not be packed"
+                % (len(skipped), ", ".join(skipped[:6]),
+                   ", ..." if len(skipped) > 6 else ""))
         if not out:
             raise self._err(
                 "no NN_*.dx / NN_*.jdx NMReady files found under %s -- "
@@ -803,6 +827,17 @@ class NanalysisReader(object):
         not_fid = sorted(e for e, d in discovered.items()
                          if d.get("_not_fid"))
         if not_fid:
+            if len(not_fid) == len(discovered):
+                # A session made ENTIRELY of processed spectra is unusable
+                # -- refusing here beats a bundle that validates, uploads,
+                # and disappoints weeks later.
+                raise self._err(
+                    "every export in this session is a processed-SPECTRUM "
+                    "file, not a raw FID export -- the network cannot use "
+                    "processed spectra at all. On the NMReady choose the "
+                    "FID JCAMP-DX export for each record (operator "
+                    "checklist in vendors/nanalysis/README.md) and "
+                    "re-export.")
             warnings.append("expno(s) %s are processed-spectrum exports, "
                             "not raw FID exports -- the network needs the "
                             "FID .dx (README operator checklist)" % not_fid)

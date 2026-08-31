@@ -57,6 +57,14 @@ zip on another machine and transfer it whole.
 
 VERIFY: `cat VERSION` prints a version matching the release tag.
 
+A NOTE ON WINDOWS: the verification snippets below are written for a
+POSIX shell (heredocs, `python3`, `chmod`). On a Windows TopSpin or
+benchtop workstation, run them through Git Bash if available;
+otherwise translate as you go: `py -3` for `python3`, save each
+snippet to a temporary .py file instead of using a heredoc, and skip
+`chmod` (tighten the file's ACL from its Properties dialog instead).
+The checks themselves are identical.
+
 ## Step 3 — check Python
 
     python3 --version        # need 3.6 or newer, stdlib only
