@@ -114,6 +114,16 @@ TopSpin tree; the human then runs `xpy spin_noise_run` themselves
 (dialog-driven; `desktest` mode first if they want a dry run — that
 choice is theirs to launch, not yours).
 
+OPTIONAL FEATURES (v0.6+): the orchestrator takes composable flags —
+`rdopt` (probe-tuning scan), `sweep` (field-stepped noise blocks; the
+receiver window follows each step), and `sweep autostep` (the script
+actuates the lock-shift steps itself; Tier 2, opt-in). Launching ANY
+of these is the human's decision, never yours (hard rule 1). Point
+them at `PROTOCOL.md` for the sweep, `docs/f19_pilot.md` for a
+fluorine session, and — before the FIRST autostep use on a console
+family — `docs/autostep_bench_checklist.md` (a supervised one-hour
+validation you may help them follow, reading and interpreting only).
+
 VERIFY: the file exists in the pp/py user directory and is readable.
 
 ### JEOL / Magritek / Nanalysis
@@ -164,7 +174,9 @@ human ran `xpy spin_noise_run desktest` first and it completed with a
 desktest bundle" (a plumbing rehearsal before the real session); V2 is
 skipped (no packing step); V4 becomes "the bundle's `meta.json` says
 `run_mode: live`, `experiments` covers setup / rg_ladder /
-reference_open / noise / reference_close, and `clock_audit.blocks` is
+reference_open / reference_close plus EITHER a `noise` experiment OR
+a field-stepped session's `noise_sweep` blocks (with `sweep_verify`
+and, from v0.6, one `sweep_signcal`), and `clock_audit.blocks` is
 non-empty" (read the zip's meta.json; you can do all of this without
 touching TopSpin). V3, V5, V6, V7 apply unchanged.
 
@@ -189,7 +201,10 @@ mismatch with both paths and both hashes.
 
 V5 — metadata spot-check WITH the human: `h1_freq_mhz` against the
 console's nameplate frequency, sample description, temperatures,
-facility fields. Wrong metadata is a finding too.
+facility fields. Wrong metadata is a finding too. (X-nucleus
+sessions, e.g. a 19F pilot: `h1_freq_mhz` is the 1H-EQUIVALENT
+frequency and should still match the nameplate; the actual carrier
+lives in `observe_freq_mhz`, with `observe_nucleus` naming it.)
 
 V6 — upload (Step 7) and record the server receipt.
 

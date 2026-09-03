@@ -119,20 +119,28 @@ documented in `docs/design_rdopt_locksweep.md`:
   1/T2* + the radiation-damping rate), and runs the whole session at the
   offset with the strongest radiation damping. Needs an ATM probe;
   without one it skips itself with a note.
-- `xpy spin_noise_run sweep` — **field-stepped sweep**: instead of one
-  long noise block, a ladder of noise blocks at stepped fields. Every
-  step is a distinct axion mass point, so one overnight session
-  locally scans several adjacent masses. The field is stepped through
-  the **lock reference**: with a lockable sample (e.g. 90/10 H₂O/D₂O),
-  set the Lock Shift by the quoted ppm (1 ppm = BF1 Hz at ¹H, exact),
-  re-lock — the servo carries the field to the new setpoint — then
-  lock OFF for the acquisition as always. (Fallback for consoles
-  without accessible shift mode: step the FIELD value unlocked,
-  ~8 Hz/unit at ¹H standard bore, and don't re-lock mid-sweep — at a
-  fixed reference autolock would pull the field straight back.) The
-  script verifies each step by measuring the water line — the
-  *measured* shift is what enters the record — and verifies the
-  restoration too. The BSMS field sweep stays off throughout.
+- `xpy spin_noise_run sweep` — **field-stepped sweep** (v0.6:
+  carrier-follow "spectral tiling"): instead of one long noise block, a
+  ladder of noise blocks at stepped fields — up to 15 steps over up to
+  ±25 ppm of B₀. Every step is a distinct axion mass point, so one
+  session locally scans several adjacent masses, and the receiver
+  carrier **follows each step automatically**, so the line stays
+  centered in the window however far the ladder reaches. The field is
+  stepped through the **lock reference**: with a lockable sample (e.g.
+  90/10 H₂O/D₂O), set the Lock Shift by the quoted ppm (1 ppm = BF1 Hz
+  at the observed nucleus, exact), re-lock — the servo carries the
+  field to the new setpoint — then lock OFF for the acquisition as
+  always. Jumps larger than one safe re-lock are walked in hops (the
+  dialog quotes them; lock-shift path only). (Fallback for consoles
+  without accessible shift mode: step the FIELD value unlocked —
+  ~8 Hz/unit at ¹H standard bore, scaled for other nuclei — and don't
+  re-lock mid-sweep — at a fixed reference autolock would pull the
+  field straight back.) The estimator's sign convention is resolved at
+  the baseline by an automatic carrier-displacement 1D (one extra
+  ~30 s acquisition, no operator action). The script verifies each
+  step by measuring the sample's line — the *measured* position is
+  what enters the record — and verifies the restoration too. The BSMS
+  field sweep stays off throughout.
 
 ## What gets uploaded
 

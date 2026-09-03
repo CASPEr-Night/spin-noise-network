@@ -198,10 +198,11 @@ def main():
     mode = sys.argv[1]
     features = []
     for a in sys.argv[2:]:
-        if a in ("rdopt", "sweep"):
+        if a in ("rdopt", "sweep", "autostep"):
             features.append(a)
     rdopt_on = "rdopt" in features
     sweep_on = "sweep" in features
+    autostep_on = "autostep" in features
 
     workdir = os.environ.get("HARNESS_WORKDIR")
     if not workdir:
@@ -280,8 +281,11 @@ def main():
     expected_expnos += [10, 14, 15, 16, 11]
     expected_roles += ["rg_ladder"] * 4 + ["reference_open"]
     if sweep_on:
-        expected_expnos += [30, 31, 50, 32, 51, 33, 52, 34]
-        expected_roles += ["sweep_verify"]
+        # v0.6: baseline verify (30), then the carrier-displacement
+        # sign-calibration 1D (29), then 3 x (verify + noise), then the
+        # restore verify.
+        expected_expnos += [30, 29, 31, 50, 32, 51, 33, 52, 34]
+        expected_roles += ["sweep_verify", "sweep_signcal"]
         for _k in range(3):
             expected_roles += ["sweep_verify", "noise_sweep"]
         expected_roles += ["sweep_verify"]
@@ -398,6 +402,21 @@ def main():
                   and abs(steps[1].get("target_offset_hz", 1)) < 1
                   and abs(steps[2].get("target_offset_hz", 0) - 1200.0) < 1,
                   str([s.get("target_offset_hz") for s in steps]))
+            if autostep_on:
+                # In mock modes autostep must bail out BEFORE any dialog
+                # or file access, record why, and leave every step on the
+                # operator-dialog basis.
+                asx = fs.get("autostep") or {}
+                check("autostep: graceful mock-mode fallback recorded",
+                      asx.get("requested") is True
+                      and asx.get("available") is False
+                      and "mock mode" in (asx.get("fallback_reason") or ""),
+                      str(asx)[:200])
+                check("autostep: steps fell back to operator_dialog basis",
+                      bool(steps) and not [
+                          s for s in steps
+                          if s.get("actuation_basis") != "operator_dialog"],
+                      str([s.get("actuation_basis") for s in steps]))
     setup_ok = bool(blocks) and blocks[0].get("ocxo_expected_s") is None
     check("setup block has ocxo_expected_s null (not OCXO-predictable)",
           setup_ok)

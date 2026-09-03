@@ -115,6 +115,49 @@ except SyntaxError as exc:
 check("syntax: compiles after py2-print rewrite (Jython-compat proxy)",
       syntax_ok, syntax_err)
 
+# Jython 2.2 grammar guards that a Python-3 compile() cannot catch: a
+# conditional expression (PEP 308, Python 2.5+) bricks the whole module
+# at load on TopSpin 2.x consoles -- the review of 2026-09-03 caught
+# exactly this in a fresh edit. AST-based: comments/strings never
+# false-positive.
+try:
+    import ast
+    _tree = ast.parse(rewrite_prints(LINES))
+    _ternaries = [n.lineno for n in ast.walk(_tree)
+                  if isinstance(n, ast.IfExp)]
+    _withs = [n.lineno for n in ast.walk(_tree)
+              if isinstance(n, (ast.With, ast.GeneratorExp, ast.SetComp,
+                                ast.DictComp))]
+    check("jython 2.2: no conditional expressions (PEP 308) in the "
+          "orchestrator", not _ternaries, "lines %s" % _ternaries)
+    check("jython 2.2: no with/genexp/set-comp/dict-comp in the "
+          "orchestrator", not _withs, "lines %s" % _withs)
+except SyntaxError:
+    pass          # already reported by the compile check above
+
+# Gyromagnetic-ratio table consistency: h1_freq_mhz (the cross-site
+# field coordinate) is computed from this table, so its entries must
+# stay on the IUPAC frequency-ratio system to ~1e-5 -- a mixed-
+# provenance value puts a 19F session's coordinate ~3e-4 off its own
+# magnet's 1H sessions (review finding, 2026-09-03).
+m = re.search(r"NUC_GAMMA_MHZ_T\s*=\s*\{(.*?)\}", SRC, re.S)
+gamma_ok, gamma_msg = False, "table not found"
+if m:
+    entries = dict(re.findall(r'"([^"]+)":\s*(-?[0-9.]+)', m.group(1)))
+    iupac_xi = {"1H": 100.000000, "19F": 94.094011, "2H": 15.350609,
+                "13C": 25.145020, "31P": 40.480742, "15N": -10.136767,
+                "7Li": 38.863797, "23Na": 26.451900}
+    bad = []
+    for k, xi in iupac_xi.items():
+        if k in entries:
+            want = xi / 100.0 * 42.5774806
+            got = float(entries[k])
+            if abs(got - want) > 1e-4 * abs(want):
+                bad.append("%s: %.6f vs IUPAC %.6f" % (k, got, want))
+    gamma_ok, gamma_msg = not bad, "; ".join(bad)
+check("gamma table: NUC_GAMMA_MHZ_T consistent with IUPAC frequency "
+      "ratios (1e-4)", gamma_ok, gamma_msg)
+
 
 # --------------------------------------------------------------------------
 # 2. Version sync

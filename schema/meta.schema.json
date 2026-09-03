@@ -144,7 +144,25 @@
     "h1_freq_mhz": {
      "type": "number",
      "exclusiveMinimum": 0,
-     "description": "1H Larmor frequency of the magnet in MHz (BF1 on Bruker). Vendor-neutral: this is the axion-mass coordinate of the site."
+     "description": "1H Larmor frequency of the magnet in MHz (BF1 on Bruker for a 1H session; the 1H-EQUIVALENT frequency, bf1 * gamma_1H/gamma_X, when an X nucleus is observed -- see observe_nucleus). Vendor-neutral: this is the field coordinate of the site."
+    },
+    "observe_nucleus": {
+     "type": "string",
+     "description": "OPTIONAL (v0.6, 19F-pilot support; absent = 1H). Observed nucleus inherited from the operator's template experiment (NUC1 on Bruker), e.g. '1H', '19F', '2H'. The axion-mass coordinate of the session is observe_freq_mhz, not h1_freq_mhz, when this is not 1H."
+    },
+    "observe_freq_mhz": {
+     "type": "number",
+     "exclusiveMinimum": 0,
+     "description": "OPTIONAL (v0.6; absent = equal to h1_freq_mhz). Base frequency of the OBSERVED nucleus in MHz (BF1 as read from the template). This is the session's actual carrier scale and its axion-mass coordinate."
+    },
+    "lock_channel": {
+     "type": "object",
+     "description": "OPTIONAL (v0.6). Lock-channel identification recorded once per session: locnuc (lock nucleus string, e.g. '2H'; empty if unreadable), bf2_mhz and sfo2_mhz (lock-channel base and synthesizer frequencies, null if unreadable). The clock-blind 1H/2H ratio analyses and the lock-referenced sweep key on these.",
+     "properties": {
+      "locnuc": {"type": "string"},
+      "bf2_mhz": {"type": ["number", "null"]},
+      "sfo2_mhz": {"type": ["number", "null"]}
+     }
     },
     "field_tesla": {
      "type": "number",
@@ -542,9 +560,10 @@
        "reference_close",
        "rdopt_scan",
        "sweep_verify",
+       "sweep_signcal",
        "noise_sweep"
       ],
-      "description": "Experiment role. rdopt_scan (small-flip 1Ds of the rd-optimize tuning scan), sweep_verify (field-step verification 1Ds), and noise_sweep (per-step pulse-free noise blocks of the field-stepped sweep) were added for the optional rdopt/sweep features; enum extension only, all earlier bundles remain valid."
+      "description": "Experiment role. rdopt_scan (small-flip 1Ds of the rd-optimize tuning scan), sweep_verify (field-step verification 1Ds), and noise_sweep (per-step pulse-free noise blocks of the field-stepped sweep) were added for the optional rdopt/sweep features; sweep_signcal (the carrier-displacement sign-convention calibration 1D) was added for the v0.6 carrier-follow sweep. Enum extensions only, all earlier bundles remain valid."
      },
      "pulprog": {
       "type": "string",
@@ -626,6 +645,7 @@
          "reference_close",
          "rdopt_scan",
          "sweep_verify",
+         "sweep_signcal",
          "noise_sweep"
         ],
         "description": "Same role vocabulary as experiments[].role, including the optional rdopt/sweep feature roles (enum extension; earlier bundles remain valid)."
@@ -661,7 +681,7 @@
   },
   "field_sweep": {
    "type": "object",
-   "description": "OPTIONAL (documented 2026-08-31, no schema-version bump: additive and never required). Written by spin_noise_run.py when the 'sweep' option ran: field-stepped noise blocks, each step a distinct axion mass point. The field is stepped through the 2H lock reference (1 ppm = BF1 Hz at 1H, exact) with unlocked FIELD-DAC steps as fallback; MEASURED offsets, never targets, are the record. Keys: enabled, requested_half_span_hz, per_step_secs, baseline_line_offset_hz, sign_convention_flip (pulse-pair estimator sign resolved against the operator's shift direction), steps[] {index, target_offset_hz, measured_offset_hz (null = unverified: analysis must not substitute the target), measured_offset_hz_raw, verify_expno, noise_expno, rows, skipped}, restored_offset_hz, field_restored, ended_early, note."
+   "description": "OPTIONAL (documented 2026-08-31, no schema-version bump: additive and never required). Written by spin_noise_run.py when the 'sweep' option ran: field-stepped noise blocks, each step a distinct axion mass point. The field is stepped through the 2H lock reference (1 ppm = BF1 Hz at the observed nucleus, exact) with unlocked FIELD-DAC steps as fallback; MEASURED offsets, never targets, are the record. Keys: enabled, requested_half_span_hz, per_step_secs, baseline_line_offset_hz, sign_convention_flip, steps[] {index, target_offset_hz, measured_offset_hz (null = unverified: analysis must not substitute the target), measured_offset_hz_raw, verify_expno, noise_expno, rows, skipped}, restored_offset_hz, field_restored, ended_early, note. v0.6 carrier-follow additions (all optional; their absence marks a v0.5 fixed-carrier bundle): carrier_follow (true when per-step O1 = baseline O1 + target -- the receiver window tracks each step and per-step line measurements are LOCAL to the moved window; a writer setting carrier_follow MUST put carrier_o1_hz on every step, and SHOULD record baseline_carrier_o1_hz), baseline_carrier_o1_hz, span_cap_hz, sign_convention_basis ('carrier_displacement_calibration' = resolved by a deliberate 500 Hz carrier move at fixed field; 'unresolved' = deviations recorded unsigned), steps[] gain carrier_o1_hz, lock_shift_target_ppm, measured_offset_local_hz, local_deviation_hz, and optional note. DOCUMENTED EXCEPTION to the measured-never-target rule (v0.6): when sign_convention_basis is 'unresolved' and a step's unsigned local deviation is within the absolute tolerance (30 Hz), the writer records measured_offset_hz = target with an explanatory per-step note -- readers must label such steps 'target_confirmed_unsigned', never 'measured'. v0.6.x AUTOSTEP additions (optional): field_sweep.autostep {requested, available, tier ('edlock_lopo'), fallback_reason, instrument, shift_column, lock_control ('au'|'semi_attended'|'locked_recorded'), events[] {step, shift_ppm_written, actuator_sign, lock_state}, restored_table} records the Tier-2 programmatic lock-shift actuation (edlock-table clone + lopo/lock; docs/autostep_bench_checklist.md); steps[] gain actuation_basis ('autostep_edlock'|'operator_dialog') and, on every autostep-actuated step, lock_state_during_noise ('off'|'off_operator'|'on_recorded'|'unknown_lockoff_failed'|'off_sweep_unconfirmed'; absent on dialog-actuated steps, where the session-level environment.locked answer applies). Verification semantics are unchanged: MEASURED offsets remain the record regardless of who turned the knob."
   },
   "checksums": {
    "type": "object",
