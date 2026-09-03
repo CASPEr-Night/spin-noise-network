@@ -650,6 +650,306 @@ def upper_limit_at(f, pnorm, f0_ref, w_candidates):
     return best, details
 
 
+# ============================================================================
+# v0.6 analysis riders
+#
+# (a) Persistent-line catalog: every narrow excess in every readable
+#     noise block, classified by how it moves when the carrier moves.
+#     Under the v0.6 carrier-follow sweep the receiver window tracks
+#     each field step, so across steps a SPIN line stays near its
+#     baseline window position, a RECEIVER-CHAIN spur stays fixed in the
+#     window frame, and an ABSOLUTE-frequency line (external RFI, a
+#     console clock spur -- or a dark-matter candidate) marches through
+#     the window by minus the carrier shift. This 3-way separation is
+#     the groundwork for the dark-photon line search and the spur
+#     catalog; without carrier diversity the window/absolute split is
+#     recorded as indeterminate.
+#
+# (b) Sub-virial pass: a native-resolution (1/T_row) mean periodogram of
+#     the headline noise block with a narrow-candidate list.
+#     INFRASTRUCTURE ONLY: a real sub-virial dark-matter feature chirps
+#     with Earth's rotation (~0.9 Hz over a night at 600 MHz), so no
+#     physics claim is possible without the diurnal chirp templates --
+#     which this pass does not yet apply, and says so.
+# ============================================================================
+
+CATALOG_NSIGMA = 5.0          # feature threshold, stacked-PSD sigmas
+CATALOG_DC_EXCLUDE_HZ = 50.0  # skip the DC/carrier-leakage region
+CATALOG_CLUSTER_TOL_HZ = 3.0  # same-line tolerance across blocks
+CATALOG_MAX_LISTED = 40
+SUBVIRIAL_NSIGMA = 6.0
+SUBVIRIAL_MAX_WIDTH_HZ = 1.0
+SUBVIRIAL_MAX_LISTED = 30
+
+
+def _block_features(res, f0_local, w_ref):
+    """Narrow excess features in one block's stacked normalized PSD:
+    [{window_hz, excess, width_hz, is_spin}]. DC and band edges are
+    excluded; 'is_spin' tags features within 3 linewidths of the
+    block's expected line position."""
+    rows = res.get("_rows") or []
+    if not rows:
+        return []
+    f = rows[0]["f"]
+    stack = np.mean([rr["pnorm"] for rr in rows], axis=0)
+    edge = res.get("edge_hz") or 0.45 * res.get("fs_hz", 12000.0)
+    core = (np.abs(f) < edge) & (np.abs(f) > CATALOG_DC_EXCLUDE_HZ)
+    if not np.any(core):
+        return []
+    sig = robust_sigma(stack[core])
+    if not sig or not np.isfinite(sig):
+        return []
+    hot = core & (stack - 1.0 > CATALOG_NSIGMA * sig)
+    feats = []
+    i = 0
+    idx = np.where(hot)[0]
+    while i < len(idx):
+        j = i
+        while j + 1 < len(idx) and idx[j + 1] == idx[j] + 1:
+            j += 1
+        seg = idx[i:j + 1]
+        wts = stack[seg] - 1.0
+        center = float(np.sum(f[seg] * wts) / np.sum(wts))
+        spin_tol = 3.0 * max(w_ref or 0.0, 5.0)
+        feats.append({
+            "window_hz": center,
+            "excess": float(np.max(stack[seg]) - 1.0),
+            "excess_nsigma": float((np.max(stack[seg]) - 1.0) / sig),
+            "width_hz": float(f[seg[-1]] - f[seg[0]]) if len(seg) > 1
+                        else float(f[1] - f[0]),
+            "is_spin": abs(center - f0_local) < spin_tol,
+        })
+        i = j + 1
+    return feats
+
+
+def _cluster_1d(items, key, tol):
+    """Greedy 1-d clustering of dicts by items[key] within tol."""
+    out = []
+    for ft in sorted(items, key=lambda x: x[key]):
+        if out and abs(ft[key] - out[-1]["center"]) <= tol:
+            out[-1]["members"].append(ft)
+            out[-1]["center"] = float(np.mean(
+                [m[key] for m in out[-1]["members"]]))
+        else:
+            out.append({"center": float(ft[key]), "members": [ft]})
+    return out
+
+
+def persistent_line_catalog(catalog_blocks, w_ref):
+    """3-way persistent-line classification across noise blocks.
+
+    catalog_blocks: [{expno, res, carrier_shift_hz, f0_local}] --
+    carrier_shift_hz is how far the receiver window moved from the
+    baseline carrier (0 for standard blocks and legacy fixed-carrier
+    sweeps; the step target under carrier-follow)."""
+    all_feats = []
+    for b in catalog_blocks:
+        for ft in _block_features(b["res"], b["f0_local"], w_ref):
+            ft["expno"] = b["expno"]
+            ft["carrier_shift_hz"] = float(b["carrier_shift_hz"])
+            ft["absolute_hz"] = ft["window_hz"] + float(
+                b["carrier_shift_hz"])
+            all_feats.append(ft)
+    shifts = sorted(set(round(b["carrier_shift_hz"], 1)
+                        for b in catalog_blocks))
+    diversity = len(shifts) > 1
+    catalog = {"n_blocks": len(catalog_blocks),
+               "carrier_shifts_hz": shifts,
+               "carrier_diversity": diversity,
+               "n_features_raw": len(all_feats),
+               "lines": [],
+               "note": (
+                   "classification: 'spin_line' = tracks the expected "
+                   "line position; 'window_fixed' = constant offset "
+                   "from the (moving) carrier -> receiver-chain spur; "
+                   "'absolute_fixed' = constant absolute frequency -> "
+                   "external RFI, console clock spur, or dark-matter "
+                   "candidate; 'persistent_same_shift_indeterminate' = "
+                   "repeated, but only in blocks sharing one carrier "
+                   "shift, so the frames cannot be separated for it; "
+                   "'single_block' = seen once, unclassifiable. "
+                   "Window/absolute discrimination "
+                   "requires carrier diversity (a carrier-follow sweep); "
+                   "this session %s." % (
+                       "has it" if diversity else
+                       "does NOT have it -- window and absolute frames "
+                       "coincide"))}
+    nonspin = [ft for ft in all_feats if not ft["is_spin"]]
+    spin = [ft for ft in all_feats if ft["is_spin"]]
+    spin_tol = 3.0 * max(w_ref or 0.0, 5.0)
+    if diversity and spin:
+        # Under carrier-follow the spin line IS window-fixed, so any
+        # per-block remnant that escaped its own block's is_spin tag
+        # (mis-seeded fit, weak row) must not cluster into a
+        # "receiver-chain spur" (review F4): fold everything near the
+        # mean spin window position back into the spin group.
+        mean_spin_w = float(np.mean([ft["window_hz"] for ft in spin]))
+        keep = []
+        for ft in nonspin:
+            if abs(ft["window_hz"] - mean_spin_w) < spin_tol:
+                ft["is_spin"] = True
+                spin.append(ft)
+            else:
+                keep.append(ft)
+        nonspin = keep
+    if spin:
+        catalog["lines"].append({
+            "class": "spin_line",
+            "n_blocks_seen": len(set(ft["expno"] for ft in spin)),
+            "mean_window_hz": float(np.mean(
+                [ft["window_hz"] for ft in spin])),
+            "max_excess_nsigma": float(np.max(
+                [ft["excess_nsigma"] for ft in spin]))})
+    used = set()
+    for frame, cls in (("window_hz", "window_fixed"),
+                       ("absolute_hz", "absolute_fixed")):
+        for cl in _cluster_1d([ft for ft in nonspin
+                               if id(ft) not in used],
+                              frame, CATALOG_CLUSTER_TOL_HZ):
+            expnos = set(m["expno"] for m in cl["members"])
+            csh = set(round(m["carrier_shift_hz"], 1)
+                      for m in cl["members"])
+            accept_cls = None
+            if len(expnos) >= 2 and (len(csh) >= 2 or not diversity):
+                accept_cls = cls
+                if not diversity:
+                    accept_cls = "persistent_frame_indeterminate"
+            elif (len(expnos) >= 2 and diversity and len(csh) == 1
+                  and frame == "window_hz"):
+                # persistent across blocks that share one carrier shift
+                # (e.g. the standard noise block + the target-0 step):
+                # real and repeated, but the frames cannot be separated
+                # for it (review F5)
+                accept_cls = "persistent_same_shift_indeterminate"
+            if accept_cls is None:
+                continue
+            for m in cl["members"]:
+                used.add(id(m))
+            catalog["lines"].append({
+                "class": accept_cls,
+                "n_blocks_seen": len(expnos),
+                "center_hz": cl["center"],
+                "frame": frame.replace("_hz", ""),
+                "max_excess_nsigma": float(np.max(
+                    [m["excess_nsigma"] for m in cl["members"]]))})
+        if not diversity:
+            break     # one pass is meaningful without carrier diversity
+    singles = [ft for ft in nonspin if id(ft) not in used]
+    for ft in sorted(singles, key=lambda x: -x["excess_nsigma"]
+                     )[:CATALOG_MAX_LISTED]:
+        catalog["lines"].append({
+            "class": "single_block", "expno": ft["expno"],
+            "window_hz": ft["window_hz"],
+            "absolute_hz": ft["absolute_hz"],
+            "excess_nsigma": ft["excess_nsigma"]})
+    catalog["n_lines_listed"] = len(catalog["lines"])
+    return catalog
+
+
+def subvirial_pass(bundle, exp, f0_local, w_ref, fs_default):
+    """Native-resolution mean periodogram of one noise block + narrow
+    candidates. Infrastructure pass -- no chirp templates yet."""
+    rows, acq = bundle.read_rows(exp["expno"], exp)
+    if rows is None or rows.shape[0] == 0:
+        return None
+    fs = float(acq.get("SW_h", exp.get("sw_hz", fs_default)))
+    n = int(rows.shape[1])
+    if n < 4096:
+        return None
+    # truncate each row to the largest power of two: real console TDs
+    # often carry large prime factors, which push numpy's FFT onto the
+    # slow Bluestein path (minutes per row instead of seconds). The
+    # resolution loss is < 2x and irrelevant for a candidate list.
+    n = 1 << (n.bit_length() - 1)
+    win = np.hanning(n)
+    ps = np.zeros(n)
+    for x in rows:
+        ps += np.abs(np.fft.fftshift(np.fft.fft(x[:n] * win))) ** 2
+    ps /= float(rows.shape[0])
+    f = np.fft.fftshift(np.fft.fftfreq(n, 1.0 / fs))
+    df = fs / n
+    # coarse baseline: chunked medians, interpolated
+    chunk = max(1024, n // 2048)
+    nb = n // chunk
+    fb = np.array([np.mean(f[i * chunk:(i + 1) * chunk])
+                   for i in range(nb)])
+    bb = np.array([np.median(ps[i * chunk:(i + 1) * chunk])
+                   for i in range(nb)])
+    bb[bb <= 0] = np.min(bb[bb > 0]) if np.any(bb > 0) else 1.0
+    base = np.interp(f, fb, bb)
+    pn = ps / base
+    edge = 0.45 * fs
+    spin_tol = 3.0 * max(w_ref or 0.0, 5.0)
+    core = ((np.abs(f) < edge) & (np.abs(f) > CATALOG_DC_EXCLUDE_HZ)
+            & (np.abs(f - f0_local) > spin_tol))
+    if not np.any(core):
+        return {"expno": exp["expno"], "error": "empty analysis band"}
+    sig = robust_sigma(pn[core])
+    if not sig or not np.isfinite(sig):
+        # degenerate spectrum (clipped/constant rows): without this
+        # guard a zero sigma reaches divisions and puts Infinity/NaN
+        # into report.json, which strict parsers reject (review F6)
+        return {"expno": exp["expno"],
+                "error": "degenerate spectrum (zero/NaN sigma)"}
+    cands = []
+    idx = np.where(core & (pn - 1.0 > SUBVIRIAL_NSIGMA * sig))[0]
+    i = 0
+    while i < len(idx) and len(cands) < 10 * SUBVIRIAL_MAX_LISTED:
+        j = i
+        while j + 1 < len(idx) and idx[j + 1] == idx[j] + 1:
+            j += 1
+        seg = idx[i:j + 1]
+        width = (f[seg[-1]] - f[seg[0]]) if len(seg) > 1 else df
+        if width <= SUBVIRIAL_MAX_WIDTH_HZ:
+            wts = pn[seg] - 1.0
+            cands.append({
+                "window_hz": float(np.sum(f[seg] * wts) / np.sum(wts)),
+                "width_hz": float(width),
+                "excess_nsigma": float((np.max(pn[seg]) - 1.0) / sig)})
+        i = j + 1
+    cands.sort(key=lambda c: -c["excess_nsigma"])
+    return {"expno": exp["expno"], "resolution_hz": df,
+            "n_rows": int(rows.shape[0]), "sigma_norm": float(sig),
+            "n_candidates": len(cands),
+            "candidates": cands[:SUBVIRIAL_MAX_LISTED],
+            "note": (
+                "native-resolution (%.3g Hz) incoherent mean periodogram "
+                "of the headline noise block; candidates are narrow "
+                "(<= %.1f Hz) excesses away from the spin line and DC. "
+                "INFRASTRUCTURE PASS ONLY: no diurnal/annual chirp "
+                "templates are applied yet, and a genuine sub-virial "
+                "dark-matter line chirps by ~1 Hz per night from Earth's "
+                "rotation -- treat every candidate as an instrumental "
+                "spur hypothesis until the template search exists."
+                % (df, SUBVIRIAL_MAX_WIDTH_HZ))}
+
+
+def axion_mass_bookkeeping(meta):
+    """Per-site mass coordinate and coupling-conversion factors for the
+    downstream (coordinator-side) limit pipeline. h = 4.135667696e-15
+    eV s: 1 MHz of carrier = 4.135667696e-3 ueV of axion mass."""
+    spec = meta.get("spectrometer") or {}
+    f_mhz = spec.get("observe_freq_mhz") or spec.get("h1_freq_mhz")
+    if not f_mhz:
+        return None
+    m_uev = float(f_mhz) * 4.135667696e-3
+    m_gev = m_uev * 1e-15
+    return {
+        "observe_freq_mhz": float(f_mhz),
+        "axion_mass_coordinate_uev": m_uev,
+        "axial_vector_conversion_gev": m_gev * 1e-3,
+        "note": (
+            "mass coordinate of this session's carrier; the same "
+            "candidate lines and limits reinterpret to axial-vector "
+            "dark matter via g_A = g_aNN[GeV^-1] * (%.3e GeV) -- the "
+            "factor is m_a * v with v = 1e-3 c. No velocity "
+            "suppression applies to the axial-vector coupling, which "
+            "is why the identical data are 3 orders of magnitude "
+            "more constraining there (see the network science "
+            "roadmap)." % (m_gev * 1e-3))}
+
+
 def analyze_rg_ladder(bundle, meta, f0_guess, fs_default):
     """Amplitude linearity across the RG ladder (2020's untested link)."""
     ladder_meta = meta.get("calibration", {}).get("rg_ladder", [])
@@ -1243,6 +1543,62 @@ def render_rdopt_html(ctx):
     return "".join(parts)
 
 
+def render_line_catalog_html(ctx):
+    """HTML fragment for the v0.6 persistent-line catalog + sub-virial
+    pass + mass bookkeeping (empty when none ran)."""
+    cat = ctx.get("line_catalog")
+    sub = ctx.get("subvirial")
+    mb = ctx.get("mass_book")
+    if not (cat or sub or mb):
+        return ""
+    parts = []
+    A = parts.append
+    A("<h2>Persistent-line catalog (dark-photon / spur groundwork)</h2>")
+    if mb:
+        A("<p>Axion-mass coordinate of this session: "
+          "<b>%s &micro;eV</b> (carrier %s MHz). Axial-vector "
+          "reinterpretation factor g<sub>A</sub>/g<sub>aNN</sub> = "
+          "%.3e GeV.</p>"
+          % (fmt(mb.get("axion_mass_coordinate_uev"), 6),
+             fmt(mb.get("observe_freq_mhz"), 6),
+             mb.get("axial_vector_conversion_gev") or 0.0))
+    if cat:
+        A("<p class='note'>%s</p>" % esc(cat.get("note", "")))
+        A("<table><tr><th>class</th><th>frame</th><th>center (Hz)</th>"
+          "<th>blocks seen</th><th>max excess (&sigma;)</th></tr>")
+        for ln in cat.get("lines", []):
+            A("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
+              "<td>%s</td></tr>"
+              % (esc(ln.get("class", "")),
+                 esc(str(ln.get("frame", ln.get("expno", "")))),
+                 fmt(ln.get("center_hz", ln.get("window_hz",
+                     ln.get("mean_window_hz"))), 1),
+                 ln.get("n_blocks_seen", 1),
+                 fmt(ln.get("max_excess_nsigma",
+                            ln.get("excess_nsigma")), 1)))
+        A("</table>")
+    if sub and not sub.get("error"):
+        A("<h3>Sub-virial pass (headline block, %s Hz resolution)</h3>"
+          % fmt(sub.get("resolution_hz"), 4))
+        A("<p class='note'>%s</p>" % esc(sub.get("note", "")))
+        cands = sub.get("candidates") or []
+        if cands:
+            A("<table><tr><th>window offset (Hz)</th><th>width (Hz)</th>"
+              "<th>excess (&sigma;)</th></tr>")
+            for c in cands[:15]:
+                A("<tr><td>%s</td><td>%s</td><td>%s</td></tr>"
+                  % (fmt(c["window_hz"], 2), fmt(c["width_hz"], 3),
+                     fmt(c["excess_nsigma"], 1)))
+            A("</table>")
+        else:
+            A("<p>No narrow candidates above %.0f&sigma;.</p>"
+              % SUBVIRIAL_NSIGMA)
+    elif sub and sub.get("error"):
+        A("<p class='note'>sub-virial pass failed: %s</p>"
+          % esc(sub["error"]))
+    return "".join(parts)
+
+
 def render_field_sweep_html(ctx):
     """HTML fragment for the field-stepped sweep (empty when the feature
     did not run). Uses the science-path per-step analysis when present,
@@ -1262,24 +1618,36 @@ def render_field_sweep_html(ctx):
       "<div class='card'>")
     if fs.get("note"):
         A("<p class='small'>%s</p>" % esc(fs.get("note", "")))
+    cf = bool(fs.get("carrier_follow"))
     if steps:
+        lc_head = "line center (Hz)"
+        if cf:
+            lc_head = "line center (Hz, local window)"
         A("<table><tr><th>step</th><th>target (Hz)</th>"
-          "<th>measured (Hz)</th><th>rows</th><th>noise expno</th>"
-          "<th>line center (Hz)</th><th>FWHM (Hz)</th></tr>")
+          "<th>measured (Hz)</th><th>basis</th><th>dev (Hz)</th>"
+          "<th>rows</th><th>noise expno</th>"
+          "<th>%s</th><th>FWHM (Hz)</th></tr>" % lc_head)
         for i in range(len(steps)):
             s = steps[i]
             meas = fmt(s.get("measured_offset_hz"), 1)
             if s.get("offset_basis") == "unverified":
-                meas = "&mdash; <span class='small'>(unverified: no "
-                meas += "line fit)</span>"
+                meas = "&mdash; <span class='small'>(unverified)</span>"
             A("<tr><td>%d</td><td>%s</td><td>%s</td><td>%s</td>"
-              "<td>%s</td><td>%s</td><td>%s</td></tr>"
+              "<td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
+              "<td>%s</td></tr>"
               % (i + 1, fmt(s.get("target_offset_hz"), 1), meas,
+                 esc(s.get("offset_basis", "")),
+                 fmt(s.get("local_deviation_hz"), 1),
                  fmt(s.get("rows")),
                  fmt(s.get("noise_expno", s.get("expno"))),
                  fmt(s.get("line_center_hz"), 2),
                  fmt(s.get("fwhm_hz"), 2)))
         A("</table>")
+        for s in steps:
+            if s.get("orchestrator_note"):
+                A("<p class='small'>step expno %s: %s</p>"
+                  % (fmt(s.get("noise_expno", s.get("expno"))),
+                     esc(s["orchestrator_note"])))
     restored = fs.get("restored_offset_hz")
     if restored is not None:
         A("<p class='small'>field restored to %+.1f Hz of baseline after "
@@ -1674,12 +2042,17 @@ def render_html(ctx):
     spec = meta.get("spectrometer", {})
     sw = meta.get("software", {})
     A("<h1>Spin-noise network — facility report</h1>")
+    nuc_txt = ""
+    if spec.get("observe_nucleus") and spec.get("observe_nucleus") != "1H":
+        nuc_txt = (" &middot; observed nucleus: %s at %.6g MHz"
+                   % (esc(spec["observe_nucleus"]),
+                      float(spec.get("observe_freq_mhz", 0) or 0)))
     A("<div class='muted'>%s, %s, %s &middot; %s &middot; %.6g MHz "
-      "(&approx;%.4g T) &middot; probe: %s (%s)</div>"
+      "(1H-equivalent, &approx;%.4g T)%s &middot; probe: %s (%s)</div>"
       % (esc(fac.get("institution", "?")), esc(fac.get("city", "?")),
          esc(fac.get("country", "?")), esc(spec.get("console", "?")),
          float(spec.get("h1_freq_mhz", 0) or 0),
-         float(spec.get("field_tesla", 0) or 0),
+         float(spec.get("field_tesla", 0) or 0), nuc_txt,
          esc(spec.get("probe_string", "?")), esc(spec.get("probe_type", "?"))))
     A("<div class='muted small'>bundle: <code>%s</code> &middot; acquired "
       "run_mode=<code>%s</code> by script v%s &middot; report generator "
@@ -1728,6 +2101,7 @@ def render_html(ctx):
         A(render_clock_audit_html(ctx["clock"]))
         A(render_rdopt_html(ctx))
         A(render_field_sweep_html(ctx))
+        A(render_line_catalog_html(ctx))
         A(_footer())
         return "".join(parts)
 
@@ -1935,6 +2309,7 @@ def render_html(ctx):
     # ---- optional features (empty fragments when absent)
     A(render_rdopt_html(ctx))
     A(render_field_sweep_html(ctx))
+    A(render_line_catalog_html(ctx))
 
     # ---- QA
     A("<h2>QA flags</h2><div class='card'><table>"
@@ -2085,11 +2460,15 @@ def main(argv=None):
     sweep_meta = meta.get("field_sweep") or {}
     sweep_steps_meta = sweep_meta.get("steps") or []
 
-    def _sweep_measured_of(expno):
+    def _sweep_step_of(expno):
         for s in sweep_steps_meta:
             if s.get("noise_expno") == expno:
-                return s.get("measured_offset_hz")
+                return s
         return None
+
+    def _sweep_measured_of(expno):
+        s = _sweep_step_of(expno)
+        return s.get("measured_offset_hz") if s else None
 
     def _fit_significance(r):
         tot = 0.0
@@ -2102,8 +2481,27 @@ def main(argv=None):
     def _analyze_sweep_step(e, off):
         """Fit at both sign candidates of the measured offset; keep the
         candidate whose per-row line fits are more significant (a real
-        line beats a noise fit decisively). Returns (result, seed)."""
-        cands = [off, -off] if off else [0.0]
+        line beats a noise fit decisively). Returns (result, seed).
+
+        v0.6 carrier-follow bundles: the receiver window moved WITH the
+        step, so the line sits near its baseline LOCAL position and the
+        seed is the small residual deviation (measured - target), not
+        the full offset -- the sign candidates are the deviation's."""
+        step = _sweep_step_of(e.get("expno"))
+        if step and step.get("carrier_o1_hz") is not None:
+            # Prefer the RECORDED local deviation: when the orchestrator
+            # substituted measured = target (sign-unresolved exception),
+            # off - target is 0 while the line really sits at the
+            # deviation -- seeding at 0 would let a noise fit pass as a
+            # measured step (review finding F1, 2026-09-03). Also lets
+            # unverified steps (off None) fit at their known local seed.
+            dev = step.get("local_deviation_hz")
+            if dev is None and off is not None:
+                dev = off - (step.get("target_offset_hz") or 0.0)
+            dev = dev or 0.0
+            cands = [dev, -dev] if dev else [0.0]
+        else:
+            cands = [off, -off] if off else [0.0]
         best, best_seed, best_score = None, None, -1.0
         for c in cands:
             r = analyze_noise_block(bundle, e, f0_guess + c, fs_default)
@@ -2117,6 +2515,8 @@ def main(argv=None):
     noise_exps = list(by_role.get("noise", []))
     sweep_exps = sorted(by_role.get("noise_sweep", []),
                         key=lambda e: e.get("expno", 0))
+    cf_mode = bool(sweep_meta.get("carrier_follow"))
+    frame_indeterminate = []
     analyzed = {}         # expno -> (result_or_None, seed_offset_or_None)
     for e in noise_exps:
         analyzed[e.get("expno")] = (analyze_noise_block(
@@ -2124,9 +2524,20 @@ def main(argv=None):
     for e in sweep_exps:
         expno = e.get("expno")
         off = _sweep_measured_of(expno)
-        if off is None:
-            analyzed[expno] = (None, None)   # unverified: no line fit
+        step = _sweep_step_of(expno)
+        has_carrier = bool(step and step.get("carrier_o1_hz") is not None)
+        if cf_mode and not has_carrier:
+            # the sweep declares carrier-follow but this step does not
+            # say where its window was: no frame to fit in (review F2)
+            analyzed[expno] = (None, None)
+            frame_indeterminate.append(expno)
+        elif off is None and not has_carrier:
+            analyzed[expno] = (None, None)   # v0.5: unverified, no fit
         else:
+            # carrier-follow steps fit at their known LOCAL seed even
+            # when the step offset was never verified (review F4): the
+            # window position is commanded digitally, so the local
+            # frame is exact regardless of field verification.
             analyzed[expno] = _analyze_sweep_step(e, off)
 
     headline_order = noise_exps + sorted(
@@ -2143,31 +2554,77 @@ def main(argv=None):
 
     sweep_analysis = None
     if sweep_exps:
+        if cf_mode:
+            note = ("carrier-follow sweep (v0.6): the receiver window "
+                    "tracked each step, so per-step line centers are in "
+                    "the LOCAL moved-window frame (expected near the "
+                    "baseline position) and the physical step offset is "
+                    "measured_offset_hz in the baseline-field frame; "
+                    "the sign convention was resolved once at baseline "
+                    "by the carrier-displacement calibration; steps "
+                    "whose window position is unknown are not fitted; "
+                    "the headline science analysis uses the measured "
+                    "step nearest the baseline field")
+        else:
+            note = ("field-stepped sweep: every step is a distinct "
+                    "axion mass point, line-fitted at its own measured "
+                    "offset (sign resolved empirically per step); "
+                    "steps without a measured offset are listed but "
+                    "not fitted; the headline science analysis uses "
+                    "the measured step nearest the baseline field")
         sweep_analysis = {
             "headline_expno": (noise_res or {}).get("expno"),
+            "carrier_follow": cf_mode,
+            "sign_convention_basis":
+                sweep_meta.get("sign_convention_basis"),
             "baseline_line_offset_hz":
                 sweep_meta.get("baseline_line_offset_hz"),
             "restored_offset_hz": sweep_meta.get("restored_offset_hz"),
             "field_restored": sweep_meta.get("field_restored"),
-            "note": ("field-stepped sweep: every step is a distinct "
-                     "axion mass point, line-fitted at its own measured "
-                     "offset (sign resolved empirically per step); "
-                     "steps without a measured offset are listed but "
-                     "not fitted; the headline science analysis uses "
-                     "the measured step nearest the baseline field"),
+            "note": note,
             "steps": []}
+        if frame_indeterminate:
+            sweep_analysis["frame_indeterminate_expnos"] = \
+                frame_indeterminate
+        unsigned_basis = (
+            sweep_meta.get("sign_convention_basis") == "unresolved")
         for e in sweep_exps:
             expno = e.get("expno")
             r, seed = analyzed.get(expno, (None, None))
             off = _sweep_measured_of(expno)
+            basis = "unverified"
+            if off is not None:
+                basis = "measured"
+                if unsigned_basis:
+                    # the documented v0.6 exception: measured == target,
+                    # confirmed only by an unsigned deviation
+                    basis = "target_confirmed_unsigned"
             entry = {"expno": expno, "measured_offset_hz": off,
-                     "offset_basis": ("measured" if off is not None
-                                      else "unverified"),
+                     "offset_basis": basis,
                      "rows": e.get("td1_rows"), "readable": bool(r)}
             for s in sweep_steps_meta:
                 if s.get("noise_expno") == expno:
                     entry["target_offset_hz"] = s.get("target_offset_hz")
-            if off is None:
+                    if s.get("local_deviation_hz") is not None:
+                        entry["local_deviation_hz"] = s.get(
+                            "local_deviation_hz")
+                    if s.get("note"):
+                        entry["orchestrator_note"] = s.get("note")
+                    if s.get("carrier_o1_hz") is not None:
+                        entry["carrier_o1_hz"] = s.get("carrier_o1_hz")
+                        entry["lock_shift_target_ppm"] = s.get(
+                            "lock_shift_target_ppm")
+            if expno in frame_indeterminate:
+                entry["note"] = ("sweep declares carrier_follow but this "
+                                 "step carries no carrier_o1_hz: window "
+                                 "frame unknown, no line fit (QA WARN)")
+            elif off is None and entry.get("carrier_o1_hz") is not None:
+                entry["note"] = ("step offset never verified -- no "
+                                 "mass-point position is claimed; the "
+                                 "line is still fitted in the (exactly "
+                                 "known) local window frame so the "
+                                 "block serves the line catalog")
+            elif off is None:
                 entry["note"] = ("offset never measured (verification "
                                  "failed or was skipped): no line fit -- "
                                  "an unverified target is not a position")
@@ -2225,6 +2682,52 @@ def main(argv=None):
             % ((" shifted %+.1f Hz for the headline sweep step"
                 % (f0_detect - f0_guess))
                if abs(f0_detect - f0_guess) > 1e-9 else "", w_ref))
+
+    # ---- v0.6 riders: persistent-line catalog, sub-virial pass, and
+    # the axion-mass / axial-vector bookkeeping.
+    catalog_blocks = []
+    base_o1 = sweep_meta.get("baseline_carrier_o1_hz")
+    for e in noise_exps + sweep_exps:
+        expno = e.get("expno")
+        r, seed = analyzed.get(expno, (None, None))
+        if not r:
+            continue
+        step = _sweep_step_of(expno)
+        shift = 0.0
+        if step and step.get("carrier_o1_hz") is not None:
+            # exact commanded window shift; fall back to the target for
+            # writers that record carrier_o1_hz without the baseline
+            if base_o1 is not None:
+                shift = float(step["carrier_o1_hz"]) - float(base_o1)
+            else:
+                shift = float(step.get("target_offset_hz") or 0.0)
+        # spin tag anchored on the FITTED line position when available:
+        # a mis-seeded block must not let the spin line masquerade as a
+        # window-fixed spur (review F4)
+        f0_loc = f0_guess + (seed or 0.0)
+        centers = [pr["fit"]["center_hz"] for pr in r["per_row"]
+                   if "fit" in pr]
+        if centers:
+            f0_loc = float(np.mean(centers))
+        catalog_blocks.append({"expno": expno, "res": r,
+                               "carrier_shift_hz": shift,
+                               "f0_local": f0_loc})
+    line_catalog = (persistent_line_catalog(catalog_blocks, w_ref)
+                    if catalog_blocks else None)
+    subvirial = None
+    if noise_res:
+        head_exp = None
+        for e in noise_exps + sweep_exps:
+            if e.get("expno") == noise_res.get("expno"):
+                head_exp = e
+                break
+        if head_exp is not None:
+            try:
+                subvirial = subvirial_pass(bundle, head_exp, f0_detect,
+                                           w_ref, fs_default)
+            except Exception as exc:
+                subvirial = {"error": str(exc)}
+    mass_book = axion_mass_bookkeeping(meta)
 
     # ---- 4. RG ladder
     ladder = analyze_rg_ladder(bundle, meta, f0_guess, fs_default)
@@ -2295,11 +2798,20 @@ def main(argv=None):
             headline.get("sign_vs_probe_type", "")):
         qa.append({"level": "WARN", "check": "feature sign vs probe type",
                    "detail": headline["sign_vs_probe_type"]})
+    if frame_indeterminate:
+        qa.append({"level": "WARN",
+                   "check": "carrier-follow frame consistency",
+                   "detail": ("field_sweep declares carrier_follow but "
+                              "steps %s carry no carrier_o1_hz -- their "
+                              "window frame is unknown and they were "
+                              "not line-fitted"
+                              % frame_indeterminate)})
 
     # ---- honesty section
     honesty = [
-        "Determined: the receiver's measured noise spectrum around the 1H "
-        "line, the feature contrast (or its upper limit), linewidth, "
+        "Determined: the receiver's measured noise spectrum around the "
+        "observed line, the feature contrast (or its upper limit), "
+        "linewidth, "
         "dispersive admixture, floor calibration against the small-flip "
         "references, and the QA state of the acquisition.",
         "The distance-from-ceiling number is contrast-based and holds for "
@@ -2325,6 +2837,15 @@ def main(argv=None):
         honesty.append("Archival repackage: acquisition predates the network "
                        "protocol; RG ladder and declared temperatures were "
                        "not part of the original session.")
+    if (sweep_analysis
+            and sweep_meta.get("sign_convention_basis") == "unresolved"):
+        honesty.append("Sweep sign convention UNRESOLVED for this session: "
+                       "per-step offsets labeled 'target_confirmed_"
+                       "unsigned' are the commanded targets, confirmed "
+                       "only by an unsigned deviation within the "
+                       "substitution cap -- they are not signed "
+                       "measurements (the documented v0.6 exception to "
+                       "the measured-not-target rule).")
 
     figs = make_figures(noise_res, refs, ladder, detection)
     ctx = {"report_type": report["report_type"], "meta": meta,
@@ -2335,6 +2856,8 @@ def main(argv=None):
            "qa": qa, "figs": figs, "honesty": honesty,
            "names": sorted(bundle.names), "clock": clock,
            "field_sweep": sweep_analysis,
+           "line_catalog": line_catalog, "subvirial": subvirial,
+           "mass_book": mass_book,
            "rd_optimize": (meta.get("calibration") or {}).get("rd_optimize")}
     html = render_html(ctx)
 
@@ -2345,6 +2868,9 @@ def main(argv=None):
         "detection": detection, "headline": headline,
         "temperature_contrast": temp_contrast, "floor_calibration": floor_cal,
         "field_sweep": sweep_analysis,
+        "line_catalog": line_catalog,
+        "subvirial_pass": subvirial,
+        "axion_mass_bookkeeping": mass_book,
         "rd_optimize": (meta.get("calibration") or {}).get("rd_optimize"),
         "qa_flags": qa, "honesty": honesty,
     })

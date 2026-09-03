@@ -104,9 +104,19 @@ SWEEP = False             # True: replace the single noise block with a
                           #     xpy spin_noise_run sweep
                           # Composable with rdopt / simulate / desktest.
 
+AUTOSTEP = False          # True (with SWEEP): TIER-2 programmatic field
+                          # stepping -- the script actuates each lock-
+                          # shift step itself through the documented
+                          # edlock-table + lopo/lock chain, and the
+                          # operator dialogs become the fallback. Every
+                          # step is still verified by measurement.
+                          # Opt-in per session; first hardware use per
+                          # console follows docs/autostep_bench_checklist
+                          # .md. Runtime: xpy spin_noise_run sweep autostep
+
 # Single source of truth for the script version.  KEEP IN SYNC with the
 # repository VERSION file (testing/static_check.py enforces the match).
-SCRIPT_VERSION  = "0.5.2"
+SCRIPT_VERSION  = "0.6.0"
 PROGRAM_VERSION = SCRIPT_VERSION  # alias kept for meta.json 'program_version'
 # This TopSpin orchestrator still writes schema 1.2 bundles (the last
 # Bruker-only schema).  The repository schema is 2.0 (vendor-neutral:
@@ -256,6 +266,8 @@ try:
             RDOPT = True
         if _al in ("sweep", "--sweep", "--lock-sweep"):
             SWEEP = True
+        if _al in ("autostep", "--autostep"):
+            AUTOSTEP = True
 except Exception:
     pass
 
@@ -1140,15 +1152,44 @@ RDOPT_MIN_AMP_FRAC = 0.3      # disqualify tunings with collapsed pickup
 EXP_RDOPT_BASE = 20           # scan 1Ds: 20, 21, ...
 
 SWEEP_STEPS_DEFAULT = 5
-SWEEP_STEPS_MAX = 8
+SWEEP_STEPS_MAX = 15          # verify expnos 31..45, restore 46 (v0.6:
+                              # raised from 8 -- the carrier now FOLLOWS
+                              # each step, so the acquisition band no
+                              # longer limits the ladder)
 SWEEP_SPAN_HZ_DEFAULT = 1500.0
 SWEEP_MIN_STEP_SECS = 300.0
-SWEEP_TOL_FRAC = 0.2          # accept |measured-target| <= max(20%, 30 Hz)
+SWEEP_TOL_FRAC = 0.2          # accept |deviation| <= max(20%, 30 Hz)
 SWEEP_TOL_HZ = 30.0
-SWEEP_SPAN_MAX_HZ = 3000.0    # keep the line inside the +/-SWH/2 band
+SWEEP_SPAN_PPM_MAX = 25.0     # half-span cap, ppm of B0: conservative
+                              # lock-shift excursion (hardware range is
+                              # +/-200 ppm; lock phase/gain calibrated at
+                              # baseline is trusted to ~tens of ppm)
+SWEEP_HOP_MAX_HZ = 4000.0     # max field change per RE-LOCK (autolock
+                              # capture ~8 kHz at 1H; stay at half)
 SWEEP_FU_HZ_EST = 8.0         # ~Hz per BSMS field unit at 1H, std bore
+                              # (scaled by gamma ratio for X nuclei)
+SWEEP_SIGNCAL_HZ = 500.0      # carrier displacement for the sign-
+                              # convention calibration 1D
+EXP_SWEEP_SIGNCAL = 29        # sign-calibration 1D (rdopt tops out 28)
 EXP_SWEEP_VERIFY_BASE = 30    # baseline 30, steps 31.., restore last
 EXP_SWEEP_NOISE_BASE = 50     # one noise block per step: 50, 51, ...
+
+# Observed-nucleus effective gyromagnetic ratios, MHz/T -- ONE
+# CONSISTENT SET, derived from the IUPAC 2001 frequency ratios (Xi, %
+# of the 1H TMS frequency) times 42.5774806: this is what makes the
+# 1H-equivalent field coordinate (h1_freq_mhz) agree between a site's
+# 1H and X-nucleus sessions at the 1e-6 level. Mixed-provenance "bare
+# nucleus" values put a 19F session's field coordinate ~3e-4 off its
+# own magnet's 1H sessions (review finding, 2026-09-03). Signs kept
+# for negative-gamma nuclei; use abs() for magnitudes.
+NUC_GAMMA_MHZ_T = {"1H": 42.5774806,           # Xi = 100.000000
+                   "19F": 40.0628593,          # Xi = 94.094011
+                   "2H": 6.5359026,            # Xi = 15.350609
+                   "13C": 10.7061160,          # Xi = 25.145020
+                   "31P": 17.2356801,          # Xi = 40.480742
+                   "15N": -4.3159800,          # Xi = 10.136767
+                   "7Li": 16.5472256,          # Xi = 38.863797
+                   "23Na": 11.2625526}         # Xi = 26.451900
 
 FID_SKIP_POINTS = 128         # digital-filter charge-up points to skip
 
@@ -1536,11 +1577,620 @@ def run_rdopt_scan(meta, template, dsname, o1_hz, p90_us, p90_db, db_par):
     return expnos, p90_us
 
 
+# ============================================================================
+# Autostep (Tier 2): programmatic lock-shift actuation via the edlock table
+# ============================================================================
+# Mechanism (documented -- TopSpin 2.1 and v014/2020 acquisition
+# references, identical wording): the per-solvent "Distance"/"Shift
+# [ppm]" in <TSHOME>/conf/instr/<instrum>/2Hlock IS the BSMS LOCK
+# SHIFT; `lopo <solvent>` sets it "on the BSMS unit without performing
+# lock-in"; `lock <solvent>` autolocks and adjusts the field to the new
+# setpoint (capture ~1000 field units). Autostep therefore: clones the
+# session solvent's table row as ZZDUMMY (layout-blind -- only the name
+# token changes), finds WHICH column is the shift once per console by
+# using the edlock GUI as the oracle (the operator changes ZZDUMMY's
+# Shift by exactly +1.000 ppm; the one changed numeric column is the
+# answer, cached per instrument), then walks the ladder by rewriting
+# that single number and re-running lopo/lock. The pristine table is
+# snapshotted (memory + a .spinnoise_backup beside it) and byte-restored
+# at the end; no line except ZZDUMMY's is ever rewritten. Lock ON/OFF
+# automation uses two 3-line AU programs built from the DOCUMENTED
+# macros LOCK_ON/LOCK_OFF/SWEEP_OFF, installed and operator-verified
+# once at setup; without them autostep runs semi-attended (one lock-off
+# dialog per step) or locked-and-recorded, the operator's choice.
+# First hardware use on a console family follows
+# docs/autostep_bench_checklist.md. ANY failure at ANY point falls back
+# to the v0.6 operator dialogs for that step -- never an abort.
+
+AUTOSTEP_DUMMY = "ZZDUMMY"
+AUTOSTEP_ORACLE_PPM = 1.0       # GUI-oracle displacement (column detect)
+AUTOSTEP_LOCKIN_WAIT_S = 25     # autolock settle before verification
+AUTOSTEP_CACHE_NAME = "spin_noise_autostep_cache.txt"
+AUTOSTEP_STATE = None         # set by autostep_setup; the module
+                              # crash handler uses it to put the
+                              # facility lock table back.
+
+AU_SN_LOCKOFF = "GETCURDATA\nLOCK_OFF\nQUIT\n"
+AU_SN_LOCKON = "GETCURDATA\nLOCK_ON\nQUIT\n"
+AU_SN_SWEEPOFF = "GETCURDATA\nSWEEP_OFF\nQUIT\n"
+
+
+def _read_text(path):
+    try:
+        f = open(path, "r")
+        txt = f.read()
+        f.close()
+        return txt
+    except Exception:
+        return None
+
+
+def _write_text(path, txt):
+    try:
+        f = open(path, "w")
+        f.write(txt)
+        f.close()
+        return 1
+    except Exception:
+        return 0
+
+
+def sleep_s(seconds):
+    """SLEEP() guarded: its availability across TopSpin generations is
+    not guaranteed, and an autostep NameError would crash a session
+    mid-ladder with the lock table still holding the dummy row."""
+    try:
+        SLEEP(seconds)
+    except Exception:
+        pass
+
+
+def find_tshome():
+    """TopSpin home, by the same heuristics as find_pp_user_dir."""
+    cands = []
+    try:
+        if IN_TOPSPIN:
+            p = java.lang.System.getProperty("XWINNMRHOME")
+            if p:
+                cands.append(str(p))
+    except Exception:
+        pass
+    for env in ("XWINNMRHOME", "TOPSPIN_HOME", "TS_HOME"):
+        try:
+            p = os.environ.get(env)
+            if p:
+                cands.append(p)
+        except Exception:
+            pass
+    for c in cands:
+        if os.path.isdir(os.path.join(c, "conf", "instr")):
+            return c
+    return None
+
+
+def autostep_lock_table_path():
+    """<TSHOME>/conf/instr/<instrum>/2Hlock for the current instrument
+    (from conf/instr/curinst), else the sole instrument dir that has a
+    2Hlock file. None when undiscoverable."""
+    ts = find_tshome()
+    if ts is None:
+        return None
+    idir = os.path.join(ts, "conf", "instr")
+    txt = _read_text(os.path.join(idir, "curinst"))
+    if txt:
+        name = txt.strip().splitlines()[0].strip()
+        if name:
+            p = os.path.join(idir, name, "2Hlock")
+            if os.path.isfile(p):
+                return p
+    hits = []
+    try:
+        for d in os.listdir(idir):
+            p = os.path.join(idir, d, "2Hlock")
+            if os.path.isfile(p):
+                hits.append(p)
+    except Exception:
+        pass
+    if len(hits) == 1:
+        return hits[0]
+    return None
+
+
+def _autostep_find_row(lines, name):
+    """Index of the table line whose first token is `name` (case-
+    insensitive); -1 when absent. Comment lines are skipped."""
+    name_l = name.lower()
+    i = 0
+    while i < len(lines):
+        st = lines[i].strip()
+        if st and st[0] not in ("#", ";", "$"):
+            toks = st.split()
+            if toks and toks[0].lower() == name_l:
+                return i
+        i += 1
+    return -1
+
+
+def _autostep_put_dummy(txt, fields):
+    """Replace (or append) the ZZDUMMY line; every other line is kept
+    byte-identical."""
+    lines = txt.splitlines()
+    made = " ".join(fields)
+    i = _autostep_find_row(lines, AUTOSTEP_DUMMY)
+    if i >= 0:
+        lines[i] = made
+    else:
+        lines.append(made)
+    return "\n".join(lines) + "\n"
+
+
+def _autostep_cache_path():
+    ts = find_tshome()
+    if ts is None:
+        return None
+    d = os.path.join(ts, "exp", "stan", "nmr", "py", "user")
+    if os.path.isdir(d):
+        return os.path.join(d, AUTOSTEP_CACHE_NAME)
+    return None
+
+
+def _autostep_cache_get(instr):
+    """(column, n_columns) for this instrument, or None. The column
+    COUNT is a layout fingerprint: a TopSpin upgrade that changes the
+    table's columns must invalidate the cached index, or shift values
+    would be written into a different BSMS parameter."""
+    p = _autostep_cache_path()
+    if p is None:
+        return None
+    txt = _read_text(p)
+    if not txt:
+        return None
+    for ln in txt.splitlines():
+        toks = ln.strip().split("\t")
+        if len(toks) == 3 and toks[0] == instr:
+            c = to_int(toks[1])
+            n = to_int(toks[2])
+            if c is not None and n is not None:
+                return (c, n)
+    return None
+
+
+def _autostep_cache_put(instr, col, ncols):
+    p = _autostep_cache_path()
+    if p is None:
+        return
+    txt = _read_text(p) or ""
+    out = []
+    for ln in txt.splitlines():
+        toks = ln.strip().split("\t")
+        if not (len(toks) >= 1 and toks[0] == instr):
+            out.append(ln)
+    out.append("%s\t%d\t%d" % (instr, col, ncols))
+    _write_text(p, "\n".join(out) + "\n")
+
+
+def autostep_install_lock_aus():
+    """Write the three lock-control AU programs (documented macros
+    only) into the user AU source dir. Returns 1 when written."""
+    ts = find_tshome()
+    if ts is None:
+        return 0
+    for d in (os.path.join(ts, "exp", "stan", "nmr", "au", "src", "user"),
+              os.path.join(ts, "exp", "stan", "nmr", "au", "src")):
+        base = os.path.dirname(d)
+        if not os.path.isdir(base):
+            continue
+        if not os.path.isdir(d):
+            try:
+                os.makedirs(d)
+            except Exception:
+                continue
+        ok = 1
+        for name, body in (("sn_lockoff", AU_SN_LOCKOFF),
+                           ("sn_lockon", AU_SN_LOCKON),
+                           ("sn_sweepoff", AU_SN_SWEEPOFF)):
+            if not _write_text(os.path.join(d, name), body):
+                ok = 0
+        if ok:
+            return 1
+    return 0
+
+
+def _autostep_write_shift(st, val_ppm):
+    """Write one shift value into the ZZDUMMY row. The file is re-read
+    every time, so edits to OTHER rows made during the session survive."""
+    fields = st["fields"][:]
+    fields[st["shift_col"]] = "%.3f" % val_ppm
+    txt = _read_text(st["path"])
+    if txt is None:
+        return 0
+    if not _write_text(st["path"], _autostep_put_dummy(txt, fields)):
+        return 0
+    st["fields"] = fields
+    return 1
+
+
+def _autostep_push_and_lock(st, describe):
+    """lopo (push the shift to the BSMS) + autolock + settle."""
+    ok1, _r = safe_hw_cmd("noqu lopo %s" % AUTOSTEP_DUMMY,
+                          "autostep: lopo (%s)" % describe)
+    sleep_s(2)
+    ok2, _r = safe_hw_cmd("noqu lock %s" % AUTOSTEP_DUMMY,
+                          "autostep: autolock (%s)" % describe)
+    sleep_s(AUTOSTEP_LOCKIN_WAIT_S)
+    if ok2:
+        return 1
+    if ok1:
+        return 1
+    return 0
+
+
+def autostep_goto(st, val_ppm, describe):
+    """Walk the lock shift from st['cur_shift'] to val_ppm in hops no
+    larger than st['hop_ppm'], re-locking at every hop.
+
+    Autolock capture (~8 kHz expressed at 1H) is a FIELD limit, so one
+    large jump -- the ladder's entry step, or the return to baseline --
+    can miss capture entirely and strand the field. The operator
+    dialogs have carried hop instructions since v0.6; the programmatic
+    path must obey the same discipline (review finding, 2026-09-03)."""
+    hop = st["hop_ppm"]
+    if hop is None or hop <= 0:
+        hop = abs(val_ppm - st["cur_shift"]) + 1.0
+    guard = 0
+    while guard < 400:
+        guard += 1
+        d = val_ppm - st["cur_shift"]
+        if abs(d) <= hop:
+            nxt = val_ppm
+        elif d > 0:
+            nxt = st["cur_shift"] + hop
+        else:
+            nxt = st["cur_shift"] - hop
+        if not _autostep_write_shift(st, nxt):
+            return 0
+        ok = _autostep_push_and_lock(st, describe)
+        st["cur_shift"] = nxt
+        if not ok:
+            return 0
+        if abs(nxt - val_ppm) < 1e-9:
+            return 1
+    return 0
+
+
+def _autostep_lock_off(st):
+    """Automated lock off + sweep off after an actuation. Returns the
+    HONEST lock state for the record; on failure the session degrades
+    to the semi-attended dialog rather than asserting 'off'."""
+    if not st["au_lock"]:
+        if st["keep_locked"]:
+            return "on_recorded"
+        return "off_operator"
+    ok, _r = safe_hw_cmd("xau sn_lockoff", "autostep: lock off")
+    sleep_s(2)
+    # Unlocking re-enables the BSMS sweep on many consoles (the 2022
+    # incident): always follow a lock-off with a sweep-off.
+    ok2, _r = safe_hw_cmd("xau sn_sweepoff",
+                          "autostep: sweep off after unlock")
+    if not ok:
+        st["au_lock"] = 0
+        st["semi"] = 1
+        say("autostep: automatic lock-off FAILED -- degrading to the "
+            "semi-attended dialog for the rest of the run")
+        return "unknown_lockoff_failed"
+    if not ok2:
+        return "off_sweep_unconfirmed"
+    return "off"
+
+
+def _autostep_clean_table(st):
+    """Remove the dummy row from a FRESH read (so unrelated edits made
+    during the session survive) and drop the backup file. Falls back to
+    the setup-time snapshot only if the fresh read fails."""
+    done = 0
+    txt = _read_text(st["path"])
+    if txt is not None:
+        lines = txt.splitlines()
+        i = _autostep_find_row(lines, AUTOSTEP_DUMMY)
+        if i >= 0:
+            del lines[i]
+        done = _write_text(st["path"], "\n".join(lines) + "\n")
+    if not done:
+        done = _write_text(st["path"], st["snapshot"])
+    try:
+        os.remove(st["path"] + ".spinnoise_backup")
+    except Exception:
+        pass
+    return done
+
+
+def autostep_emergency_cleanup():
+    """Called by the module crash handler: put the facility's lock
+    table back even when the session dies mid-ladder. Without this a
+    crash leaves ZZDUMMY in the live table, and the NEXT run snapshots
+    the polluted file -- making the leak permanent."""
+    st = AUTOSTEP_STATE
+    if not st:
+        return 0
+    if not st.get("path") or not st.get("snapshot"):
+        return 0
+    if st.get("cleaned"):
+        return 0
+    st["cleaned"] = 1
+    return _autostep_clean_table(st)
+
+
+def autostep_setup(meta, sweep, bf1_mhz, hop_hz):
+    """Prepare programmatic lock-shift actuation. Returns a state dict;
+    state['available'] == 0 means every step falls back to the operator
+    dialogs (reason recorded in meta)."""
+    global AUTOSTEP_STATE
+    st = {"available": 0, "path": None, "snapshot": None, "solvent": None,
+          "fields": None, "shift_col": None, "base_shift": None,
+          "cur_shift": None, "hop_ppm": None, "actuator_sign": 0,
+          "au_lock": 0, "keep_locked": 0, "semi": 0, "instr": None,
+          "cleaned": 0}
+    rec = {"requested": True, "available": False, "tier": "edlock_lopo",
+           "fallback_reason": None, "events": []}
+    sweep["autostep"] = rec
+
+    def _bail(reason):
+        rec["fallback_reason"] = reason
+        say("autostep: %s -- operator dialogs will be used" % reason)
+        return st
+
+    def _bail_clean(reason):
+        # every bail AFTER the snapshot must leave the facility's table
+        # exactly as it was found (and take the backup file with it)
+        _autostep_clean_table(st)
+        st["cleaned"] = 1
+        return _bail(reason)
+
+    if hw_skip():
+        return _bail("mock mode (%s): no hardware actuation"
+                     % hw_mode_name())
+    path = autostep_lock_table_path()
+    if path is None:
+        return _bail("lock table conf/instr/<instrum>/2Hlock not found")
+    txt = _read_text(path)
+    if txt is None:
+        return _bail("lock table unreadable: %s" % path)
+
+    # Leftovers from a crashed earlier run: recover BEFORE snapshotting,
+    # or the stale row is baked into this run's snapshot for good.
+    bak = path + ".spinnoise_backup"
+    stale_row = _autostep_find_row(txt.splitlines(), AUTOSTEP_DUMMY) >= 0
+    stale_bak = os.path.isfile(bak)
+    if stale_row or stale_bak:
+        sel = ask_select(
+            "spin-noise sweep: autostep leftovers found",
+            "A previous autostep run did not clean up after itself\n"
+            "(row '%s' present: %s; backup file present: %s).\n"
+            "That usually means the earlier session crashed.\n\n"
+            "Recommended: restore the lock table now. Nothing else in\n"
+            "the table is touched."
+            % (AUTOSTEP_DUMMY, ["no", "yes"][int(stale_row)],
+               ["no", "yes"][int(stale_bak)]),
+            ["Restore the table, then continue",
+             "Leave it alone -- run attended (dialogs)"], 0)
+        if sel == 1:
+            return _bail("leftovers present, operator declined recovery")
+        rec_st = {"path": path, "snapshot": _read_text(bak) or txt}
+        _autostep_clean_table(rec_st)
+        txt = _read_text(path)
+        if txt is None:
+            return _bail("lock table unreadable after recovery")
+        say("autostep: recovered the lock table from a previous run")
+
+    solvent = to_text(getpar("SOLVENT")).strip().strip("<>")
+    if not solvent:
+        return _bail("SOLVENT parameter unreadable")
+    lines = txt.splitlines()
+    si = _autostep_find_row(lines, solvent)
+    if si < 0:
+        return _bail("solvent '%s' has no row in %s" % (solvent, path))
+
+    sel = ask_select(
+        "spin-noise sweep: autostep (Tier 2)",
+        "AUTOSTEP will actuate every field step ITSELF:\n"
+        "it adds a clone of your solvent's row ('%s') to the lock\n"
+        "table, rewrites only that row's Shift per step, and runs the\n"
+        "standard 'lopo' + 'lock' commands (autolock carries the\n"
+        "field, in safe hops). The table is restored at the end;\n"
+        "every step is still verified by measurement, and any failure\n"
+        "falls back to the usual dialogs.\n\n"
+        "First use on a console family should follow\n"
+        "docs/autostep_bench_checklist.md.\n\n"
+        "Attended mode is the default -- choose AUTOSTEP only if you\n"
+        "mean it." % AUTOSTEP_DUMMY,
+        ["Attended mode (dialogs, as before)",
+         "Enable autostep"], 0)
+    if sel != 1:
+        return _bail("attended mode chosen (autostep not enabled)")
+
+    st["path"] = path
+    st["snapshot"] = txt
+    st["solvent"] = solvent
+    st["instr"] = os.path.basename(os.path.dirname(path))
+    st["hop_ppm"] = None
+    if hop_hz and bf1_mhz:
+        st["hop_ppm"] = abs(hop_hz) / abs(bf1_mhz)
+    AUTOSTEP_STATE = st
+    _write_text(bak, txt)
+
+    sol_fields = lines[si].strip().split()
+    fields = sol_fields[:]
+    fields[0] = AUTOSTEP_DUMMY
+    if not _write_text(path, _autostep_put_dummy(txt, fields)):
+        # a failed write may have truncated the file: put it back
+        return _bail_clean("lock table not writable (permissions?)")
+    st["fields"] = fields
+
+    col = None
+    cached = _autostep_cache_get(st["instr"])
+    if cached is not None:
+        c_col, c_ncols = cached
+        # the layout fingerprint guards against a TopSpin upgrade that
+        # changes the column set: a stale index would push shift values
+        # into (say) the lock-power column
+        if c_ncols == len(fields) and 1 <= c_col < len(fields) \
+                and to_float(fields[c_col]) is not None:
+            col = c_col
+        else:
+            say("autostep: cached column ignored (table layout changed)")
+    if col is None:
+        sel = ask_select(
+            "spin-noise sweep: autostep one-time calibration",
+            "This console's lock-table column layout is not yet known.\n"
+            "One-time calibration (cached afterwards):\n\n"
+            "1. Type 'edlock' -- the lock table opens.\n"
+            "2. Find the new row '%s' (clone of %s).\n"
+            "3. Set ITS Shift/Distance value to EXACTLY %.3f ppm MORE\n"
+            "   than it currently shows, save/close edlock.\n\n"
+            "The script detects which column changed."
+            % (AUTOSTEP_DUMMY, solvent, AUTOSTEP_ORACLE_PPM),
+            ["Done -- detect the column", "Cancel autostep"], 0)
+        if sel == 1:
+            return _bail_clean("declined at column calibration")
+        txt2 = _read_text(path) or ""
+        lines2 = txt2.splitlines()
+        di = _autostep_find_row(lines2, AUTOSTEP_DUMMY)
+        if di < 0:
+            return _bail_clean("dummy row missing after calibration edit")
+        f2 = lines2[di].strip().split()
+        changed = []
+        if len(f2) == len(fields):
+            kk = 1
+            while kk < len(fields):
+                if f2[kk] != fields[kk]:
+                    a = to_float(fields[kk])
+                    b = to_float(f2[kk])
+                    if a is not None and b is not None and \
+                            abs((b - a) - AUTOSTEP_ORACLE_PPM) < 0.01:
+                        changed.append(kk)
+                kk += 1
+        if len(changed) != 1:
+            return _bail_clean("column calibration ambiguous "
+                               "(%d candidates)" % len(changed))
+        col = changed[0]
+        st["fields"] = f2
+        _autostep_cache_put(st["instr"], col, len(f2))
+        say("autostep: shift column %d cached for instrument %s"
+            % (col, st["instr"]))
+    st["shift_col"] = col
+    st["base_shift"] = to_float(sol_fields[col])
+    if st["base_shift"] is None:
+        return _bail_clean("solvent row's shift column is not numeric")
+    st["cur_shift"] = st["base_shift"]
+
+    # Lock ON/OFF automation: documented AU macros, operator-verified
+    # once while the operator is still present.
+    if autostep_install_lock_aus():
+        say("autostep: testing lock-control AU programs (watch the "
+            "lock display)")
+        safe_hw_cmd("xau sn_lockon", "AU self-test: lock on")
+        sleep_s(4)
+        safe_hw_cmd("xau sn_lockoff", "AU self-test: lock off")
+        sleep_s(2)
+        safe_hw_cmd("xau sn_sweepoff", "AU self-test: sweep off")
+        sel = ask_select(
+            "spin-noise sweep: autostep lock control",
+            "The script just ran its lock-control programs.\n"
+            "On the lock display: did the lock turn ON and then OFF\n"
+            "again just now?\n\n"
+            "Answer 'yes' ONLY if you actually watched it happen.",
+            ["No / not sure",
+             "Yes -- I watched it lock and unlock"], 0)
+        if sel == 1:
+            st["au_lock"] = 1
+    if not st["au_lock"]:
+        sel = ask_select(
+            "spin-noise sweep: autostep lock handling",
+            "Automatic lock OFF is not available. Choose how to run:",
+            ["Semi-attended: one 'turn lock off' dialog per step",
+             "Keep the lock ON during noise blocks (recorded -- lock "
+             "rf can leak into the observe channel on some systems)"],
+            0)
+        if sel == 1:
+            st["keep_locked"] = 1
+        else:
+            st["semi"] = 1
+
+    st["available"] = 1
+    rec["available"] = True
+    rec["instrument"] = st["instr"]
+    rec["shift_column"] = col
+    rec["hop_ppm"] = st["hop_ppm"]
+    rec["lock_control"] = "au"
+    if st["keep_locked"]:
+        rec["lock_control"] = "locked_recorded"
+    if st["semi"]:
+        rec["lock_control"] = "semi_attended"
+    say("autostep: enabled (column %d, lock control: %s, hop <= %s ppm)"
+        % (col, rec["lock_control"], st["hop_ppm"]))
+    return st
+
+
+def autostep_actuate(st, sweep, target_hz, bf1_mhz, k):
+    """One programmatic field step: walk the lock shift to the step's
+    setpoint in safe hops, then lock off per the chosen mode. Returns 1
+    when the command chain executed, 0 to trigger the dialog fallback."""
+    sign = st["actuator_sign"]
+    if sign == 0:
+        sign = 1
+    val = st["base_shift"] + sign * (target_hz / bf1_mhz)
+    ok = autostep_goto(st, val, "step %d" % (k + 1))
+    lock_state = "on"
+    if ok:
+        lock_state = _autostep_lock_off(st)
+    try:
+        sweep["autostep"]["events"].append(
+            {"step": k, "shift_ppm_written": val,
+             "actuator_sign": sign, "lock_state": lock_state,
+             "actuated": bool(ok)})
+    except Exception:
+        pass
+    return ok
+
+
+def autostep_restore(st, sweep):
+    """Walk the field back to baseline in safe hops, then remove the
+    dummy row and re-lock the real solvent."""
+    walked = 0
+    try:
+        if st.get("cur_shift") is not None:
+            walked = autostep_goto(st, st["base_shift"],
+                                   "return to baseline")
+    except Exception:
+        walked = 0
+    cleaned = 0
+    try:
+        cleaned = _autostep_clean_table(st)
+        st["cleaned"] = 1
+        safe_hw_cmd("noqu lopo %s" % st["solvent"],
+                    "autostep: restore solvent lock parameters")
+        sleep_s(2)
+        safe_hw_cmd("noqu lock %s" % st["solvent"],
+                    "autostep: re-lock baseline")
+        sleep_s(AUTOSTEP_LOCKIN_WAIT_S)
+        if st["au_lock"]:
+            safe_hw_cmd("xau sn_lockoff", "autostep: lock off")
+            sleep_s(2)
+            safe_hw_cmd("xau sn_sweepoff", "autostep: sweep off")
+    except Exception:
+        pass
+    try:
+        sweep["autostep"]["restored_table"] = bool(cleaned)
+        sweep["autostep"]["returned_to_baseline"] = bool(walked)
+    except Exception:
+        pass
+
+
 def sweep_verify_1d(meta, template, dsname, expno, o1_hz,
-                    p90_us, p90_db, db_par):
+                    p90_us, p90_db, db_par, role="sweep_verify"):
     """Verification 1D for one field step: acquire and measure the
     dominant-line offset from the carrier. None in mock modes."""
-    d = acquire_quick_1d(meta, template, dsname, expno, "sweep_verify",
+    d = acquire_quick_1d(meta, template, dsname, expno, role,
                          o1_hz, p90_us, p90_db, db_par)
     if hw_skip():
         return None
@@ -1550,12 +2200,51 @@ def sweep_verify_1d(meta, template, dsname, expno, o1_hz,
     return fid_dominant_offset_hz(pts, 1.0 / SWH_HZ, FID_SKIP_POINTS)
 
 
+def sweep_sign_calibration(meta, template, dsname, o1_hz, p90_us,
+                           p90_db, db_par, base_off):
+    """Resolve the pulse-pair estimator's sign convention
+    DETERMINISTICALLY, with no operator action: acquire one quick 1D
+    with the CARRIER moved +SWEEP_SIGNCAL_HZ and the field untouched.
+    In physical convention the line's apparent offset must DROP by
+    exactly that much; an estimator that reads a RISE instead is
+    sign-flipped (a receiver property, fixed for the session).
+
+    This replaces the v0.5 inference from the operator's first large
+    field step, which the carrier-follow sweep breaks: once the window
+    tracks each step, a correctly-set step reads ~zero local offset
+    under EITHER convention and carries no sign information.
+
+    The displacement direction is chosen TOWARD the line (disp_hz has
+    the sign of the baseline offset), so a line sitting near a band
+    edge moves toward center rather than out of the window -- an
+    out-of-band line would alias and leave the whole session
+    sign-unresolved (review finding, 2026-09-03).
+
+    Returns +1 (physical), -1 (flipped), or 0 (unresolved: mock modes,
+    unreadable data, or an ambiguous measurement)."""
+    disp_hz = SWEEP_SIGNCAL_HZ
+    if base_off is not None and base_off < 0:
+        disp_hz = -SWEEP_SIGNCAL_HZ
+    off = sweep_verify_1d(meta, template, dsname, EXP_SWEEP_SIGNCAL,
+                          o1_hz + disp_hz, p90_us, p90_db,
+                          db_par, role="sweep_signcal")
+    if off is None or base_off is None:
+        return 0
+    d = off - base_off
+    if abs(-d - disp_hz) < 0.3 * SWEEP_SIGNCAL_HZ:
+        return 1
+    if abs(d - disp_hz) < 0.3 * SWEEP_SIGNCAL_HZ:
+        return -1
+    return 0
+
+
 def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
-                    db_par, noise_secs, fallback_rg, bf1_mhz):
+                    db_par, noise_secs, fallback_rg, bf1_mhz,
+                    autostep_requested=0):
     """Field-stepped noise blocks: every step is its own axion mass
     point. The operator steps the field via the LOCK REFERENCE; the
-    script verifies each step by measuring the water line, then records
-    a pulse-free noise block.
+    script verifies each step by measuring the sample's line, then
+    records a pulse-free noise block.
 
     Field mechanics (BSMS manuals): the lock servo holds B0 wherever
     the 2H lock REFERENCE says -- it constrains nothing about the 1H
@@ -1575,21 +2264,49 @@ def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
     a receiver property: it is resolved against the operator's shift
     direction on the first large step and recorded.
 
+    v0.6 -- SPECTRAL TILING: the receiver carrier FOLLOWS each step
+    (per-step O1 = baseline O1 + target), so the line stays centered in
+    the acquisition window at every step and the window no longer
+    limits the span. The half-span cap is now a conservative
+    lock-shift excursion (SWEEP_SPAN_PPM_MAX ppm of B0), and each
+    individual RE-LOCK jump is limited to SWEEP_HOP_MAX_HZ (autolock
+    capture safety) -- larger entry/exit jumps are made in hops. The
+    estimator's sign convention is resolved deterministically at the
+    baseline by a carrier-displacement calibration 1D (no operator
+    action), because carrier-follow removes the sign information the
+    v0.5 first-large-step inference relied on.
+
     Fills meta['field_sweep']; returns (verify_expnos, noise_expnos),
     or None when the operator declines the sweep at the baseline
     dialog (the caller then falls back to the standard single noise
     block -- nothing already acquired is ever thrown away)."""
     say("field sweep: planning")
+    nuc = "1H"
+    try:
+        nuc = ((meta.get("spectrometer") or {}).get("observe_nucleus")
+               or "1H")
+    except Exception:
+        pass
+    gam = abs(NUC_GAMMA_MHZ_T.get(nuc, 42.5774806))
+    # Autolock capture is a FIELD excursion (~8 kHz expressed at 1H), so
+    # the safe per-re-lock hop in OBSERVED-nucleus Hz scales DOWN with
+    # gamma: a "4000 Hz" hop on a 13C axis would be a ~16 kHz
+    # 1H-equivalent field jump, double the capture range (review
+    # finding, 2026-09-03). Same scaling for the field-unit estimate.
+    hop_hz = SWEEP_HOP_MAX_HZ * gam / 42.5774806
+    fu_est = SWEEP_FU_HZ_EST * gam / 42.5774806
+    span_cap = SWEEP_SPAN_PPM_MAX * bf1_mhz
     f = ask_fields(
         "spin-noise sweep: plan",
         "Field-stepped noise blocks -- each step is a separate axion\n"
         "mass point. Steps are spread evenly over +/- the half-span,\n"
-        "low to high. The half-span is capped at %.0f Hz: the\n"
-        "acquisition band is +/-%.0f Hz around the carrier and the\n"
-        "line must stay comfortably inside it to be verifiable.\n"
-        "(The BSMS FIELD range itself is far larger, ~+/-80 kHz at 1H\n"
-        "on a standard-bore magnet.)"
-        % (SWEEP_SPAN_MAX_HZ, SWH_HZ / 2.0),
+        "low to high, and the receiver carrier FOLLOWS each step, so\n"
+        "the line stays centered in the acquisition window however\n"
+        "far the ladder reaches. The half-span is capped at %.0f Hz\n"
+        "(%.0f ppm of B0 -- a conservative lock-shift excursion; the\n"
+        "hardware range is +/-200 ppm). Steps larger than %.0f Hz\n"
+        "per re-lock are reached in hops."
+        % (span_cap, SWEEP_SPAN_PPM_MAX, hop_hz),
         ["Number of steps (2-%d)" % SWEEP_STEPS_MAX, "Half-span (Hz)"],
         [str(SWEEP_STEPS_DEFAULT), "%.0f" % SWEEP_SPAN_HZ_DEFAULT])
     nsteps = to_int(f[0], SWEEP_STEPS_DEFAULT)
@@ -1598,10 +2315,17 @@ def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
     if nsteps > SWEEP_STEPS_MAX:
         nsteps = SWEEP_STEPS_MAX
     span = abs(to_float(f[1], SWEEP_SPAN_HZ_DEFAULT))
-    if span > SWEEP_SPAN_MAX_HZ:
-        say("sweep: half-span %.0f Hz capped to %.0f Hz (acquisition "
-            "band)" % (span, SWEEP_SPAN_MAX_HZ))
-        span = SWEEP_SPAN_MAX_HZ
+    if span > span_cap:
+        say("sweep: half-span %.0f Hz capped to %.0f Hz (%.0f ppm "
+            "lock-shift excursion cap)"
+            % (span, span_cap, SWEEP_SPAN_PPM_MAX))
+        span = span_cap
+    # adjacent-step increment must stay inside one re-lock hop
+    if nsteps > 1 and 2.0 * span / (nsteps - 1) > hop_hz:
+        span = (nsteps - 1) * hop_hz / 2.0
+        say("sweep: half-span clamped to %.0f Hz so adjacent steps "
+            "stay within one %.0f Hz re-lock hop (add steps for a "
+            "wider ladder)" % (span, hop_hz))
     targets = []
     for k in range(nsteps):
         if nsteps > 1:
@@ -1633,19 +2357,25 @@ def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
         return None
 
     sweep = {"enabled": True, "requested_half_span_hz": span,
+             "carrier_follow": True, "span_cap_hz": span_cap,
+             "baseline_carrier_o1_hz": o1_hz,
              "per_step_secs": per_secs, "baseline_line_offset_hz": None,
              "steps": [], "restored_offset_hz": None,
              "field_restored": None, "ended_early": False,
              "sign_convention_flip": None,
-             "note": ("measured offsets are pulse-pair line measurements "
-                      "relative to the baseline verification; the sign "
-                      "convention (a receiver property) is resolved "
-                      "against the operator's shift direction on the "
-                      "first large step and recorded as "
-                      "sign_convention_flip; targets are never "
-                      "substituted for measurements; steps are "
-                      "lock-shift-referenced (1 ppm = BF1 Hz at "
-                      "1H) with unlocked FIELD steps as fallback")}
+             "sign_convention_basis": None,
+             "note": ("v0.6 carrier-follow sweep: per-step O1 = baseline "
+                      "O1 + target (recorded as carrier_o1_hz), so each "
+                      "verification measures the line's LOCAL offset in "
+                      "the moved window; the physical offset from "
+                      "baseline is target + sign*local_deviation. The "
+                      "estimator sign convention (a receiver property) "
+                      "is resolved by a carrier-displacement calibration "
+                      "1D at the baseline; targets are never substituted "
+                      "for measurements; steps are lock-shift-referenced "
+                      "(1 ppm of lock shift = BF1 Hz at the observed "
+                      "nucleus, exact) with unlocked FIELD steps as "
+                      "fallback")}
     meta["field_sweep"] = sweep
 
     verify_expnos = [EXP_SWEEP_VERIFY_BASE]
@@ -1654,6 +2384,26 @@ def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
                                p90_us, p90_db, db_par)
     sweep["baseline_line_offset_hz"] = base_off
 
+    # Deterministic sign-convention calibration (no operator action):
+    # one quick 1D at a displaced carrier, field untouched.
+    say("sweep: sign-convention calibration (carrier-displacement 1D)")
+    sflip = sweep_sign_calibration(meta, template, dsname, o1_hz,
+                                   p90_us, p90_db, db_par, base_off)
+    verify_expnos.append(EXP_SWEEP_SIGNCAL)
+    if sflip:
+        sweep["sign_convention_flip"] = sflip
+        sweep["sign_convention_basis"] = "carrier_displacement_calibration"
+        say("sweep: estimator sign convention resolved (%+d)" % sflip)
+    else:
+        sweep["sign_convention_basis"] = "unresolved"
+        say("sweep: sign calibration unresolved (mock mode or ambiguous "
+            "measurement) -- step deviations will be recorded unsigned")
+
+    # Tier-2 programmatic actuation (opt-in; dialogs are the fallback).
+    ast = None
+    if autostep_requested:
+        ast = autostep_setup(meta, sweep, bf1_mhz, hop_hz)
+
     aq_row = TD_ROW / (2.0 * SWH_HZ)
     row_secs = aq_row + 2.0 * D1_NOISE_S + ROW_OVERHEAD_S
     n_rows = int(per_secs / row_secs)
@@ -1661,83 +2411,200 @@ def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
         n_rows = 4
     noise_expnos = []
     noise_rg = None
-    sflip = 0            # 0 = unresolved; +1/-1 once a big step lands
+    last_set_hz = 0.0
 
     for k in range(nsteps):
         target = targets[k]
+        o1_step = o1_hz + target       # carrier follows the step
         measured = None
-        raw_rel = None
+        local_dev = None
+        off = None
+        measured_note = None
         skipped = 0
         ended = 0
         attempt = 0
+        # jump size from the previously SET field (baseline for k=0)
+        prev_hz = 0.0
+        if k > 0:
+            prev_hz = targets[k - 1]
+        jump = target - prev_hz
+        hop_text = ""
+        if abs(jump) > hop_hz:
+            nhops = int(abs(jump) / hop_hz) + 1
+            hop_text = ("   NOTE -- this jump (%+.0f Hz) exceeds one\n"
+                        "   safe re-lock: walk the SHIFT there in %d\n"
+                        "   hops of <= %.3f ppm, re-locking at every\n"
+                        "   hop. (Lock-shift path ONLY -- on the FIELD\n"
+                        "   fallback below, dial the whole change in\n"
+                        "   one go and do NOT re-lock.)\n"
+                        % (jump, nhops, hop_hz / bf1_mhz))
+        auto_used = 0
+        auto_retry = 0
+        if ast is not None and ast["available"]:
+            auto_used = autostep_actuate(ast, sweep, target, bf1_mhz, k)
+            if not auto_used:
+                say("autostep: step %d actuation failed -- operator "
+                    "dialog fallback" % (k + 1))
         while 1:
             attempt += 1
-            sel = ask_select(
-                "spin-noise sweep: set field step",
-                "Step %d of %d -- target shift %+.0f Hz from baseline.\n\n"
-                "PRIMARY (lock-referenced): set the LOCK SHIFT to\n"
-                "%+.3f ppm relative to its baseline value, RE-LOCK\n"
-                "(autolock carries the field to the new reference --\n"
-                "1 ppm = %.0f Hz at 1H, exact), then turn the LOCK OFF\n"
-                "again.\n\n"
-                "FALLBACK (no accessible shift mode): with the lock\n"
-                "OFF, change the FIELD value by about %+.0f units\n"
-                "(~8 Hz/unit at 1H, std bore) and do NOT re-lock.\n\n"
-                "Give the field a few seconds to settle, then continue.\n"
-                "(The script measures the actual shift next -- the\n"
-                "MEASURED value is what enters the record; a wrong sign\n"
-                "convention is resolved by the measurement.)"
-                % (k + 1, nsteps, target, target / bf1_mhz, bf1_mhz,
-                   target / SWEEP_FU_HZ_EST),
-                ["Field is set -- measure it",
-                 "End the sweep here (keep everything acquired so far)"],
-                0)
-            if sel == 1:
-                ended = 1
-                break
+            if auto_used:
+                if ast["semi"]:
+                    sel = ask_select(
+                        "spin-noise sweep: lock off",
+                        "Step %d/%d was set automatically (shift "
+                        "written,\nautolock done).\n\n"
+                        "1. Turn the LOCK OFF now.\n"
+                        "2. Check the BSMS display: unlocking RE-ENABLES\n"
+                        "   the field sweep on many consoles -- make "
+                        "sure\n   SWEEP is OFF before continuing (the "
+                        "2022\n   incident that voided weeks of data)."
+                        % (k + 1, nsteps),
+                        ["Lock is OFF and sweep is OFF -- measure it",
+                         "End the sweep here (keep everything acquired "
+                         "so far)"], 0)
+                    if sel == 1:
+                        ended = 1
+                        break
+            else:
+                sel = ask_select(
+                    "spin-noise sweep: set field step",
+                    "Step %d of %d -- target shift %+.0f Hz from "
+                    "baseline.\n\n"
+                    "PRIMARY (lock-referenced): set the LOCK SHIFT to\n"
+                    "%+.3f ppm relative to its baseline value, RE-LOCK\n"
+                    "(autolock carries the field to the new reference --\n"
+                    "1 ppm = %.0f Hz at the observed nucleus, exact), "
+                    "then\nturn the LOCK OFF again.\n%s\n"
+                    "FALLBACK (no accessible shift mode): with the lock\n"
+                    "OFF, change the FIELD value by about %+.0f units\n"
+                    "(~%.1f Hz/unit at this nucleus, std bore) and do "
+                    "NOT\nre-lock -- not now, not between steps.\n\n"
+                    "Give the field a few seconds to settle, then "
+                    "continue.\n"
+                    "(The receiver window follows this step "
+                    "automatically;\nthe script then measures the line, "
+                    "and the MEASURED\nposition is what enters the "
+                    "record.)"
+                    % (k + 1, nsteps, target, target / bf1_mhz, bf1_mhz,
+                       hop_text, target / fu_est, fu_est),
+                    ["Field is set -- measure it",
+                     "End the sweep here (keep everything acquired so "
+                     "far)"],
+                    0)
+                if sel == 1:
+                    ended = 1
+                    break
             expno_v = EXP_SWEEP_VERIFY_BASE + 1 + k
-            off = sweep_verify_1d(meta, template, dsname, expno_v, o1_hz,
-                                  p90_us, p90_db, db_par)
+            off = sweep_verify_1d(meta, template, dsname, expno_v,
+                                  o1_step, p90_us, p90_db, db_par)
             if expno_v not in verify_expnos:
                 verify_expnos.append(expno_v)
             if off is None or base_off is None:
                 measured = None       # mock modes / unreadable: proceed
                 break
-            raw_rel = off - base_off
-            if sflip == 0 and abs(target) >= 3.0 * SWEEP_TOL_HZ:
-                # resolve the receiver sign convention on the first step
-                # big enough to disambiguate
-                if abs(-raw_rel - target) < abs(raw_rel - target):
-                    sflip = -1
-                else:
-                    sflip = 1
-                sweep["sign_convention_flip"] = sflip
-            eff = sflip or 1
-            measured = raw_rel * eff
-            if abs(measured - target) <= max(SWEEP_TOL_FRAC * abs(target),
-                                             SWEEP_TOL_HZ):
+            # The line's LOCAL offset should reproduce the baseline's:
+            # the window moved WITH the field. Any deviation is a field
+            # error -- its magnitude is sign-free; its physical sign
+            # needs the calibrated convention.
+            local_dev = off - base_off
+            tol = max(SWEEP_TOL_FRAC * abs(target), SWEEP_TOL_HZ)
+            if sflip:
+                measured = target + sflip * local_dev
+            elif abs(local_dev) <= SWEEP_TOL_HZ:
+                # Documented honesty-rail exception: sign unresolved,
+                # deviation within the ABSOLUTE tolerance only -- never
+                # the fractional one. The analysis line fit searches
+                # +/-40 Hz around the seed, so a large substituted
+                # deviation would let a noise fit pass as a measured
+                # line (review finding, 2026-09-03).
+                measured = target
+                measured_note = ("sign calibration unresolved; step "
+                                 "confirmed by unsigned deviation "
+                                 "%.0f Hz <= %.0f Hz"
+                                 % (abs(local_dev), SWEEP_TOL_HZ))
+            else:
+                measured = None
+                measured_note = ("sign calibration unresolved; unsigned "
+                                 "deviation %.0f Hz exceeds the %.0f Hz "
+                                 "substitution cap; no signed position "
+                                 "recorded" % (abs(local_dev),
+                                               SWEEP_TOL_HZ))
+            if abs(local_dev) <= tol:
+                if auto_used and ast["actuator_sign"] == 0:
+                    ast["actuator_sign"] = 1     # first step confirms it
                 break
+            # Autostep self-recovery, before any dialog: (a) the actuator
+            # sign may be inverted (field landed at -target on the first
+            # step) -- flip once, deterministically; (b) otherwise allow
+            # one silent automatic retry.
+            if auto_used and sflip and ast["actuator_sign"] == 0 \
+                    and measured is not None \
+                    and abs(measured + target) <= tol:
+                ast["actuator_sign"] = -1
+                say("autostep: actuator sign resolved as inverted -- "
+                    "re-actuating step %d" % (k + 1))
+                auto_used = autostep_actuate(ast, sweep, target,
+                                             bf1_mhz, k)
+                if auto_used:
+                    continue
+            if auto_used and auto_retry == 0:
+                auto_retry = 1
+                say("autostep: step %d off target -- one automatic "
+                    "retry" % (k + 1))
+                auto_used = autostep_actuate(ast, sweep, target,
+                                             bf1_mhz, k)
+                if auto_used:
+                    continue
+            if sflip:
+                devtxt = "%+.0f Hz (physical)" % (sflip * local_dev)
+            else:
+                devtxt = "%.0f Hz (sign unresolved)" % abs(local_dev)
             sel = ask_select(
                 "spin-noise sweep: off target",
-                "Measured shift %+.0f Hz vs target %+.0f Hz "
-                "(step %d/%d, attempt %d)." % (measured, target,
-                                               k + 1, nsteps, attempt),
-                ["Accept the measured shift", "Retry the shift",
+                "The line sits %s away from where this step should\n"
+                "have put it (step %d/%d, attempt %d, tolerance "
+                "%.0f Hz)." % (devtxt, k + 1, nsteps, attempt, tol),
+                ["Accept as measured", "Retry the shift",
                  "Skip this step"], 0)
             if sel == 0:
+                if measured is None:
+                    measured_note = ("accepted with unsigned deviation "
+                                     "%.0f Hz; no signed position "
+                                     "recorded" % abs(local_dev))
                 break
             if sel == 2:
                 skipped = 1
                 break
+            if sel == 1 and auto_used:
+                auto_used = 0    # operator takes over this step by hand
             # sel == 1 -> loop back and re-instruct
         if ended:
             sweep["ended_early"] = True
             break
+        last_set_hz = target      # the field was physically set here
+        basis = "operator_dialog"
+        lock_state = None         # None = the session-level answer applies
+        if auto_used:
+            basis = "autostep_edlock"
+            lock_state = "off"
+            if ast["keep_locked"]:
+                lock_state = "on_recorded"
+            elif ast["semi"]:
+                lock_state = "off_operator"
         step = {"index": k, "target_offset_hz": target,
                 "measured_offset_hz": measured,
-                "measured_offset_hz_raw": raw_rel,
+                "measured_offset_hz_raw": local_dev,
+                "measured_offset_local_hz": off,
+                "local_deviation_hz": local_dev,
+                "carrier_o1_hz": o1_step,
+                "lock_shift_target_ppm": target / bf1_mhz,
+                "actuation_basis": basis,
                 "verify_expno": EXP_SWEEP_VERIFY_BASE + 1 + k,
                 "noise_expno": None, "rows": 0, "skipped": skipped}
+        if lock_state is not None:
+            step["lock_state_during_noise"] = lock_state
+        if measured_note:
+            step["note"] = measured_note
         if skipped:
             sweep["steps"].append(step)
             continue
@@ -1748,7 +2615,7 @@ def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
         cd = open_expno(template, dsname, expno_n)
         putpar("PULPROG", PP_NAME)
         make_2d(n_rows)
-        set_common_acq(o1_hz, TD_ROW, SWH_HZ, 1, D1_NOISE_S)
+        set_common_acq(o1_step, TD_ROW, SWH_HZ, 1, D1_NOISE_S)
         if noise_rg is None:
             noise_rg = run_rga()
             if noise_rg is None:
@@ -1770,15 +2637,42 @@ def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
 
     # Restore the field before the closing reference. All noise data is
     # already on disk -- nothing here may abort the session.
-    sel = ask_select(
-        "spin-noise sweep: restore field",
-        "Sweep done. Restore the baseline field now:\n\n"
-        "1. Reset the LOCK SHIFT to its baseline value (skip this if\n"
-        "   you used FIELD steps instead).\n"
-        "2. Re-lock -- autolock carries the field back to the\n"
-        "   baseline reference.\n"
-        "3. Turn the LOCK OFF again for the closing reference.\n\n"
-        "The script verifies the restoration next.",
+    if ast is not None and ast["available"]:
+        say("autostep: restoring the lock table and the baseline field")
+        autostep_restore(ast, sweep)
+        if ast["semi"] or ast["keep_locked"]:
+            ask_select(
+                "spin-noise sweep: restore (autostep)",
+                "The lock table is restored and the baseline solvent\n"
+                "re-locked.\n\n"
+                "1. Turn the LOCK OFF for the closing reference.\n"
+                "2. Confirm on the BSMS display that the field SWEEP\n"
+                "   is OFF (unlocking re-enables it on many consoles).",
+                ["Lock is OFF and sweep is OFF -- verify it"], 0)
+        sel = 0
+    else:
+        ret_hops = ""
+        try:
+            if abs(last_set_hz) > hop_hz:
+                ret_hops = ("\n(Return jump %+.0f Hz. Lock-shift path: "
+                            "walk the shift back in hops of <= %.3f "
+                            "ppm, RE-LOCKING at each hop. FIELD-"
+                            "fallback path: dial the field back to its "
+                            "baseline value in one go FIRST, and only "
+                            "then re-lock.)\n"
+                            % (-last_set_hz, hop_hz / bf1_mhz))
+        except Exception:
+            pass
+        sel = ask_select(
+            "spin-noise sweep: restore field",
+            "Sweep done. Restore the baseline field now:\n\n"
+            "1. Reset the LOCK SHIFT to its baseline value (skip this if\n"
+            "   you used FIELD steps instead).\n"
+            "2. Re-lock -- autolock carries the field back to the\n"
+            "   baseline reference.\n"
+            "3. Turn the LOCK OFF again for the closing reference.\n"
+            + ret_hops +
+            "\nThe script verifies the restoration next.",
         ["Field restored -- verify it",
          "Skip the verification (restoration will be flagged)"], 0)
     if sel == 0:
@@ -2099,7 +2993,38 @@ def main():
     bf1 = to_float(getpar("BF1"))
     if bf1 is None:
         bf1 = to_float(getpar("SFO1"), 400.0)
-    field_t = bf1 / 42.5774806     # 1H gyromagnetic ratio, MHz/T
+
+    # Observed nucleus: inherited from the operator's template (v0.6,
+    # 19F-pilot support -- the orchestrator is nucleus-blind except for
+    # the gamma-dependent conversions below).
+    nuc1 = ""
+    try:
+        nuc1 = to_text(getpar("NUC1")).strip().strip("<>")
+    except Exception:
+        pass
+    if not nuc1 or nuc1.lower() in ("off", "none"):
+        nuc1 = "1H"
+    gamma = NUC_GAMMA_MHZ_T.get(nuc1)
+    if gamma is None:
+        say("observe nucleus '%s' is not in the gamma table; field and "
+            "field-unit estimates assume 1H" % nuc1)
+        gamma = 42.5774806
+    field_t = bf1 / abs(gamma)
+    h1_equiv_mhz = bf1 * 42.5774806 / abs(gamma)
+    if nuc1 != "1H":
+        say("observed nucleus from the template: %s (X-nucleus session; "
+            "h1_freq_mhz records the magnet's 1H-equivalent frequency, "
+            "observe_freq_mhz the actual carrier)" % nuc1)
+
+    # Lock channel (v0.6): recorded per session -- the sidereal-ratio
+    # and lock-referenced-sweep analyses key on it.
+    locnuc = ""
+    try:
+        locnuc = to_text(getpar("LOCNUC")).strip().strip("<>")
+    except Exception:
+        pass
+    bf2_mhz = to_float(getpar("BF2"))
+    sfo2_mhz = to_float(getpar("SFO2"))
 
     # TopSpin version: heuristic guess from install path, confirmed by
     # the operator (there is no documented version API in old releases).
@@ -2185,13 +3110,20 @@ def main():
         },
         "spectrometer": {
             "topspin_version": ts_version,
-            "h1_freq_mhz": bf1,
+            "h1_freq_mhz": h1_equiv_mhz,
+            "observe_nucleus": nuc1,
+            "observe_freq_mhz": bf1,
             "field_tesla": field_t,
             "console": console,
             "probe_string": probe,
             "probe_type": probe_type,
             "coil_temp_k": coil_k,
             "preamp_temp_k": preamp_k,
+            "lock_channel": {
+                "locnuc": locnuc,
+                "bf2_mhz": bf2_mhz,
+                "sfo2_mhz": sfo2_mhz,
+            },
         },
         "sample": {
             "description": sample_desc,
@@ -2225,6 +3157,14 @@ def main():
     }
 
     o1_hz = 4.7 * bf1    # 4.7 ppm (water) in Hz for a bf1-MHz spectrometer
+    if nuc1 != "1H":
+        # X-nucleus session (19F pilot): the water default is meaningless
+        # here -- inherit the template's carrier, which the operator put
+        # on the sample's line (docs/f19_pilot.md). Without this a C6F6
+        # 19F session would park the window ~95 kHz off-resonance (C6F6
+        # sits at about -165 ppm) and the Kay estimator would alias
+        # instead of failing. (review finding, 2026-09-03)
+        o1_hz = to_float(getpar("O1"), o1_hz)
 
     # ---------------------------------------------------------------- 7
     # EXPNO 1: setup -- tune/match, shim, pulse calibration.
@@ -2245,8 +3185,8 @@ def main():
         xcmd_or_dialog(
             "atma",
             "spin_noise_run: tune & match",
-            "Tune and match the 1H channel on the water sample\n"
-            "(type 'wobb', adjust, then 'stop').")
+            "Tune and match the %s channel on the sample\n"
+            "(type 'wobb', adjust, then 'stop')." % nuc1)
         # Shim.
         ok_shim, _r = safe_hw_cmd("topshim", "topshim")
         if not ok_shim:
@@ -2269,11 +3209,16 @@ def main():
     if not SIMULATE:
         ok_pc, _r = safe_hw_cmd("pulsecal", "pulsecal (auto P90)")
         if not ok_pc:
-            MSG("Automatic 'pulsecal' is not available on this system.\n\n"
-                "Determine the 1H 90-degree pulse your usual way\n"
-                "(popt/paropt on this water sample, or use the value from\n"
-                "your last probe calibration -- water is forgiving), then\n"
-                "enter it in the next dialog.",
+            xtra = ""
+            if nuc1 != "1H":
+                xtra = ("(pulsecal is a 1H/water tool -- failing here "
+                        "is EXPECTED on an X-nucleus session.)\n")
+            MSG("Automatic 'pulsecal' is not available on this system.\n"
+                + xtra +
+                "\nDetermine the %s 90-degree pulse your usual way\n"
+                "(popt/paropt on this sample, or use the value from\n"
+                "your last probe calibration), then enter it in the\n"
+                "next dialog." % nuc1,
                 "spin_noise_run: manual P90")
         else:
             p90_default = getpar("P 1", p90_default)
@@ -2284,8 +3229,8 @@ def main():
         db_prefill = str(db_now)
     fp = ask_fields(
         "spin-noise run: 90-degree pulse",
-        "Confirm the calibrated 1H 90-degree pulse for this probe\n"
-        "(pre-filled from pulsecal / current P1).",
+        "Confirm the calibrated %s 90-degree pulse for this probe\n"
+        "(pre-filled from pulsecal / current P1)." % nuc1,
         ["P90 (us)", "P90 power (dB, from PLdB1/PL1)"],
         [p90_default, db_prefill])
     p90_us = to_float(fp[0], 10.0)
@@ -2379,7 +3324,7 @@ def main():
     if SWEEP:
         swept = run_field_sweep(
             meta, template, dsname, o1_hz, p90_us, p90_db, db_par,
-            noise_secs, max_rg, bf1)
+            noise_secs, max_rg, bf1, AUTOSTEP)
     if swept is not None:
         sweep_verify_expnos, noise_expnos = swept
     else:
@@ -2541,11 +3486,21 @@ except Exception:
         _tb = traceback.format_exc()
     except Exception:
         _tb = "(traceback unavailable)"
+    _cleaned = 0
+    try:
+        _cleaned = autostep_emergency_cleanup()
+    except Exception:
+        _cleaned = 0
+    _extra = ""
+    if _cleaned:
+        _extra = ("\nThe autostep lock table was restored automatically\n"
+                  "(the dummy solvent row was removed).\n")
     try:
         ERRMSG("spin_noise_run crashed unexpectedly.\n\n"
                "No hardware is left running: any experiment already\n"
                "started will finish on its own and the data stays in\n"
-               "the SPINNOISE_* dataset.\n\nDetails:\n" + _tb,
+               "the SPINNOISE_* dataset.\n" + _extra +
+               "\nDetails:\n" + _tb,
                "spin_noise_run: error", None, 1)
     except Exception:
         print _tb

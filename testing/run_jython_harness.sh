@@ -43,7 +43,7 @@ command -v python3 >/dev/null || { echo "ERROR: python3 not on PATH"; exit 2; }
 # Three end-to-end variants: the two plain modes, plus desktest with the
 # optional rdopt + sweep features on (structure/dialog/meta coverage --
 # mock modes exercise the flow, not the physics).
-for RUN in "simulate" "desktest" "desktest rdopt sweep"; do
+for RUN in "simulate" "desktest" "desktest rdopt sweep autostep"; do
     set -- $RUN
     MODE="$1"; shift
     FEATURES="$*"

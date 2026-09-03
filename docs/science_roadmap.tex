@@ -1,0 +1,465 @@
+% =============================================================================
+% Beyond the Axion --- science roadmap for the spin-noise network
+% Typeset companion to docs/science_roadmap.md (the .md is authoritative).
+% Build: pdflatex x2.
+% =============================================================================
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage[margin=2.4cm]{geometry}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{tcolorbox}
+\usepackage[hidelinks,pdftitle={Beyond the Axion -- spin-noise network science roadmap},pdfauthor={Spin-noise network}]{hyperref}
+
+\definecolor{accent}{rgb}{0.055,0.486,0.525}
+\definecolor{accentink}{rgb}{0.04,0.40,0.44}
+\definecolor{accentsoft}{rgb}{0.847,0.925,0.933}
+\definecolor{goldink}{rgb}{0.60,0.42,0.05}
+\definecolor{goldsoft}{rgb}{0.953,0.910,0.808}
+\definecolor{killink}{rgb}{0.58,0.26,0.21}
+\definecolor{killsoft}{rgb}{0.941,0.871,0.855}
+\definecolor{gateink}{rgb}{0.40,0.34,0.55}
+\definecolor{gatesoft}{rgb}{0.906,0.882,0.945}
+\definecolor{inkfaint}{rgb}{0.42,0.50,0.56}
+\definecolor{numbg}{rgb}{0.937,0.949,0.957}
+
+\newcommand{\chip}[3]{\colorbox{#1}{\textcolor{#2}{\scriptsize\textsf{\vphantom{Ag}#3}}}}
+\newcommand{\cflag}[1]{\chip{accent}{white}{#1}}
+\newcommand{\cworld}[1]{\chip{goldsoft}{goldink}{#1}}
+\newcommand{\cniche}[1]{\chip{accentsoft}{accentink}{#1}}
+\newcommand{\cfirst}[1]{\chip{gatesoft}{gateink}{#1}}
+\newcommand{\ctier}[1]{\chip{numbg}{inkfaint}{#1}}
+\newcommand{\needs}[1]{{\small\textcolor{inkfaint}{\textbf{Needs:} #1}}}
+
+\newtcolorbox{numbers}{colback=numbg,colframe=accent,boxrule=0pt,leftrule=2.5pt,
+  arc=1pt,left=7pt,right=7pt,top=5pt,bottom=5pt,before skip=8pt,after skip=8pt}
+
+\newcommand{\hnmr}{\textsuperscript{1}H}
+\newcommand{\dnmr}{\textsuperscript{2}H}
+\newcommand{\fnmr}{\textsuperscript{19}F}
+\newcommand{\cnmr}{\textsuperscript{13}C}
+\newcommand{\pnmr}{\textsuperscript{31}P}
+\newcommand{\ueV}{\ensuremath{\mu}eV}
+\newcommand{\e}[1]{\ensuremath{\times10^{#1}}}
+\newcommand{\lambdabar}{{\mkern0.75mu\mathchar'26\mkern-9.75mu\lambda}}
+
+\setlist{itemsep=2pt,topsep=4pt}
+\raggedbottom
+
+\begin{document}
+
+% ---------------------------------------------------------------- title block
+\begin{center}
+{\footnotesize\textsf{\textcolor{inkfaint}{SPIN-NOISE NETWORK \,\textperiodcentered\, INTERNAL PLANNING \,\textperiodcentered\, 2026-09-01}}}\\[10pt]
+{\Huge\bfseries Beyond the Axion}\\[10pt]
+{\large What else can a worldwide fleet of idle NMR spectrometers measure?}\\[4pt]
+{\small\textcolor{inkfaint}{A five-lens discovery pass proposed 28 candidate physics targets; every one was
+adversarially re-derived from the hardware facts and graded against the strongest
+published bound. This is the vetted result --- including what died, and why.}}
+\end{center}
+
+\vspace{6pt}
+\begin{center}
+\begin{tabular}{@{}lcl@{}}
+\toprule
+\textbf{Verdict} & \textbf{Count} & \textbf{Meaning} \\
+\midrule
+Flagship          & 1 & adopt into the core observing program \\
+Strong byproduct  & 8 & real physics reach for Tier A/B cost \\
+Cheap byproduct   & 6 & worth the marginal analysis, modest reach \\
+Gated / deferred  & 6 & viable only after a specific gate is passed \\
+Rejected, on record & 7 & independently re-derived kill, kept so it is never re-proposed \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\vspace{4pt}
+\noindent\textbf{Cost tiers.} \textbf{A} = pure re-analysis of bits the network already
+records; \textbf{B} = software/protocol change only, still runnable overnight by
+facility staff; \textbf{C} = cheap per-site hardware or samples. Anything needing
+magnet or probe modification was rejected outright.
+
+% ================================================================= section 1
+\section{Adopt into the core program}
+
+\subsection{Lock-step spectral tiling}
+\cflag{FLAGSHIP}\ \ctier{TIER A}\ \cniche{COMPETITIVE NICHE}
+
+\medskip\noindent
+Stop sitting at one mass point per magnet. Step the \dnmr{} lock offset through
+${\sim}27$ positions a night and stitch in absolute-frequency space: the
+$\pm$few-kHz lock shift multiplies by $\gamma_{\mathrm H}/\gamma_{\mathrm D} = 6.51$
+at the \hnmr{} channel, so each site tiles \textbf{$\pm$13--26\,kHz of contiguous
+mass coverage} instead of an isolated 300\,Hz sliver. The step pattern is also a
+veto no fixed-frequency haloscope has: spin lines move with the step, instrument
+lines do not, and a real dark-matter line stays put in absolute frequency while
+its amplitude follows the resonant envelope.
+
+\begin{numbers}\small\ttfamily
+27 bins/night costs $27^{1/4}=2.3\times$ per-bin depth for $27\times$ coverage ---
+scan figure-of-merit exactly neutral. OCXO $10^{-7}$--$10^{-8}$ = 6--60\,Hz at
+600\,MHz, already adequate vs the 300\,Hz virial width. Lock settle + T1:
+seconds vs ${\sim}20$\,min segments.
+\end{numbers}
+
+\needs{per-step receiver-carrier follow, per-segment lock-offset metadata in the
+bundle, stitching in analysis. A direct upgrade of the shipped v0.5 sweep feature.}
+
+\subsection{Cross-site mass-point overlap and veto protocol}
+\ctier{TIER A}\ \cniche{COMPETITIVE NICHE}
+
+\medskip\noindent
+Coincidence bookkeeping across sites suppresses accidental line candidates by
+$10^{2}$--$10^{4}$. Review corrected two assumptions: the console OCXO already
+supports cross-site mass matching to $\pm$one virial linewidth (a GPSDO is
+optional hardening, not a prerequisite), and only site pairs at the bottom of the
+same-nominal-field spread (60--600\,kHz at 600\,MHz, vs $\pm$13--26\,kHz stepping
+reach) can be brought onto the same mass point.
+
+\smallskip
+\needs{lock-offset metadata, a cross-site persistent-line catalog,
+absolute-frequency bookkeeping discipline in the pipeline.}
+
+% ================================================================= section 2
+\section{Free analysis riders --- same recorded bits}
+
+\noindent Four searches that ride the exact bytes the network already uploads.
+Zero observing time, zero hardware.
+
+\subsection{Axial-vector dark matter reinterpretation}
+\ctier{TIER A}\ \cworld{WORLD-LEADING}
+
+\medskip\noindent
+The single best find of the pass. A light vector with a direct axial spin
+coupling (a ``dark $Z'$'') drives the \emph{identical} candidate lines as the
+axion wind, but without the $v\sim10^{-3}$ velocity suppression. Every core
+limit converts by one factor.
+
+\begin{numbers}\small
+$g_A = g_{aNN}\, m_a\, v$ \;$\Rightarrow$\; core reach
+$g_{aNN}\sim10^{-8}\,\mathrm{GeV}^{-1}$ gives
+$\mathbf{g_A \sim 2.5\e{-26}}$ at 2.5\,\ueV. No direct laboratory limit exists
+anywhere in the \ueV{} decade; this sits 4--8 orders below even the indirect
+meson-decay bounds.
+\end{numbers}
+
+\needs{one coupling-conversion factor and a modified daily-modulation template
+in the analysis code. Frame as a limit --- UV completions of light
+non-conserved axial vectors are contrived, so never as a discovery favorite.}
+
+\subsection{In-bore dark-photon line search}
+\ctier{TIER A}\ \cniche{COMPETITIVE NICHE}
+
+\medskip\noindent
+Dark-photon dark matter drives an effective current inside the detection volume;
+the below-cutoff bore blocks external RFI but not this in-volume source, so
+every probe is a small shielded haloscope. Review corrected the first-pass power
+estimate by ${\sim}300\times$ (a sub-wavelength shielded pickup pays
+$(R/\lambdabar)^2\approx0.016$ at 600\,MHz) and shrank the ``virgin territory''
+claim after checking historical coverage: original ADMX scanned 460--890\,MHz in
+2010, CAPP-12TB covered 1.025--1.185\,GHz.
+
+\begin{numbers}\small
+$\varepsilon\sim1.4\e{-11}$ per cryoprobe-night,
+$\mathbf{{\sim}3\e{-12}}$ \textbf{per cryo site-year}: wins 3--30$\times$ over
+WISPDMX (${\sim}10^{-11}$) and cosmology (${\sim}10^{-10}$) in the genuinely
+unscanned windows --- ${\sim}$400--460\,MHz (the 9.4\,T sites) plus gaps between
+historical scans.
+\end{numbers}
+
+\needs{console spurs are \emph{also} immobile under lock stepping (the lock
+moves $B_0$, not the synthesizer) --- spur discrimination rests on the
+clock-audit-keyed spur catalog, blank-tube nights, and optionally a GPSDO
+(tightens the absolute-frequency test from ${\sim}60$\,Hz to $<1$\,Hz).}
+
+\subsection{High-resolution sub-virial channel}
+\ctier{TIER A}\ \cniche{COMPETITIVE NICHE}
+
+\medskip\noindent
+A second FFT pass at ${\sim}0.1$\,Hz resolution buys 2.5--7$\times$ in coupling
+on cold-flow and caustic substructure --- ADMX runs the same high-resolution
+trick for the photon coupling; nobody does it for the gradient coupling at these
+mass points. Non-negotiable detail from review: Earth's rotation against a
+${\sim}300$\,km/s flow chirps the line by ${\sim}0.9$\,Hz over a night, more
+than its width, so \emph{diurnal} chirp templates are mandatory, not just annual
+ones.
+
+\smallskip
+\needs{second FFT pass, diurnal+annual template bank, lock-step amplitude veto
+against the sub-Hz instrumental spur forest. OCXO stability floors usable
+linewidth at ${\sim}0.06$\,Hz.}
+
+\subsection{Calibrated excess-power archive (public data product)}
+\ctier{TIER A}\ \cfirst{FIRST-LIMIT TERRITORY}
+
+\medskip\noindent
+A versioned public release: calibrated PSDs + covariance + spur list + measured
+coil/shield transfer function (including the sub-Compton shielding suppression)
++ field, orientation, coordinates per site. On every model anyone has written
+down we lose 1--3 orders to dedicated experiments --- but the archive makes the
+dark-photon, axion--photon, and high-frequency gravitational-wave
+reinterpretation tables free forever, and in our exact slivers it is the only
+limit of any kind.
+
+% ================================================================= section 3
+\section{Worth a protocol change (Tier B)}
+
+\subsection{Sidereal Lorentz violation on the clock-blind \hnmr/\dnmr{} ratio}
+\ctier{TIER A/B}\ \cworld{WORLD-LEADING}
+
+\medskip\noindent
+Both frequencies come from the same OCXO, so oscillator and $B_0$ cancel exactly
+in the ratio --- and the lock servo is the mechanism, not a bug: it transduces
+any deuteron-sector shift into $B_0$ and hence into the \hnmr{} channel. The
+\emph{B-scaled} channel (an anisotropy of the bound proton/deuteron magnetic
+moment, $\delta g \propto B$) is virgin territory that high field actively helps.
+
+\begin{numbers}\small
+Statistical: ${\sim}2\e{-13}$ per network-year. Systematics haircut (spin-noise
+line pull needs a demonstrated $10^{2}$--$10^{3}$ sidereal-coherent
+suppression): floor $\mathbf{3\e{-12}}$--$\mathbf{10^{-11}}$ fractional ---
+still beats BASE's proton sidereal sensitivity (${\sim}10^{-9}$ at 1.9\,T) by
+\textbf{100--1000$\times$}, with $\times$7--15 extra coefficient reach at
+14--28\,T. Conceded: the B-independent $\tilde b$ channel loses $10^{4}$--$3\e{7}$
+to comagnetometers --- dead, see the ledger.
+\end{numbers}
+
+\needs{standardized 90/10 H$_2$O/D$_2$O network sample, per-block lock
+error-signal logging, phased-lineshape co-fit, detuning-ladder validation
+(already planned for core), an SME theory workup for the deuteron.}
+
+\subsection{Isotope-ladder X-nuclei campaign --- \fnmr{} adopted}
+\ctier{TIER B}\ \cfirst{FIRST-LIMIT TERRITORY}\ \cflag{\textsuperscript{19}F ADOPTED}
+
+\medskip\noindent
+\dnmr{} and \cnmr{} nights give the first \emph{laboratory} limits
+on the axion--neutron coupling at these mass points (\pnmr{} is
+odd-proton --- a proton-coupling mass point on the X channel, not a
+neutron probe); \fnmr{} at $0.941\times$
+the \hnmr{} frequency rides the \hnmr/\fnmr{} coil at near-cryo sensitivity ---
+essentially free proton mass points densifying the scan. Review killed a wrong
+$\gamma^{1.5}$ scaling (the X channel is circuit-noise-limited; real numbers are
+10--30$\times$ worse than first proposed) and the campaign survives as
+lab-frontier exclusion, honestly above SN1987A.
+
+\begin{numbers}\small
+$g_{ann}\sim2\e{-5}$--$2\e{-4}$ per season per mass point via \dnmr.
+Protocol rules that survived: \dnmr{} observation \textbf{requires lock-off
+nights} (the lock transmitter irradiates the deuterium line; drift 0.1\,Hz/hr is
+negligible vs the 46\,Hz virial width); \cnmr{} needs overnight decoupling or
+$^{13}$CS$_2$ against the 140\,Hz J-quartet.
+\end{numbers}
+
+\noindent\textbf{Decision, 2026-09-01:} the \fnmr{} rider is \textbf{adopted}
+into the near-term program, split off from the rest of the ladder --- it needs
+no X-channel calibration work, a C$_6$F$_6$ tube is cheap and inert, and every
+F-capable site that runs it densifies the proton mass scan for free. The \dnmr/\cnmr{} neutron-coupling legs (and the \pnmr{}
+proton-channel leg) stay Tier B pending volunteer sites.
+
+\smallskip
+\needs{ATMA retune scripts, per-nucleus calibration, ${\sim}\$100$--500 in
+samples (neat D$_2$O, \cnmr-methanol or $^{13}$CS$_2$, C$_6$F$_6$, 85\%
+H$_3$PO$_4$) --- all standard 5\,mm tubes.}
+
+\subsection{Dual-species transient network (GNOME complement)}
+\ctier{TIER B}\ \cniche{COMPETITIVE NICHE}
+
+\medskip\noindent
+Interleaved ${\sim}1^\circ$ FIDs at 0.5--1\,Hz on a ${\sim}1\%$ H$_2$O / 99\%
+D$_2$O sample track the \hnmr{} line at ${\sim}1$\,mHz/s --- 23\,pT
+proton-equivalent, the same decade as GNOME's effective \emph{proton}-coupling
+floor (alkali magnetometers pay ${\sim}\mu_N/\mu_B$ against nuclear couplings)
+--- with exact $\gamma_d/\gamma_p$ dual-species tagging for domain-wall
+candidates. The systematic that sets the dilution: at 10\% H$_2$O, radiation
+damping pulls the line at $1000\times$ the target; at 1\% it is controllable,
+pending demonstration.
+
+\smallskip
+\needs{$\geq$10\,Hz lock-error logging, the interleaved-FID pulse program, lock
+transfer-function calibration via existing lock-shift stepping, a GNOME-style
+coincidence pipeline on NTP timestamps.}
+
+\subsection{Foundational pair: FDT at GHz and collective-decay metrology}
+\ctier{TIER A/B}\ \cniche{COMPETITIVE NICHE}
+
+\medskip\noindent
+\textbf{(a)} First quantitative fluctuation--dissipation test on a nuclear-spin
+ensemble at GHz: calibrated spin-noise PSD vs small-flip $\chi''$ at the
+${\sim}1\%$ absolute-calibration floor, including the two-temperature cryoprobe
+case (20\,K coil, 300\,K spins). Verified unoccupied territory. The
+quantum-asymmetry stretch goal is dead: a phase-insensitive amplifier measures
+the symmetrized spectrum, correction $(hf/2kT)^2/3\sim2\e{-7}$.
+\textbf{(b)} Absolute radiation-damping metrology: the $\omega Q\eta M_0$
+collective-decay rate tested at few-percent absolute across $2\times$ in
+frequency and $100\times$ in $M_0$ on many platforms --- ${\sim}10\times$ beyond
+the single-instrument literature. Frame as coupled-mode physics, not
+``Purcell,'' or referees will object.
+
+% ================================================================= section 4
+\section{Gated or deferred}
+
+\subsection{Axion--photon piggyback --- gated on one number}
+\cfirst{GATED}\ \ctier{TIER A + 1 WK SIM}
+
+\medskip\noindent
+The 9.4--28\,T field through the detection volume makes every probe a (terrible)
+haloscope --- but an NMR coil is engineered to have zero leading-order overlap
+with the axisymmetric conversion field, and the residual form factor $C$ (lead
+routing, tilts, dielectric asymmetries) is unknown between $10^{-2}$ and
+$10^{-5}$. The gate is ${\sim}1$ week of full-wave EM simulation of the 2--3
+dominant commercial probe geometries.
+
+\begin{numbers}\small
+$C\geq10^{-2}$: $g\sim2\e{-11}\,\mathrm{GeV}^{-1}$ per cryo-site-year ---
+\textbf{beats CAST/globular clusters ($6.6\e{-11}$/$4.7\e{-11}$) by
+${\sim}3\times$} in the 1.65--2.7\,\ueV{} window no cavity experiment has ever
+scanned. $C\sim10^{-3}$: a tie --- publish the simulation and stop. Claim
+nothing until $C$ is in hand.
+\end{numbers}
+
+\subsection{Idle-MRI fleet nodes (64--298\,MHz)}
+\cfirst{PILOT FIRST}\ \ctier{TIER B, NEW INSTRUMENTS}
+
+\medskip\noindent
+The 10\,L volume win survives honest accounting of coil dilution and room
+temperature: ${\sim}5\times$ one cryoprobe-night per scanner-night in amplitude
+SNR, at 0.26--0.53\,\ueV{} mass points nothing else covers. A fleet-year reaches
+few${}\e{-8}$--$10^{-7}\,\mathrm{GeV}^{-1}$ --- the closest approach to the
+SN1987A bound anywhere in the program. Real costs are institutional: raw-FID
+console access, a ${\sim}10$\,L phantom, per-scanner characterization. Pilot on
+2--3 research scanners before any fleet claim.
+
+\subsection{Also parked}
+
+\begin{itemize}[leftmargin=1.2em]
+\item \textbf{CASPEr-electric-lite} (poled ferroelectric $^{207}$Pb stick,
+${\sim}\$100$--500): arithmetic survives, but disorder broadening in relaxors
+costs another 3--10$\times$; pilot-grade, non-cryo probe first.
+\item \textbf{Broadband X-channel scan}: the $(R/\lambdabar)^2$ suppression is
+fatal below ${\sim}300$\,MHz (loses 100--1000$\times$ to Dark E-field Radio);
+only the 300--460\,MHz corner on $\geq$23.5\,T systems survives, and
+${\sim}0.5$\,TB/night storage dominates the cost.
+\item \textbf{GPSDO clock-defect search}: scientifically near-empty (at
+transient timescales a GPSDO output is its own local quartz) --- but buy the
+${\sim}\$300$--1000 GPSDO anyway for spur discrimination and cross-night
+stitching.
+\item \textbf{Driven-lock nonequilibrium FDT}: real physics, but the \dnmr{}
+noise feature is ${\sim}10^{-2}$ of the \hnmr{} bump; needs raw lock-receiver
+access. Park it.
+\end{itemize}
+
+% ================================================================= section 5
+\section{Considered and killed --- the ledger}
+
+\noindent Every rejection was independently re-derived before being recorded.
+The ledger exists so these are never re-proposed.
+
+\begin{itemize}[leftmargin=1.2em,itemsep=5pt]
+\item \textbf{ULF dark photon via the lock / persistent-current channel}
+\hfill \textcolor{killink}{\small lose by $>$13 orders to SuperMAG}\\
+{\small A sub-wavelength pickup pays $(L/\lambdabar)$ in field: $6\e{-12}$ at
+mHz. SuperMAG's Earth-radius loop has a $2\e{7}$ head start no lab apparatus
+buys back.}
+\item \textbf{Monopole--dipole force with an in-bore source mass}
+\hfill \textcolor{killink}{\small lose by 7--8 orders to $^3$He/$^{129}$Xe}\\
+{\small 0.5\,kg at 10\,cm reaches $g_sg_p\sim10^{-22}$ vs comagnetometer bounds
+at $10^{-29}$--$10^{-30}$. Geometry cannot rescue it.}
+\item \textbf{B-independent sidereal $\tilde b$ on the \hnmr/\dnmr{} ratio}
+\hfill \textcolor{killink}{\small lose by $10^{4}$--$3\e{7}$}\\
+{\small Systematic floor $2.5\e{-26}$\,GeV vs bounds down to $8.4\e{-34}$. The
+deuteron-combination escape fails: $\mu_d\approx\mu_p+\mu_n$, triangle
+inequality closes it. Only the B-scaled channel lives.}
+\item \textbf{Hz--kHz stochastic ALP sidebands / distant-site cross-correlation}
+\hfill \textcolor{killink}{\small lose by 2--6 orders}\\
+{\small Best case $g_p\sim10^{-4}\,\mathrm{GeV}^{-1}$ vs NASDUCK-class. And the
+canonical answer to ``why not cross-correlate distant sites?'': the DM coherence
+length at \ueV{} masses is ${\sim}500$\,m.}
+\item \textbf{Astrophysical burst follow-up (SN axions, FRBs, solar)}
+\hfill \textcolor{killink}{\small in-band weight $\leq10^{-27}$}\\
+{\small MeV supernova axions oscillate at $10^{22}$\,Hz; in-band FRB EM is
+attenuated $e^{-35}$ by the below-cutoff bore and loses to thermal noise even
+unshielded.}
+\item \textbf{Pauli-exclusion violation in NMR}
+\hfill \textcolor{killink}{\small lose by $\geq10^{9}$}\\
+{\small Wrong-symmetry admixtures in liquids produce no new frequencies ---
+only an intensity shift degenerate with concentration. Best conceivable bound
+${\sim}10^{-2}$ vs spectroscopy at $10^{-11}$.}
+\item \textbf{Millicharged-particle cyclotron lines}
+\hfill \textcolor{killink}{\small conditions mutually exclusive}\\
+{\small In-band cyclotron and terrestrial capture cannot both hold: they miss
+each other by $>$an order of magnitude in $\varepsilon$ at every mass.}
+\item \textbf{Oscillating quark masses (dilaton DM) in the ratio}
+\hfill \textcolor{killink}{\small MICROSCOPE wins by $\geq$3.5 orders}\\
+{\small Best-case $d_{m_q}\sim1.6$ at the single most favorable mass. The ratio
+time series survives as a free drift diagnostic only.}
+\item \textbf{High-frequency gravitational waves as a physics driver}
+\hfill \textcolor{killink}{\small $h\sim6\e{-18}$, sources $<10^{-27}$}\\
+{\small Survives only as a free reinterpretation table in the excess-power
+archive.}
+\end{itemize}
+
+\begin{tcolorbox}[colback=numbg,colframe=numbg,arc=2pt,left=8pt,right=8pt]
+\textbf{Three rules the kills taught us}
+\begin{itemize}[leftmargin=1.2em,itemsep=2pt]
+\item \textbf{Sub-wavelength EM pickups pay $(L/\lambdabar)$ in field} --- an
+$O(0.1)$ penalty at 600\,MHz, a death sentence at mHz. Low-frequency ambitions
+belong to spin-coupled channels.
+\item \textbf{The \ueV{} dark-matter field is coherent over ${\sim}500$\,m} ---
+same-hall pairs are phase-coherent; the worldwide network is not. Its power is
+mass points and vetoes, not coherent combining.
+\item \textbf{Phase-insensitive amplifiers measure the symmetrized spectrum}
+--- linear-in-$hf/kT$ quantum asymmetries are invisible; the accessible
+correction is $(hf/2kT)^2/3$.
+\end{itemize}
+\end{tcolorbox}
+
+% ================================================================= section 6
+\clearpage
+\section{Near-term actions}
+
+\noindent In rough order of leverage. Items 1--4 are pure software.
+
+\begin{enumerate}[leftmargin=1.6em,itemsep=1pt,topsep=2pt]
+\item \textbf{Lock-step tiling mode} --- per-step carrier follow, per-segment
+lock-offset metadata, stitching support. {\small\textcolor{inkfaint}{Orchestrator
++ analysis; v0.6 candidate.}}
+\item \textbf{Per-block \dnmr{} lock error-signal and lock-reference logging}
+--- wanted independently by four candidates and the core clock audit.
+{\small\textcolor{inkfaint}{Orchestrator + bundle schema.}}
+\item \textbf{Analysis riders} --- dark-photon line search, axial-vector limit
+curve, sub-virial pass with diurnal chirp templates, spur catalog keyed to the
+clock audit. {\small\textcolor{inkfaint}{Analysis repo.}}
+\item \textbf{Excess-power archive format} --- specify the versioned public
+release. {\small\textcolor{inkfaint}{Analysis + docs.}}
+\item \textbf{\fnmr{} pilot (adopted 2026-09-01)} --- survey F-capable probes in
+the site registry, ship C$_6$F$_6$ tubes, run pilot noise nights at 2--3 sites,
+then fold \fnmr{} into the standard rotation.
+{\small\textcolor{inkfaint}{Coordination + volunteer sites.}}
+\item \textbf{Probe form-factor EM simulation} --- the one week of work that
+decides whether ``axion--photon'' goes in a proposal.
+{\small\textcolor{inkfaint}{Any partner with EM-simulation tooling.}}
+\item \textbf{Standardized network samples} --- 90/10 and 1\%/99\%
+H$_2$O/D$_2$O; remaining isotope-ladder kit for volunteer sites.
+{\small\textcolor{inkfaint}{Coordination.}}
+\item \textbf{Optional per-site GPSDO} (${\sim}\$300$--1000) --- justified by
+spur discrimination and cross-night stitching, not by the core search.
+{\small\textcolor{inkfaint}{Volunteer sites.}}
+\end{enumerate}
+
+% ---------------------------------------------------------------- provenance
+\vspace{6pt}
+\noindent\rule{\linewidth}{0.4pt}\\[3pt]
+{\footnotesize\textcolor{inkfaint}{Produced 2026-09-01 with AI assistance: five
+independent generation lenses, 28 candidates, each adversarially re-derived
+against published bounds by a separate review pass. All numbers are
+order-of-magnitude estimates for prioritization --- re-derive independently
+before any external use. The authoritative source of this document is
+\texttt{docs/science\_roadmap.md} in the repository; the full 28-entry catalog
+with complete assessments is retained by the maintainer.}}
+
+\end{document}

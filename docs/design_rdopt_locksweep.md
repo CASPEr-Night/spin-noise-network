@@ -138,7 +138,7 @@ settle after each step (eddy currents).
    restoration quality is recorded (field_restored), then
    reference_close runs as usual.
 
-RECORDED: meta.field_sweep = {enabled, requested_span_hz, steps:
+RECORDED: meta.field_sweep = {enabled, requested_half_span_hz, steps:
 [{index, target_offset_hz, measured_offset_hz, verify_expno,
 noise_expno, rows}], restored_offset_hz}. Every verification and
 noise block is a clock-audit block. Experiments get roles
@@ -149,6 +149,75 @@ facility report analyzes each independently (line fit + PSD), and the
 registry/coverage view counts them as separate frequencies. The
 per-step measured offset + the session carrier metadata define the
 absolute frequency of each step.
+
+## 2b. v0.6 update: carrier-follow ("spectral tiling")
+
+Adopted from the science roadmap's flagship recommendation
+(docs/science_roadmap.md, 1.1). Three changes to the sweep:
+
+1. CARRIER-FOLLOW. Per-step O1 = baseline O1 + target, for BOTH the
+   verification 1D and the noise block (recorded per step as
+   carrier_o1_hz). The line stays centered in the window at every
+   step, so the +/-3000 Hz window cap is gone; the new half-span cap
+   is a conservative lock-shift excursion (SWEEP_SPAN_PPM_MAX = 25 ppm
+   of B0), with each individual RE-LOCK jump limited to
+   SWEEP_HOP_MAX_HZ = 4000 Hz (autolock capture safety; bigger
+   entry/exit jumps are instructed as multi-hop re-locks). Step count
+   raised to 15. Verification now measures the line's LOCAL offset;
+   the physical step is target + sign*local_deviation, and analysis
+   seeds per-step fits with the small deviation, not the full offset.
+2. DETERMINISTIC SIGN CALIBRATION. Carrier-follow removes the sign
+   information the v1 first-large-step inference used (a correct step
+   reads ~0 local offset under either convention). The convention is
+   now resolved at the baseline by one quick 1D at a carrier moved
+   +500 Hz with the field untouched (expno 29, role sweep_signcal,
+   no operator action): physical convention reads -500 Hz. Recorded
+   as sign_convention_basis.
+3. NUCLEUS AWARENESS (19F pilot, docs/f19_pilot.md). The observed
+   nucleus is inherited from the template (NUC1) and recorded
+   (spectrometer.observe_nucleus / observe_freq_mhz; h1_freq_mhz is
+   the 1H-equivalent); the field-unit estimate scales by the gamma
+   ratio; the lock-shift arithmetic was already nucleus-exact. The
+   lock channel (LOCNUC/BF2/SFO2) is recorded per session for the
+   ratio analyses.
+
+## 2c. v0.6.x: AUTOSTEP -- programmatic actuation (Tier 2, opt-in)
+
+The v1 "no portable door" finding was too strong (JWB challenge,
+2026-09-03, confirmed by a three-lens documentation/wild-code review):
+`lopo <solvent>` is DOCUMENTED on TopSpin 2.x-4.x to push the edlock
+table's per-solvent Distance -- which IS the BSMS LOCK SHIFT -- to the
+BSMS without lock-in, and `lock <solvent>` autolocks the field to the
+new setpoint; the table is the plain file conf/instr/<instrum>/2Hlock.
+Below that, Bruker's shipped inc/bsms_program (`bsmscmd`,
+GETBSMSVAL/PUTBSMSVAL) writes BSN_FIELD in production elsewhere and
+reads BSN_LOCK_SHIFT in Bruker's own pulsecal.
+
+AUTOSTEP (xpy spin_noise_run sweep autostep) implements the documented
+chain: clone the session solvent's table row as ZZDUMMY (layout-blind),
+detect the shift column ONCE per console via the edlock GUI as oracle
+(operator moves ZZDUMMY's Shift by exactly +1.000 ppm; the changed
+column is cached), then per step rewrite that one number + noqu lopo +
+noqu lock + settle + lock off. Lock OFF automation = two 3-line AU
+programs from the DOCUMENTED macros (LOCK_OFF/LOCK_ON/SWEEP_OFF),
+installed and operator-verified once at setup; without them the
+operator chooses semi-attended (one lock-off dialog per step) or
+locked-and-recorded noise blocks. The pristine table is snapshotted
+(memory + .spinnoise_backup) and byte-restored at the end. The
+actuator's own sign is resolved on the first step by measurement
+(landing at -target flips it once, deterministically). EVERY failure
+falls back to the 2b operator dialogs for that step; verification 1Ds,
+hop discipline, and measured-not-target are unchanged. Per-step
+actuation_basis and lock state are recorded (schema, field_sweep
+.autostep). First hardware use per console family:
+docs/autostep_bench_checklist.md.
+
+Analysis riders added with this change (analysis/facility_report.py):
+the persistent-line catalog (spin / window-fixed / absolute-fixed
+classification across carrier shifts -- the dark-photon line-search
+and spur-catalog groundwork), the native-resolution sub-virial pass
+(infrastructure only: no diurnal chirp templates yet, and it says so),
+and the axion-mass / axial-vector bookkeeping (g_A = g_aNN * m_a * v).
 
 ## 3. What deliberately did NOT go in v1
 
