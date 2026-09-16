@@ -1,7 +1,8 @@
 % =============================================================================
 % CASPEr@night --- Agilent/VnmrJ Quickstart (SIU Carbondale)
-% Single-recipient quickstart for the first Agilent validation session
-% (Boyd Goodson's 400 MHz DD2, VnmrJ 3.2, 5 mm HCN, room temperature).
+% Single-recipient quickstart for Agilent sessions on the partner instrument
+% (Boyd Goodson's 400 MHz DD2, VnmrJ 3.2, 5 mm HCN, room temperature);
+% two sessions ran on it 2026-09-14.
 % Distilled from vendors/agilent/README.md (Tier 1 + partner checklist),
 % packer/answers.example.json, and uploader/upload_bundle.py.
 % Build: pdflatex x2.
@@ -57,7 +58,7 @@
 \large (SIU Carbondale --- 400\,MHz DD2, VnmrJ 3.2)}
 \author{John W. Blanchard (\href{mailto:jwbquantum@gmail.com}{jwbquantum@gmail.com})
 \and Reza Ebadi \and Claude (Anthropic)}
-\date{Software v0.4.0 --- August 28, 2026}
+\date{Software v0.6.0 --- September 15, 2026}
 
 \begin{document}
 \maketitle
@@ -75,14 +76,14 @@ afterward on any laptop. Nothing in the session pulses the sample above
 tune-and-match power: the calibration steps use ${\sim}1^{\circ}$ tips
 at your ordinary observe power, and the noise blocks use
 \texttt{pw=0} at the bottom of the transmitter power scale. One thing
-to know going in: \textbf{yours is the first real Agilent data this software will
-ever see.} The converter has passed synthetic-session and file-format
-tests against the documented VnmrJ file layout, but it has never
-parsed a byte from a real spectrometer --- so if your files make it
-choke, that is exactly the data we need. Ugly output is useful output,
-and Section~\ref{sec:wrong} says what to send. You never need the
-GitHub repository, git, or a README: this PDF plus the
-\file{config.json} attached to the same e-mail is everything.
+to know going in: \textbf{this path has run on real hardware on one
+instrument --- this one.} Two sessions on 2026-09-14 (68 and 66
+experiments) were packed, validated and uploaded with zero reader
+warnings, so the converter has parsed real files from one instrument of
+this console family and no other. If your files make it choke, that is still data we need ---
+ugly output is useful output, and Section~\ref{sec:wrong} says what to
+send. You never need the GitHub repository, git, or a README: this PDF
+plus the \file{config.json} attached to the same e-mail is everything.
 
 \begin{tcolorbox}[colback=boxbg, colframe=boxframe,
   title=\textbf{What you need}, fonttitle=\bfseries]
@@ -128,23 +129,59 @@ free).
 Insert the water tube, set or record the temperature (298\,K if VT is
 off and the bore is at room temperature), and let it equilibrate a few
 minutes. Tune and match \hnmr{} by your normal manual wobble procedure
---- no autotune on this probe, and none needed. Shim as usual. Lock is
-your choice, on or off --- you will record which in the questionnaire.
-Calibrate the \hnmr{} 90$^{\circ}$ pulse or take the probe-file value,
-and \textbf{write down pw90 and tpwr} --- the questionnaire wants
-both. Start from your standard \hnmr{} water setup in \texttt{s2pul}
-and leave \texttt{sw} at your usual value throughout.
+--- no autotune on this probe, and none needed. Shim as usual, with
+one caution. On a near-neat water tube the water line may sit at
+${\sim}30$\,Hz wide and asymmetric, and gradient shimming cannot
+narrow it --- that is radiation damping, the probe's back-action on
+the spins, not a shim fault. On this instrument, identical shims and
+identical acquisition gave an 8.5\,Hz symmetric line on a 1\%
+\htwo{}/\dtwo{} Gd-doped tube and a 32\,Hz asymmetric line on the
+90/10 tube; three gradient-shim iterations on the 90/10 tube moved
+z3--z5 by several hundred DAC units each and changed the linewidth by
+under 0.2\,Hz. Judge shim quality on the lock signal or on a
+dilute/doped tube, not on the near-neat water line, and do not judge a
+shim set by the size of its DAC values --- the set that gave the
+8.5\,Hz line had z3 and z3y past $\pm$8000. The broad line is the
+regime that produces a large noise feature, so leave it as it is.
+
+Lock: run with the lock \textbf{on} during the noise blocks unless you
+have a reason not to. On this instrument the locked session drifted
+0.25\,Hz between opening and closing reference over a 38\,min bracket,
+with an unchanged lineshape; the unlocked session drifted 0.56\,Hz over
+a 78\,min bracket. That is 0.0065 versus 0.0072\,Hz/min --- the same
+drift rate within what two brackets can show --- so the two sessions do
+not by themselves measure what the lock buys. (\texttt{alock='n'} in
+the block parameters below only disables automatic re-locking; it does
+not release an established lock.) Either way, \textbf{record the state}
+--- the questionnaire asks for it. Calibrate the \hnmr{} 90$^{\circ}$
+pulse or take the probe-file value, and \textbf{write down pw90 and
+tpwr} --- the questionnaire wants both, and the closing reference
+must reuse them. Start from your standard \hnmr{} water setup in
+\texttt{s2pul} and leave \texttt{sw} at your usual value throughout.
 
 \subsection*{2.2\quad Gain ladder (${\sim}5$\,min)}
 
 Four one-scan 1Ds at ascending receiver gain, with a tiny flip so
-nothing saturates. Set \texttt{pw} to pw90/90 --- 0.11\,$\mu$s for a
-10\,$\mu$s pw90, about a $1^{\circ}$ tip --- never use
+nothing saturates. First find your ladder maximum: the highest
+\texttt{gain} at which a tiny-flip 1D of this tube does not overflow
+the receiver. \textbf{It is strongly sample-dependent} --- on this
+probe 60\,dB was fine on a 1\% \htwo{} Gd-doped tube and a 90/10
+\htwo{}/\dtwo{} tube needed 40\,dB --- so the ladder is scaled to
+your maximum, not fixed at 0/20/40/60: four gains spaced evenly from 0
+to the maximum, rounded to whole dB (legal gains are integer dB), e.g.
+0/20/40/60 for a 60\,dB maximum or 0/14/26/40 for 40\,dB. After each
+\texttt{gain=} check the value the console stored --- it is what the
+saved \file{procpar} carries: asked for 13.3 and 26.7\,dB, this console
+stored 14 and 26. Set \texttt{pw} to pw90/90 --- 0.11\,$\mu$s for a 10\,$\mu$s pw90, about
+a $1^{\circ}$ tip --- and \texttt{tpwr} to your calibrated observe
+power (57 below stands in for yours). Write both values down: the two
+references in 2.3 and 2.5 must use exactly these. Never use
 \texttt{gain='n'} (autogain), and wait for each acquisition to finish
-before saving:
+before saving. Shown for a 60\,dB maximum:
 
 \begin{lstlisting}
 pw=0.11
+tpwr=57
 nt=1
 gain=0
 go
@@ -160,18 +197,18 @@ go
 svf('16_sn_ladder_d')
 \end{lstlisting}
 
-Documentation says \texttt{gain} runs 0--60\,dB on this hardware
-family, but nobody has verified the DD2's legal values or overflow
-point for us: \textbf{if the console rejects \texttt{gain=60} or the
-receiver overflows, step down in 5\,dB until it runs clean}, note the
-values you actually used in the questionnaire, and read every
-\texttt{gain=60} below as that ladder-max value.
+Read every \texttt{gain=60} below as your ladder-maximum value, and
+note the four values the console stored in the questionnaire.
 
 \subsection*{2.3\quad Opening reference (${\sim}1$\,min)}
 
-One more tiny-flip 1D at the ladder-max gain, with a 2\,s record:
+One more tiny-flip 1D at the ladder-max gain, with a 2\,s record.
+\texttt{pw} and \texttt{tpwr} are the two values you wrote down in
+2.2 (the same stand-ins below):
 
 \begin{lstlisting}
+pw=0.11
+tpwr=57
 at=2
 gain=60
 go
@@ -193,13 +230,14 @@ pad=0
 wshim='n'
 alock='n'
 gain=60
-at=60
+at=30
 go
 svf('12_sn_noise')
 \end{lstlisting}
 
-Then repeat until you have at least 30 minutes of noise data in total,
-counting up from 17 (13 is reserved for the closing reference):
+Then repeat until you have at least 30 minutes of noise data in total
+--- about 60 blocks at \texttt{at=30} --- counting up from 17 (13 is
+reserved for the closing reference):
 
 \begin{lstlisting}
 go
@@ -208,44 +246,58 @@ go
 svf('18_sn_noise')
 \end{lstlisting}
 
-Three places your judgment is needed --- each is an unverified point
-we ask you to settle:
+Three notes --- two settled on this console, one still open:
 \begin{itemize}
-\item \textbf{Record length.} Try \texttt{at=60} (30 blocks reach
-      30\,min); if the console refuses --- a maximum-points ceiling we
-      have not measured on the DD2 --- halve \texttt{at} until it
-      accepts and note the largest value that worked. If it caps near
-      10\,s, do not grind out 180 saves: take about 20 blocks, note
-      the cap, and stop --- on this first session a parseable short
-      set beats a long one.
+\item \textbf{Record length.} The console caps a record at a point
+      count, \texttt{np} $\leq$ 524288, so the longest record is
+      $\texttt{at}_{\max} = 524288/(2\,\texttt{sw})$ --- about 41\,s
+      at \texttt{sw} = 6410\,Hz. \texttt{at=30} with about 60 blocks
+      gives 30 minutes; both sessions here used 30\,s records (62 and
+      60 blocks). A narrower \texttt{sw} buys a proportionally longer
+      record --- 3205\,Hz allows about 82\,s --- if your usual water
+      window permits it.
 \item \textbf{Transmitter silence.} Whether the DD2's transmitter
-      chain is measurably silent at \texttt{pw=0 tpwr=-16} has never
-      been checked. If the noise floor shows something odd --- a
+      chain is measurably silent at \texttt{pw=0 tpwr=-16} has not
+      been checked --- no spectrum analyser was available on
+      2026-09-14. If the noise floor shows something odd --- a
       carrier spike, a ridge --- do not chase it: finish the session
       and describe it in the questionnaire notes.
-\item \textbf{Save names.} If \texttt{svf} objects to a name starting
-      with a digit, save under any name and rename the \file{.fid}
-      directories to the \file{NN\_\ldots} pattern when you copy them
-      off (only the leading number is parsed) --- and note it for us.
+\item \textbf{Save names.} \texttt{svf} accepts names starting with a
+      digit on this console --- both sessions saved every experiment
+      under the \file{NN\_\ldots} pattern. Only the leading number is
+      parsed.
 \end{itemize}
 
 \subsection*{2.5\quad Closing reference (${\sim}1$\,min)}
 
-Restore the reference parameters --- \texttt{tpwr=57} below standing
-in for your calibrated value from setup --- and save as 13:
+Repeat 2.3 exactly --- same \texttt{at}, same \texttt{gain}, and
+\texttt{pw} and \texttt{tpwr} back at the two values you wrote down in
+2.2 (the noise blocks left \texttt{pw=0 tpwr=-16} behind, so both
+must be restored; do not retype the stand-in numbers below unless they
+are yours). The two references are a matched drift bracket, and a
+closing reference at a different flip angle cannot be compared with
+the opening one --- the first session here took them at
+\texttt{pw}=0.05 and 0.1125\,$\mu$s, a $2.25\times$ mismatch in flip
+angle, for exactly this reason. Save as 13:
 
 \begin{lstlisting}
 pw=0.11
 tpwr=57
 at=2
+gain=60
 go
 svf('13_sn_ref_close')
 \end{lstlisting}
 
-That is the whole session. A VnmrJ macro that runs all of it
-unattended (\file{spin\_noise\_run.mac}) exists in draft --- once this
-first manual session validates the converter, we will ask for one more
-hour of bench time to try it.
+That is the whole session. An external acquisition driver --- a
+Python~2.6 script that runs on the console workstation itself,
+submits one block at a time to a running VnmrJ through
+\texttt{listenon}/\texttt{send2Vnmr}, and waits for each \file{.fid}
+to land before submitting the next --- ran the second session here end
+to end on 2026-09-14 (66 of 66 blocks, unattended). It is being
+contributed to \file{vendors/agilent/}; until it ships there, the
+manual steps above are the recommended path. The draft VnmrJ macro
+(\file{spin\_noise\_run.mac}) has still not run on hardware.
 
 \section{Back at your desk}
 
@@ -253,7 +305,13 @@ hour of bench time to try it.
 
 Copy the whole session directory --- every \file{NN\_*.fid} folder ---
 onto the laptop, any path. A USB stick is fine; the console never
-needs internet access.
+needs internet access. Copy the console's \file{/vnmr/vnmrrev} (three
+lines of text) into the top of that same directory as \file{vnmrrev}.
+The packer takes the VnmrJ version from the \texttt{"vnmrj\_version"}
+line of \file{answers.json} when that line is present --- the template
+below pre-fills SIU's --- and reads this copy only when the line is
+left out, so the copy is the fallback that lets you drop the line
+rather than retype the version.
 
 \subsection*{3.2\quad Fill in \file{answers.json}}
 
@@ -285,7 +343,7 @@ are yours to edit:
     "vt_setpoint_k": 298
   },
   "environment": {
-    "locked": false,
+    "locked": true,
     "operator_notes": "FILL IN (date; anything unusual during the run)"
   },
   "spectrometer": {
@@ -294,7 +352,7 @@ are yours to edit:
     "probe_string": "5 mm HCN"
   },
   "instrument": {
-    "vnmrj_version": "3.2",
+    "vnmrj_version": "3.2 Revision A",
     "spectrometer_model": "Agilent DD2 400",
     "field_state_notes": "FILL IN (lock on/off during the noise blocks; z0 stable?)"
   },
@@ -326,8 +384,9 @@ are yours to edit:
 Two mechanical notes: add one
 \texttt{\{ "expno": NN, "role": "noise" \}} line per noise block you
 saved beyond 18, and the ladder \texttt{"rg"} values are
-$10^{\mathrm{dB}/20}$ of the four gains --- pre-filled for
-0/20/40/60\,dB, so correct them if your ladder used different values.
+$10^{\mathrm{dB}/20}$ of the four gains \emph{as the console stored
+them} --- pre-filled for 0/20/40/60\,dB, so correct them if your
+ladder used different values (for 0/14/26/40: 1, 5.01, 19.95, 100).
 
 \subsection*{3.3\quad Pack, check, upload}
 
@@ -365,9 +424,9 @@ Send the \textbf{exact error text} (copy-paste, not a paraphrase) and
 the file it choked on --- the offending \file{NN\_*.fid} folder
 zipped, or the bundle zip --- to
 \href{mailto:jwbquantum@gmail.com}{jwbquantum@gmail.com}.
-Troubleshooting data is the point of this first run: the converter has
-never met a real Agilent file, and your session is how it becomes
-trustworthy. Nothing you can do here damages anything --- the software
+The converter has met one real Agilent instrument --- this one, two
+sessions --- and every further session is how it becomes trustworthy
+beyond that. Nothing you can do here damages anything --- the software
 only reads your data, the uploader never deletes your zip, and the
 worst case at every step is re-running one command. If the whole chain
 fights you, zip the entire session directory and e-mail that (a share
@@ -378,7 +437,7 @@ link is fine if it is large); we take it from there.
 \noindent\rule{\textwidth}{0.4pt}\\[2pt]
 {\small Contact: John W. Blanchard
 (\href{mailto:jwbquantum@gmail.com}{jwbquantum@gmail.com}) ---
-CASPEr@night software v0.4.0 --- August 28, 2026. Your raw data remain
+CASPEr@night software v0.6.0 --- September 15, 2026. Your raw data remain
 yours, and contributing facilities are co-authors on network
 publications their data enter.}
 

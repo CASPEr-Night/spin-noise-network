@@ -27,3 +27,9 @@ server/.dev.vars
 # Jython (testing/run_jython_harness.sh) bytecode caches
 .jython_cache/
 *$py.class
+
+# Inbound partner files and local working notes (never commit)
+scratch/
+
+# Registry snapshot written by analysis/registry_report.py -- facility contact details
+registry_facilities.json

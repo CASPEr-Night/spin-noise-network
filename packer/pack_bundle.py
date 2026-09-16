@@ -39,12 +39,13 @@ pluggable through reader adapters (see VendorReader below):
                package B).  Delegates format parsing to
                vendors/magritek/magritek_reader.py; see MagritekReader
                and vendors/magritek/README.md (validation checklist).
-    agilent  : IMPLEMENTED as a DRAFT pending partner-facility validation
-               (Agilent/Varian VnmrJ + OpenVnmrJ lineage).  Delegates
-               format parsing to vendors/agilent/agilent_reader.py
-               (binary fid + procpar per nmrglue's varian reader); see
-               AgilentReader and vendors/agilent/README.md (operator
-               protocol + validation checklist).
+    agilent  : IMPLEMENTED; format validated on real VnmrJ 3.2 / DD2
+               output (SIU Carbondale, 2026-09-14: two sessions packed,
+               validated and uploaded).  Delegates format parsing to
+               vendors/agilent/agilent_reader.py (binary fid + procpar
+               per nmrglue's varian reader); see AgilentReader and
+               vendors/agilent/README.md (operator protocol + the
+               checklist items still open: 2, 3, 9).
 
 Same portability rules as the uploader: Python 3 STANDARD LIBRARY ONLY,
 nothing newer than 3.6 (facility workstations).  The packer never
@@ -67,12 +68,17 @@ on real hardware/software before the corresponding reader is trusted):
     SpinsolveExpert); exact fields must be confirmed on a bench.
   * Agilent/Varian: fid binary layout and procpar text format follow
     nmrglue's varian reader (nmrglue/fileio/varian.py, BSD-3-Clause,
-    https://github.com/jjhelmus/nmrglue) -- but unlike the JEOL path, NO
-    public corpus of raw .fid directories was found to verify against,
-    so the whole format implementation awaits real VnmrJ 3.2 output
-    (vendors/agilent/README.md checklist).  Receiver-gain ('gain', dB)
-    range/step per console model, 'tof' offset convention, and procpar
-    timestamp semantics are UNVERIFIED.
+    https://github.com/jjhelmus/nmrglue) and were CONFIRMED on real
+    VnmrJ 3.2 / DD2 files (SIU Carbondale, 2026-09-14; checklist item
+    10).  Confirmed with them: procpar time_run/time_complete/time_saved
+    are console-local "YYYYMMDDTHHMMSS" stamps (item 6; they now feed
+    started_local/finished_local -- their accuracy is the console
+    clock's, hence the clock-sanity WARN), /vnmr/vnmrrev is the
+    machine-readable version source (item 8), and the record-length
+    limit is the np <= 524288 point-count cap (item 4).  Still
+    UNVERIFIED: 'tof' offset convention (item 2), transmitter silence at
+    pw=0 (item 3); receiver-gain linearity is measured but not yet
+    fitted (item 1, legal gains are integer dB).
   * Bruker: nothing pending -- acqus parameter names used here (TD,
     SW_h, SFO1, BF1, O1, RG, NS, PULPROG, BYTORDA, DTYPA, GRPDLY) are
     standard JCAMP-DX labels already exercised by this repository's
@@ -82,6 +88,7 @@ on real hardware/software before the corresponding reader is trusted):
 from __future__ import print_function
 
 import argparse
+import calendar
 import hashlib
 import json
 import os
@@ -93,7 +100,7 @@ import zipfile
 
 # Kept in sync with the repository VERSION file (a literal, because this
 # script may be copied standalone); testing/static_check.py enforces it.
-PACKER_VERSION = "0.6.0"
+PACKER_VERSION = "0.7.0"
 SCHEMA_VERSION = "2.0"
 
 GAMMA_1H_MHZ_PER_T = 42.5774806   # same constant spin_noise_run.py uses
@@ -140,8 +147,12 @@ class VendorReader(object):
         """Return a dict of parameters discovered from the vendor files in
         one experiment directory.  Recognized keys (all optional -- omit
         what the files do not carry): td, td1_rows, sw_hz, o1_hz, rg, ns,
-        pulprog, h1_freq_mhz, aq_s_per_row.  Extra vendor-specific keys
-        are allowed and end up in the instrument block via
+        pulprog, h1_freq_mhz, aq_s_per_row, and the acquisition wall-clock
+        stamps started_local / finished_local as zone-less
+        "YYYY-MM-DDTHH:MM:SS" strings in the acquisition machine's local
+        time (answers.json still wins; without either the packer falls
+        back to file mtimes with a WARN).  Extra vendor-specific keys are
+        allowed and end up in the instrument block via
         instrument_block()."""
         raise NotImplementedError
 
@@ -733,21 +744,23 @@ class AgilentReader(VendorReader):
     a numeric prefix maps each directory onto the Bruker expno plan,
     e.g. 11_sn_ref_open.fid, 12_sn_noise.fid.
 
-    DRAFT PENDING PARTNER-FACILITY VALIDATION (Boyd Goodson, SIU
-    Carbondale: 400 MHz Agilent DD2, VnmrJ 3.2).  Parsing is delegated
-    to vendors/agilent/agilent_reader.py; the fid/procpar layout follows
-    nmrglue's varian reader (BSD-3-Clause) but -- unlike the JEOL path --
-    has NOT yet been checked against real instrument output (no public
-    corpus of raw .fid directories was found).  Still UNVERIFIED and
-    awaiting the partner session (vendors/agilent/README.md checklist):
-    'gain' units/range/linearity on the DD2, 'tof' offset convention,
-    transmitter silence at pw=0, procpar timestamp semantics, and
-    whatever a live VnmrJ 3.2 writes that the docs did not teach us.
+    VALIDATED ON REAL HARDWARE (Boyd Goodson's 400 MHz Agilent DD2,
+    VnmrJ 3.2, SIU Carbondale, 2026-09-14: 134 .fid directories over
+    two sessions, zero reader warnings, byte round-trip exact).  Parsing
+    is delegated to vendors/agilent/agilent_reader.py; the fid/procpar
+    layout follows nmrglue's varian reader (BSD-3-Clause).  Still
+    UNVERIFIED (vendors/agilent/README.md checklist): 'tof' offset
+    convention (item 2) and transmitter silence at pw=0 (item 3);
+    'gain' is integer dB with the amplitude transfer curve not yet
+    fitted (item 1).
 
     Parameter mapping (README.md table):
       td   = np                (Varian np is TOTAL points, re+im
                                 interleaved -- the same counting
-                                convention as Bruker TD; at = np/(2*sw))
+                                convention as Bruker TD; at = np/(2*sw);
+                                the DD2 caps np at 524288, so the longest
+                                record is at_max = 524288/(2*sw) --
+                                40.9 s at sw = 6410 Hz; item 4)
       td1_rows = fid nblocks   (arrayed acquisitions land as blocks; 1
                                 for the Tier-1 protocol's plain 1Ds)
       sw_hz = sw               (Hz)
@@ -760,15 +773,28 @@ class AgilentReader(VendorReader):
       ns   = nt
       aq_s_per_row = at        (s; falls back to np/(2*sw))
       h1_freq_mhz = sfrq       (MHz) when tn is the proton channel
+      started_local  = time_run        (procpar "YYYYMMDDTHHMMSS",
+      finished_local = time_complete    console-local wall clock;
+                       (else time_saved) item 6 -- clock sanity below)
+      instrument.vnmrj_version = vnmrrev file copied into the session
+                                 directory (item 8) unless answered
     """
 
     name = "agilent"
 
     _PREFIX_RE = re.compile(r"^(\d+)_")
+    _VNMRREV_NAMES = ("vnmrrev", "vnmrrev.txt")
+    _VNMRREV_HOWTO = (
+        "the machine-readable source is /vnmr/vnmrrev on the console "
+        "(first line 'VnmrJ VERSION 3.2 REVISION A'): copy it verbatim to "
+        "the top of the session directory as 'vnmrrev' (or 'vnmrrev.txt'), "
+        "or enter the value by hand, e.g. "
+        '"instrument": {"vnmrj_version": "3.2 Revision A"}')
 
     def __init__(self):
         self._mod = None
         self._warnings = []
+        self._data_dir = None
 
     def _reader(self):
         """Lazy-import vendors/agilent/agilent_reader.py (stdlib)."""
@@ -790,6 +816,7 @@ class AgilentReader(VendorReader):
         return self._mod
 
     def discover_experiments(self, data_dir):
+        self._data_dir = data_dir
         try:
             names = sorted(os.listdir(data_dir))
         except OSError as exc:
@@ -907,10 +934,46 @@ class AgilentReader(VendorReader):
         tof = sc(pp, "tof")
         if isinstance(tof, (int, float)):
             found["o1_hz"] = float(tof)
+        # time_run is stamped when acquisition starts and time_complete
+        # when it ends (the svf-written log agrees to the second); the
+        # file mtime is the save time, i.e. the END of the record.
+        started = mod.vnmrj_time_iso(sc(pp, "time_run"))
+        if started:
+            found["started_local"] = started
+        finished = mod.vnmrj_time_iso(sc(pp, "time_complete")) \
+            or mod.vnmrj_time_iso(sc(pp, "time_saved"))
+        if finished:
+            found["finished_local"] = finished
         if fid is not None:
             found["fid_structure_ok"] = bool(fid.get("structure_ok"))
         found["_format"] = "varian-fid"
         return found
+
+    def _vnmrrev(self):
+        """(vnmrj_version, source path, rejected) from a vnmrrev copy at
+        the top of the session directory: every candidate name is tried
+        in turn, and each unusable copy is described in the `rejected`
+        list of strings (version and path are None when none parsed)."""
+        rejected = []
+        if not self._data_dir:
+            return None, None, rejected
+        mod = self._reader()
+        for fn in self._VNMRREV_NAMES:
+            p = os.path.join(self._data_dir, fn)
+            if not os.path.isfile(p):
+                continue
+            try:
+                rev = mod.parse_vnmrrev(p)
+            except mod.AgilentReadError as exc:
+                rejected.append("%s: %s" % (p, exc))
+                continue
+            if rev is None:
+                rejected.append(
+                    "%s: its first line is not of the form 'VnmrJ VERSION "
+                    "<ver> REVISION <rev>'" % p)
+                continue
+            return rev["vnmrj_version"], p, rejected
+        return None, None, rejected
 
     def instrument_block(self, answers, discovered):
         warnings = list(self._warnings)
@@ -919,12 +982,28 @@ class AgilentReader(VendorReader):
         if not isinstance(ans_inst, dict):
             ans_inst = {}
         vnmrj_version = ans_inst.get("vnmrj_version")
-        if not isinstance(vnmrj_version, str) or not vnmrj_version:
+        if vnmrj_version is not None and not isinstance(vnmrj_version, str):
             raise PackError(
-                "answers.json is missing instrument.vnmrj_version (the "
-                "VnmrJ/OpenVnmrJ software version, e.g. \"3.2\"; no "
-                "machine-readable source in procpar is verified yet, so "
-                "enter it by hand)")
+                "answer instrument.vnmrj_version: expected a string, got %r "
+                '(e.g. "3.2 Revision A")' % (vnmrj_version,))
+        if not vnmrj_version:
+            vnmrj_version, src, rejected = self._vnmrrev()
+            if vnmrj_version:
+                for r in rejected:
+                    warnings.append("vnmrrev copy ignored -- %s" % r)
+                warnings.append("vnmrj_version %r taken from %s (not "
+                                "answered in answers.json)"
+                                % (vnmrj_version, src))
+            elif rejected:
+                raise PackError(
+                    "answers.json is missing instrument.vnmrj_version and "
+                    "the session directory's vnmrrev copy could not be used "
+                    "(%s) -- %s" % ("; ".join(rejected), self._VNMRREV_HOWTO))
+            else:
+                raise PackError(
+                    "answers.json is missing instrument.vnmrj_version and "
+                    "the session directory has no vnmrrev file -- %s"
+                    % self._VNMRREV_HOWTO)
         gains = [d["rx_gain_db"] for d in discovered.values()
                  if isinstance(d.get("rx_gain_db"), float)]
         # verbatim dB; the noise block runs at the highest, most relevant
@@ -934,10 +1013,10 @@ class AgilentReader(VendorReader):
                           if d.get("fid_structure_ok") is False)
         if bad_fids:
             warnings.append("fid in expno(s) %s did not match the "
-                            "nmrglue-documented header arithmetic "
-                            "(UNVERIFIED format variant?) -- packed "
-                            "verbatim; verify at the partner session"
-                            % bad_fids)
+                            "nmrglue-documented header arithmetic that "
+                            "real DD2 files satisfy exactly (an unexpected "
+                            "format variant?) -- packed verbatim; report "
+                            "it with one such fid attached" % bad_fids)
         notes = ans_inst.get("field_state_notes", "")
         if not notes:
             warnings.append(
@@ -1098,6 +1177,20 @@ def local_tz_offset_min():
     return int(-time.timezone / 60)
 
 
+def resolve_tz_offset_min(answers):
+    """The zone every started_local/finished_local is read in (schema:
+    local_timezone_offset_min): the answered value, else this machine's."""
+    tz_min = answers.get("local_timezone_offset_min")
+    if not isinstance(tz_min, int) or isinstance(tz_min, bool):
+        tz_min = local_tz_offset_min()
+    return tz_min
+
+
+def tz_offset_label(tz_min):
+    sign = "+" if tz_min >= 0 else "-"
+    return "UTC%s%02d:%02d" % (sign, abs(tz_min) // 60, abs(tz_min) % 60)
+
+
 def script_self_sha256():
     try:
         h = hashlib.sha256()
@@ -1121,6 +1214,50 @@ def infer_role(pulprog):
     if pulprog and "noise" in pulprog.lower():
         return "noise"
     return None
+
+
+def stamp_to_epoch(value, tz_min):
+    """UTC epoch seconds for a zone-less "YYYY-MM-DDTHH:MM:SS" stamp that
+    is known to be in the UTC+tz_min zone, or None."""
+    try:
+        return calendar.timegm(time.strptime(value, "%Y-%m-%dT%H:%M:%S")) \
+            - tz_min * 60
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+CLOCK_AHEAD_TOLERANCE_S = 600
+
+
+def check_experiment_clock(expno, started, finished, tz_min, warnings):
+    """At most one WARN per experiment.  Stamps are read in the zone
+    answers.json declares for them (local_timezone_offset_min, else this
+    machine's), so a console in another zone is not mistaken for a fast
+    clock once that answer is given.  Only a FAST acquisition clock is
+    detectable here (a start stamp in the future); a slow one is
+    indistinguishable from an older acquisition.  A stamp reconstructed
+    from a file mtime is passed as None: the copy time is not the
+    acquisition time, and finished < started is then expected."""
+    t0 = stamp_to_epoch(started, tz_min)
+    if t0 is None:
+        return
+    ahead_s = t0 - time.time()
+    if ahead_s > CLOCK_AHEAD_TOLERANCE_S:
+        warnings.append(
+            "experiment %d: started_local %s (read as %s) is in the future "
+            "-- acquisition clock appears ahead of this machine by ~%d min "
+            "-- check the console clock/NTP (vendor checklist item 6); if "
+            "the console keeps a different time zone, answer "
+            "local_timezone_offset_min with the console's offset"
+            % (expno, started, tz_offset_label(tz_min),
+               int(round(ahead_s / 60.0))))
+        return
+    t1 = stamp_to_epoch(finished, tz_min)
+    if t1 is not None and t1 < t0:
+        warnings.append(
+            "experiment %d: finished_local %s is before started_local %s "
+            "-- check the console clock/NTP (vendor checklist item 6) or "
+            "the answers.json values" % (expno, finished, started))
 
 
 EXP_FIELDS_NUM = ("sw_hz", "o1_hz", "rg", "aq_s_per_row")
@@ -1147,6 +1284,7 @@ def build_experiments(reader, experiments_found, answers, problems, warnings):
     ordered = sorted(experiments_found,
                      key=lambda ed: (answer_order.get(ed[0], len(answer_order)),
                                      ed[0]))
+    tz_min = resolve_tz_offset_min(answers)
 
     out = []
     for expno, dirpath in ordered:
@@ -1182,8 +1320,12 @@ def build_experiments(reader, experiments_found, answers, problems, warnings):
                                     "add it to answers.json" % (expno, name))
                     v = None
             entry[name] = v
+        stamps = {}
         for name in ("started_local", "finished_local"):
             v = ov.get(name)
+            if not isinstance(v, str) or not v:
+                v = disc.get(name)      # vendor-file acquisition stamp
+            stamps[name] = v if isinstance(v, str) and v else None
             if not isinstance(v, str) or not v:
                 raw = None
                 if os.path.isfile(dirpath):    # single-file experiment
@@ -1201,6 +1343,8 @@ def build_experiments(reader, experiments_found, answers, problems, warnings):
                                 "answers.json if known better"
                                 % (expno, name, v))
             entry[name] = v
+        check_experiment_clock(expno, stamps["started_local"],
+                               stamps["finished_local"], tz_min, warnings)
         out.append((entry, disc))
     return out
 
@@ -1353,9 +1497,7 @@ def build_meta(vendor, reader, data_dir, answers):
             "%s\n(see packer/answers.example.json for the full questionnaire)"
             % (len(problems), "\n  - ".join(problems)))
 
-    tz_min = answers.get("local_timezone_offset_min")
-    if not isinstance(tz_min, int) or isinstance(tz_min, bool):
-        tz_min = local_tz_offset_min()
+    tz_min = resolve_tz_offset_min(answers)
 
     meta = {
         "schema_version": SCHEMA_VERSION,

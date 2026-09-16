@@ -3,8 +3,13 @@
 Operational script for the remote supervised pilot: we screen-share (or
 NoMachine) into the facility's TopSpin workstation while a local colleague
 sits at the console. This is the first time `topspin/spin_noise_run.py`
-(v0.3.0-dev, the current `VERSION`) touches a real spectrometer; Tier −1 and Tier 0 are already green
+(v0.7.0) touches a real spectrometer; Tier −1 and Tier 0 are already green
 (`testing/tier0_desktest.md`).
+
+The pilot runs the plain default session only. The optional modes that
+exist as of v0.6 (`rdopt`, `sweep`, `AUTOSTEP`) stay OFF — each has its
+own validation gate (`docs/autostep_bench_checklist.md` for autostep) and
+none is part of a first supervised run.
 
 Roles below: **R** = remote operator (us), **L** = local colleague at the
 console. Contact for everything: John W. Blanchard, jwbquantum@gmail.com.
@@ -36,10 +41,11 @@ console. Contact for everything: John W. Blanchard, jwbquantum@gmail.com.
 - [ ] Sample request: **5 mm tube, ~550 µL plain water, with a KNOWN H₂O
       fraction** (tap or distilled is fine; if D₂O-doped, they must know the
       percentage — the H₂O-fraction dialog is the measurement, per
-      PROTOCOL.md).
-- [ ] Ingest endpoint deployed (HANDOFF step 6, ~10 min) and the endpoint +
-      token sent to the facility **privately** (not in the install-kit email)
-      so step 11's automatic upload works on the day.
+      PROTOCOL.md). Solids/MAS site: a sealed rotor of water instead — §6.
+- [ ] The facility's filled `config.json` (endpoint + token) sent
+      **privately** by the maintainer (never in the install-kit email) so
+      step 11's automatic upload works on the day. The ingest endpoint is
+      live; nothing needs deploying.
 
 ### 1.2 Ask the facility (answers back before the call)
 
@@ -135,9 +141,8 @@ console. Contact for everything: John W. Blanchard, jwbquantum@gmail.com.
     which includes the clock-audit block timestamps and remains fully
     valid under the current v2.0 vendor-neutral contract; all sha256
     verified).
-11. **Upload (primary).** With the ingest Worker deployed (see HANDOFF step
-    6 — deploy it BEFORE the pilot) and the facility's `config.json` filled
-    with the endpoint + token sent privately beforehand:
+11. **Upload (primary).** With the facility's `config.json` (endpoint +
+    token, sent privately beforehand) in place next to the uploader:
     `python3 upload_bundle.py <bundle.zip>`. Size is a non-issue: bundles
     over 50 MB automatically take the chunked path (50 MiB parts, up to
     5 GiB) and **resume after any interruption** — if the transfer drops,
@@ -204,12 +209,35 @@ directory of the template dataset they had open. Nothing else was written.
 ## 5. After the session
 
 - [ ] Within 24 h: run the facility report generator
-      (`analysis/facility_report.py`; if it is not yet in the repo at pilot
-      time, write it against this bundle — the pilot bundle is its first
-      test case) on the received bundle.
+      (`analysis/facility_report.py`) on the received bundle and read the
+      honesty section before sending anything onward.
 - [ ] Send the facility the report + a thank-you note (from
       jwbquantum@gmail.com) — include their probe's first point on the
       temperature-contrast curve if the feature is visible.
+- [ ] Update the site's running axion-coupling exclusion: run
+      `analysis/facility_report.py` on the new bundle with
+      `--prior-reports` over the site's earlier `report.json` files (the
+      new report then carries `science.axion_exclusion.site_combined`), or
+      run `analysis/site_exclusion.py` over all of them — the combined
+      curve is the pointwise minimum over sessions under each axis-sign
+      hypothesis, so a new session can only tighten or extend it while
+      the site's sign-unverified vendors number at most three (a fourth
+      switches the combiner to its never-tighter independent-sign
+      fallback and the curve can loosen there; the `rule` says so). Where
+      the vendor's frequency-axis sign is unverified (Agilent/VnmrJ) the
+      headline is the weaker of the two sign hypotheses and the
+      `sign_note` quantifies the cost; the sign is taken as one shared
+      unknown per vendor — a premise, not a measurement: `sign_premise`
+      states it (one console, one acquisition-software convention across
+      the site's sessions of that vendor), what breaks it, and the
+      headline without it — so one tof-shift test (vendor checklist
+      item 2) collapses the site bound to the conditional value quoted
+      beside it.
+      Read the `coverage_note` with the number: where a session's P_90 is
+      fluctuation-driven (statistical term 30% or more, a null block) the
+      minimum over N such sessions has coverage toward 0.9^N, not 90%.
+      Worst-case, unpublished numbers, far above astrophysical bounds —
+      never quote them as more than that.
 - [ ] Record lessons in `testing/pilot_notes_<slug>_<date>.md`: every dialog
       that confused L, every timing surprise, every quirk hit from §6, the
       exact TopSpin version string.
@@ -243,10 +271,21 @@ directory of the template dataset they had open. Nothing else was written.
   selftest and upload from any other machine — copy the zip on a stick;
   the spectrometer host never needs internet. The uploader is stdlib-only
   by design; do not pip-install anything on their box.
-- **Ingest not deployed / no token:** should not happen — deploying the
-  Worker before the pilot is a T−1 item (HANDOFF step 6; ~10 minutes). If
-  it slipped anyway, use the email fallback in step 11. Zenodo remains the
-  zero-infrastructure archive fallback (`server/` docs).
+- **`config.json` missing or token rejected:** should not happen — sending
+  the filled config privately is a T−1 item (§1.1). If it slipped anyway,
+  use the email fallback in step 11; the bundle is never deleted, so nothing
+  is lost by uploading later. Zenodo remains the zero-infrastructure archive
+  fallback (`server/` docs).
+- **Solids/MAS probe (static rotor variant):** the protocol is unchanged —
+  only the sample holder differs. Water goes in a sealed rotor (4 mm ≈
+  80 µL; prefer the larger rotor for volume), the rotor stays **static**
+  (no spinning at any point), and shimming a static sample in an MAS probe
+  gives a broader water line than a liquids probe — that is expected and
+  the analysis handles it; the references still show the line. Probes
+  without a ²H lock channel run unlocked: answer the lock dialog
+  truthfully ("no lock available") — it is a recorded state, not a fault —
+  and the bracketing references (expnos 11/13) become the drift check, so
+  compare them with extra care in §3.
 - **Mid-run Jython error dialog:** the run stops but running acquisitions
   finish and all data stays in `SPINNOISE_<date>`; photograph/copy the
   error text — it is pilot gold — and decide with L whether to bundle

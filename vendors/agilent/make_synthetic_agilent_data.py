@@ -6,6 +6,7 @@ spin-noise session directory so the agilent adapter + packer + uploader
 selftest chain is testable today, without hardware.
 
     python3 vendors/agilent/make_synthetic_agilent_data.py [--out-dir D]
+        [--base-time YYYY-MM-DDTHH:MM:SS] [--clock-skew-s SECONDS]
 
 Prints exactly one line on stdout: the session directory path. The
 session mimics what the Tier-1 operator checklist (or the draft
@@ -16,22 +17,31 @@ directory per experiment, named with the Bruker-expno-plan prefix:
     <session>/11_sn_ref_open.fid            reference_open
     <session>/12,17,18_sn_noise*.fid        three noise blocks
     <session>/13_sn_ref_close.fid           reference_close
+    <session>/vnmrrev                       copy of /vnmr/vnmrrev
     <session>/answers_packer.json           packer questionnaire
 
 The fid payloads are white pseudo-noise in the layout documented by
 nmrglue's varian reader (32-byte big-endian file header '>6ihhi'
 [nblocks, ntraces, np, ebytes, tbytes, bbytes, vers_id, status,
 nbheaders], one 28-byte block header '>4hi4f' per block, then np
-big-endian int32 points -- interleaved re/im). The vers_id and status
-values written here are SYNTHETIC placeholders beyond the documented
-dtype bits (S_32 set, S_FLT clear) -- no real VnmrJ 3.2 fid has been
-inspected yet (partner checklist item 10); the reader deliberately
-checks header arithmetic, not magic.
+big-endian int32 points -- interleaved re/im). Real DD2 files
+(2026-09-14) carry status 201 = float32; int32 (S_32 set, S_FLT clear)
+is kept here so the other dtype branch stays exercised, and vers_id
+stays a placeholder -- the reader deliberately checks header
+arithmetic, not magic.
 
 The procpar records follow the nmrglue-documented record shape (11-field
 first line, count-prefixed values line, enumerable line) with the
 standard parameter names (np, sw, at, sfrq, tof, gain, nt, pw, tpwr, d1,
-tn, seqfil, solvent, temp).
+tn, seqfil, solvent, temp) plus the VnmrJ 3.2 wall-clock stamps
+time_run / time_complete / time_saved ("YYYYMMDDTHHMMSS", console-local,
+as on the real console): experiments run back to back from --base-time
+(a fixed default, so the session is deterministic; the literal "now"
+means the current wall clock), each lasting its at plus a few seconds
+of overhead. --clock-skew-s shifts every stamp (a fast console clock --
+the state SIU found on its console before the 2026-09-14 sessions);
+--base-time now with a positive skew exercises the packer's ahead-clock
+WARN.
 
 answers_packer.json carries run_mode "desktest" so the resulting bundle
 can NEVER be mistaken for a real record.
@@ -42,6 +52,7 @@ Python 3 stdlib only, nothing newer than 3.6.
 from __future__ import print_function
 
 import argparse
+import datetime
 import json
 import os
 import random
@@ -50,6 +61,12 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+BASE_TIME = "2026-03-01T09:00:00"   # first time_run (console-local)
+SETUP_OVERHEAD_S = 4                # submit -> time_run, per experiment
+SAVE_OVERHEAD_S = 2                 # time_run + at -> time_complete
+VNMRREV_LINES = ("VnmrJ VERSION 3.2 REVISION A", "September 21, 2011",
+                 "vnmrsdd2")        # verbatim /vnmr/vnmrrev of the SIU DD2
 
 SFRQ_MHZ = 399.945          # synthetic 400 MHz DD2
 SW_HZ = 10000.0
@@ -84,7 +101,12 @@ def _string_record(name, value):
     return ('%s 2 2 0 0 0 1 0 0 1 64\n1 "%s"\n0 \n' % (name, value))
 
 
-def write_procpar(path, seqfil, np_pts, gain_db, at_s, pw_us, tpwr_db):
+def vnmrj_stamp(dt):
+    return dt.strftime("%Y%m%dT%H%M%S")
+
+
+def write_procpar(path, seqfil, np_pts, gain_db, at_s, pw_us, tpwr_db,
+                  t_run, t_complete):
     recs = [
         _real_record("np", np_pts),
         _real_record("sw", SW_HZ),
@@ -101,6 +123,11 @@ def write_procpar(path, seqfil, np_pts, gain_db, at_s, pw_us, tpwr_db):
         _string_record("seqfil", seqfil),
         _string_record("pslabel", seqfil),
         _string_record("solvent", "None"),
+        _string_record("date", t_run.strftime("%b %d %Y")),
+        _string_record("time_run", vnmrj_stamp(t_run)),
+        _string_record("time_complete", vnmrj_stamp(t_complete)),
+        _string_record("time_saved", vnmrj_stamp(t_complete)),
+        _string_record("time_processed", ""),
         _string_record("comment",
                        "synthetic CI session; not data; never upload"),
     ]
@@ -131,7 +158,27 @@ def main(argv=None):
     parser.add_argument("--out-dir", default=None,
                         help="parent directory (default: "
                              "vendors/agilent/synthetic_sessions/)")
+    parser.add_argument("--base-time", default=BASE_TIME,
+                        help="time_run of the first experiment, console-"
+                             "local YYYY-MM-DDTHH:MM:SS, or 'now' "
+                             "(default %s)" % BASE_TIME)
+    parser.add_argument("--clock-skew-s", type=float, default=0.0,
+                        help="shift every procpar time stamp by this many "
+                             "seconds (a fast console clock when positive; "
+                             "default 0)")
     args = parser.parse_args(argv)
+
+    if args.base_time == "now":
+        clock = datetime.datetime.now().replace(microsecond=0)
+    else:
+        try:
+            clock = datetime.datetime.strptime(args.base_time,
+                                               "%Y-%m-%dT%H:%M:%S")
+        except ValueError:
+            info("--base-time must be YYYY-MM-DDTHH:MM:SS or 'now', got %r"
+                 % args.base_time)
+            return 2
+    clock += datetime.timedelta(seconds=args.clock_skew_s)
 
     parent = args.out_dir or os.path.join(HERE, "synthetic_sessions")
     if not os.path.isdir(parent):
@@ -139,6 +186,8 @@ def main(argv=None):
     stamp = time.strftime("%Y%m%d_%H%M%S")
     session = os.path.join(parent, "spinnoise_ci-agilent_%s" % stamp)
     os.makedirs(session)
+    with open(os.path.join(session, "vnmrrev"), "w") as fh:
+        fh.write("\n".join(VNMRREV_LINES) + "\n")
 
     plan = []
     for expno, tag, gain in LADDER:
@@ -158,8 +207,12 @@ def main(argv=None):
         d = os.path.join(session, dirname)
         os.makedirs(d)
         at_s = np_pts / (2.0 * SW_HZ)
+        t_run = clock + datetime.timedelta(seconds=SETUP_OVERHEAD_S)
+        t_complete = t_run + datetime.timedelta(
+            seconds=int(at_s + 0.999999) + SAVE_OVERHEAD_S)
+        clock = t_complete
         write_procpar(os.path.join(d, "procpar"), seqfil, np_pts, gain,
-                      at_s, pw_us, tpwr)
+                      at_s, pw_us, tpwr, t_run, t_complete)
         write_fid(os.path.join(d, "fid"), np_pts, seed=expno * 7919)
         with open(os.path.join(d, "text"), "w") as fh:
             fh.write("synthetic spin-noise %s block (never a science "
