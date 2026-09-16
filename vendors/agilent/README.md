@@ -1,13 +1,16 @@
 # Agilent/Varian path — converter-first strategy
 
-**Status: DRAFT PENDING HARDWARE VALIDATION.** No Agilent/Varian
-spectrometer has run this protocol yet. The validation partner is
-identified: a **400 MHz Agilent DD2 running VnmrJ 3.2** (Boyd Goodson,
-SIU Carbondale), 5 mm HCN probe, room temperature, **no autotune/match**
-— the partner checklist at the end is written against that machine.
-Everything below that could not be verified against real documentation,
-OpenVnmrJ source, or real data files is marked UNVERIFIED and appears in
-that checklist.
+**Status: VALIDATED ON REAL HARDWARE, 2026-09-14 — one console family,
+one instrument.** Two sessions on the partner instrument — a **400 MHz
+Agilent DD2 running VnmrJ 3.2** (Boyd Goodson, SIU Carbondale), 5 mm
+HCN probe, room temperature, **no autotune/match** — were acquired (68
+and 66 experiments), packed, validated and uploaded: V1–V6 PASS on
+both, zero reader warnings, byte round-trip exact. The partner
+checklist at the end is annotated item by item with what that settled:
+items 4, 5 (external-driver form), 8 and 10 answered, 1, 6 and 7
+partly, and **items 2, 3 and 9 remain open**. `spin_noise_run.mac` has
+still not run on hardware. Everything below that the console did not
+settle stays marked UNVERIFIED and appears in that checklist.
 Contact: John W. Blanchard <jwbquantum@gmail.com>.
 
 ## Strategy in one paragraph
@@ -18,8 +21,8 @@ the VnmrJ macro language (MAGICAL) is genuinely public, because
 **OpenVnmrJ** (github.com/OpenVnmrJ) is the open-source continuation of
 VnmrJ — same macro language, same manual pages, same shipped macro
 library lineage as the proprietary VnmrJ 3.2 on the partner instrument.
-**Tier 1 (available now, draft):** the operator follows a short manual
-checklist — the same physics protocol as the Bruker run, acquired with
+**Tier 1 (validated on the partner instrument, 2026-09-14):** the
+operator follows a short manual checklist — the same physics protocol as the Bruker run, acquired with
 VnmrJ's ordinary tools as a series of 1D experiments saved with `svf` —
 and our converter (`vendors/agilent/agilent_reader.py` +
 `packer/pack_bundle.py --vendor agilent`) turns the saved `.fid`
@@ -32,7 +35,12 @@ OpenVnmrJ documentation and from Agilent's own shipped
 `cryo_noisetest` macro (which is, remarkably, already a receiver-only
 noise measurement: `tpwr=-16 pw=0 nt=1 ss=0 pad=0 gain=50`, verbatim).
 Tier 1 depends only on things any VnmrJ operator does daily; Tier 2 is
-a documented-idiom draft awaiting its first bench session.
+a documented-idiom draft awaiting its first bench session. A third
+form — an external acquisition driver run from the console
+workstation, submitting one block at a time into a running VnmrJ
+through `listenon`/`send2Vnmr` — drove the second partner session end
+to end and is being contributed to this directory (see "Observed on
+the real console" below).
 
 ## Why this partner instrument matters physically
 
@@ -67,9 +75,10 @@ measurement this port enables.
   (quoted strings one per line), and an enumerable line.
   **Honest gap vs the JEOL port:** no public corpus of raw `.fid`
   directories was found to verify against (JEOL had 38 real files;
-  Magritek had real V2.02.27 output), so the format implementation is
-  *documentation-verified only* until the partner session parses a real
-  session (checklist item 10).
+  Magritek had real V2.02.27 output), so the format implementation was
+  *documentation-verified only* until the partner session parsed a real
+  session. Closed 2026-09-14: 134 real `.fid` directories from the
+  partner DD2 parsed with zero warnings (checklist item 10).
 * **MAGICAL macro language + acquisition control.** OpenVnmrJ publishes
   the full manual set (`src/common/manual/`) and macro library
   (`src/common/maclib/`). Verified there, verbatim: `go`/`ga`/`au`
@@ -148,11 +157,11 @@ everything into one directory, one `.fid` per step.
 | Step | Bruker equivalent (expno) | VnmrJ Tier-1 action | Save as |
 |---|---|---|---|
 | 0. Sample + setup | 1 (`setup`) | 5 mm tube, ~550 µL water (tap/distilled/D₂O-doped — record which). Insert, set/record temperature, equilibrate. Tune/match ¹H **by hand** (the partner probe has no autotune), shim as usual, calibrate the ¹H 90° pulse (or record the probe-file value). Write down pw90 and tpwr. | (optional) `01_sn_setup` |
-| 1. Gain ladder | 10/14/15/16 (`rg_ladder`) | Four `s2pul` 1Ds, tiny flip (`pw` ≈ pw90/90, i.e. ~1°), `nt=1`, at four ascending `gain` settings (e.g. 0/20/40/60 dB) ending at the maximum that does not overflow the receiver. **Set `gain` explicitly — never `gain='n'` (autogain).** Record the four dB values; the procpar records them too. | `svf('10_sn_ladder_a')` … `svf('16_sn_ladder_d')` (prefixes 10/14/15/16) |
-| 2. Opening reference | 11 (`reference_open`) | ONE `s2pul` 1D, same tiny flip, `nt=1`, at the ladder's maximum gain, `at` ≈ 2 s. (Deviation from Bruker's 8-row reference, accepted for Tier 1 exactly as on the JEOL path.) | `svf('11_sn_ref_open')` |
-| 3. Noise block | 12 (`noise`) | Repeated **no-pulse** 1Ds: `pw=0 tpwr=-16 nt=1 ss=0 pad=0`, gain at the ladder maximum, the longest `at` your console allows comfortably per record (aim ≥ 10 s), autoshim and autolock off (`wshim='n' alock='n'`), lock state your choice — **describe the lock/z0 state in the questionnaire**. Repeat until ≥ 30 min total. This is Agilent's own receiver-only idiom (`cryo_noisetest`). | `svf('12_sn_noise')`, then `17_sn_noise`, `18_sn_noise`, … (12 first, then count up from 17; 13 is reserved) |
-| 4. Closing reference | 13 (`reference_close`) | Identical to step 2. | `svf('13_sn_ref_close')` |
-| 5. Operator log | six TopSpin dialogs + `meta.json` | Fill in the questionnaire (copy `packer/answers.example.json`, set `"vendor": "agilent"`, add `instrument.vnmrj_version`, `instrument.field_state_notes`): facility, sample (**H₂O fraction!**), temperature, lock state, pw90/tpwr. | `answers_packer.json` |
+| 1. Gain ladder | 10/14/15/16 (`rg_ladder`) | Four `s2pul` 1Ds, tiny flip (`pw` ≈ pw90/90, i.e. ~1°), `nt=1`, at four `gain` settings spaced evenly from 0 to the maximum that does not overflow the receiver (legal values are integer dB). That maximum is sample-dependent — 60 dB on a 1% H₂O Gd-doped tube, 40 dB on 90/10 H₂O/D₂O, same probe — so scale the ladder to it (0/20/40/60, or 0/14/26/40), never a fixed set. **Set `gain` explicitly — never `gain='n'` (autogain).** Set `pw` and `tpwr` explicitly too and write them down. Record the four dB values the console stored (procpar `gain`) — on the partner console requests of 13.3 and 26.7 dB were stored as 14 and 26. | `svf('10_sn_ladder_a')` … `svf('16_sn_ladder_d')` (prefixes 10/14/15/16) |
+| 2. Opening reference | 11 (`reference_open`) | ONE `s2pul` 1D, same tiny flip (the ladder's `pw`/`tpwr`, set explicitly), `nt=1`, at the ladder's maximum gain, `at` ≈ 2 s. (Deviation from Bruker's 8-row reference, accepted for Tier 1 exactly as on the JEOL path.) | `svf('11_sn_ref_open')` |
+| 3. Noise block | 12 (`noise`) | Repeated **no-pulse** 1Ds: `pw=0 tpwr=-16 nt=1 ss=0 pad=0`, gain at the ladder maximum. Record length is a point-count cap, `np` ≤ 524288, so `at_max = 524288/(2·sw)` — 41 s at sw = 6410 Hz; use `at=30` and ~60 blocks for 30 min (a narrower `sw` buys proportionally longer records). Autoshim and autolock off (`wshim='n' alock='n'`); lock ON recommended (`alock='n'` does not release an established lock) — **describe the lock/z0 state in the questionnaire**. Repeat until ≥ 30 min total. This is Agilent's own receiver-only idiom (`cryo_noisetest`). | `svf('12_sn_noise')`, then `17_sn_noise`, `18_sn_noise`, … (12 first, then count up from 17; 13 is reserved) |
+| 4. Closing reference | 13 (`reference_close`) | Identical to step 2 — same `at`, same `gain`, same `pw`/`tpwr` as step 2 — a matched drift bracket. The noise blocks leave `pw=0 tpwr=-16` behind, so set both back explicitly. | `svf('13_sn_ref_close')` |
+| 5. Operator log | six TopSpin dialogs + `meta.json` | Fill in the questionnaire (copy `packer/answers.example.json`, set `"vendor": "agilent"`, add `instrument.field_state_notes`; copy the console's `/vnmr/vnmrrev` into the session directory as `vnmrrev`, or set `instrument.vnmrj_version` by hand): facility, sample (**H₂O fraction!**), temperature, lock state, pw90/tpwr. | `answers_packer.json` |
 | 6. Pack + upload | automatic zip + uploader | `python3 packer/pack_bundle.py <dir> --answers answers_packer.json --vendor agilent`, then upload the printed zip. The packer validates before you send and lists exactly what is missing. | bundle zip |
 
 Notes for the operator: nothing in this protocol pulses your sample at
@@ -187,62 +196,99 @@ clock-audit input). Design constraints it respects:
   preamble); the lock state itself is the operator's, asked and
   recorded — the Agilent analog of the Bruker BSMS-sweep confirmation.
 
-## What cannot be promised until the partner session
+## What the partner session settled, and what it did not
 
-Four things in particular we can NOT promise today, and will not imply.
-First, **the format implementation has never met a real file**: the
-fid/procpar layout is ported from nmrglue's documented reader, but no
-public corpus of raw VnmrJ `.fid` directories was found (unlike JEOL's
-38-file corpus), so a fresh session from the DD2 must be parsed before
-the reader is trusted. Second, **receiver-gain semantics**: `gain` is
-dB by documentation, but the DD2's legal values, step size, and
-amplitude linearity are unmeasured — bundles record dB verbatim (and
-the Bruker-comparable linear mapping 10^(dB/20) is labeled as exactly
-that), and no cross-gain calibration will be attempted until the
-partner ladder maps the transfer curve. Third, **transmitter silence at
-pw=0**: Agilent's own noise-test macro treats `pw=0 tpwr=-16` as
-receiver-only, but whether the DD2's TX chain emits anything during
-such a block has to be measured, not assumed — the 2022 lesson.
-Fourth, **the macro itself**: `spin_noise_run.mac` is built exclusively
-from documented constructs and a shipped-macro precedent, but VnmrJ 3.2
-predates the current OpenVnmrJ tree; version drift (wexp quoting,
-created-parameter behavior, svf path handling) is expected to cost
-minutes of fixing at the bench, not architecture changes — and until
-that session happens the macro stays labeled DRAFT and Tier 1 is the
-recommended path.
+Four things this README would not promise before 2026-09-14, revisited
+against the two SIU sessions. First, **the format implementation** has
+now met real files: 134 `.fid` directories from the DD2 — no-pulse
+noise blocks, references, ladder steps — parsed with zero warnings,
+byte round-trip exact, status bits selecting float32 as documented
+(item 10 cleared). Second, **receiver-gain semantics**: legal `gain`
+values are integer dB and two ladders ran without overflow (0/20/40/60
+dB, and 0/14/26/40 dB by procpar `gain` — requested as
+0/13.3/26.7/40), but the amplitude transfer curve is
+not yet fitted and the safe maximum is sample-dependent — bundles still
+record dB verbatim with the Bruker-comparable 10^(dB/20) mapping
+labeled as exactly that, and no cross-gain calibration is attempted
+(item 1 partial). Third, **transmitter silence at pw=0** is still
+unmeasured — no spectrum analyser was available at the partner site —
+so it remains assumed, not shown, the 2022 lesson unpaid (item 3 open).
+Fourth, **the macro itself**: `spin_noise_run.mac` has still not run;
+the wexp quoting, `au` chaining and absolute-path `svf` it relies on
+were exercised from outside VnmrJ by the external driver (66/66
+blocks), which is the tested form of Tier 2 today. Until the macro has
+its own bench session it stays labeled DRAFT, and Tier 1 — or the
+driver — is the recommended path. All of this is one console family,
+one instrument: a second Agilent site is the next boundary.
 
 ## Partner validation checklist (Boyd Goodson's DD2, VnmrJ 3.2)
 
-Each item is an UNVERIFIED assumption or open question carried by the
-code; the reader/adapter/macro stay "draft" until these are checked off
-on the real instrument. `UNVERIFIED(n)` marks in `spin_noise_run.mac`,
-`agilent_reader.py`, and `packer/pack_bundle.py` cross-reference these
-numbers.
+Each item began as an UNVERIFIED assumption or open question carried by
+the code. The two sessions of 2026-09-14 (one manual per the
+quickstart, one script-driven) settled some and not others; each item
+carries its status and the evidence. `UNVERIFIED(n)` marks in
+`spin_noise_run.mac`, `agilent_reader.py`, and `packer/pack_bundle.py`
+cross-reference these numbers.
 
 1. **`gain` values and linearity.** Legal receiver-gain values and step
    on the DD2 (documentation says dB, typically 0–60); the maximum
    noise-block gain with no ADC/receiver overflow; then the RG ladder
    against a fixed ~1° signal to fit the amplitude transfer curve.
    Snap the macro's `$ladgain*`/`$noisegain` defaults to legal values.
+   *2026-09-14: PARTIAL.* Legal gains are integer dB, as reported.
+   Ladders of 0/20/40/60 dB (1% H₂O Gd-doped tube, noise blocks at
+   60 dB) and 0/14/26/40 dB (90/10 tube, noise blocks at 40 dB) ran
+   without receiver overflow at their maxima. The second ladder was
+   requested as 0/13.3/26.7/40 and the console stored 14 and 26 —
+   values nearest-integer rounding would not give — so the legal step
+   or rounding rule is not settled by two points; the session-2 bundle
+   carries the requested values in `calibration.rg_ladder` (4.62,
+   21.63) and the stored ones in `experiments[].rg` (5.01, 19.95). The
+   amplitude transfer curve is not yet fitted. The safe maximum is strongly
+   sample-dependent — 60 vs 40 dB on the same probe — so the ladder is
+   scaled to an operator-found maximum, never fixed.
 2. **`tof`/`sfrq` conventions.** Confirm `sfrq` (MHz, observe channel,
    with `tn='H1'`) is the right `h1_freq_mhz`, and the `tof` sign and
    reference convention as the Bruker-O1 analog; fix the adapter if the
    convention differs.
+   *2026-09-14: OPEN.* Not exercised by either session (`tof` was
+   399.6 Hz in both); `sfrq` = 399.6211743 MHz was read as
+   `h1_freq_mhz` without contradiction, which is not a test of the
+   `tof` convention.
 3. **No-pulse silence.** With `s2pul pw=0 tpwr=-16`: is the transmitter
    chain measurably silent during a noise block (spectrum analyzer on
    the TX path if available, otherwise the noise floor itself)? Measure
    the residual tip if any; record the result in the questionnaire
    notes. If the facility can physically mute/detach the TX path,
    qualify that too.
+   *2026-09-14: OPEN.* No spectrum analyser was available at the
+   partner site. Nothing anomalous was seen in the noise floor, which
+   is not a measurement of transmitter silence.
 4. **DSP and record limits.** Whether `dsp='n'` applies/behaves on the
    DD2 (inline vs realtime DSP); maximum `np`/`at` per 1D record (the
    macro defaults to 10 s records; longer is better for the noise
    floor); any oversampling settings that change the fid layout.
+   *2026-09-14: ANSWERED.* The record-length limit is a point-count
+   cap: procpar `np` max 524288 (min 32, step 2), so `at_max =
+   524288/(2·sw)` — 40.9 s at sw = 6410.26 Hz, matching the ~40 s
+   ceiling hit at the bench; 30 s records were used (3205 Hz → ~82 s,
+   1602 Hz → ~164 s). `dsp` is not a parameter on this system;
+   `oversamp`, `fb` and `dmf` exist (noise blocks: oversamp 1, fb 4000,
+   dmf 29412) and the fid layout was the documented one. Derive the
+   block count from a target duration — `at = min(desired, at_max)`,
+   blocks = ceil(target/at) — never a hardcoded count.
 5. **Macro mechanics on VnmrJ 3.2.** Install `spin_noise_run.mac`, run
    a 2-noise-block session: wexp quoting/recursion, created `sn_*`
    parameter persistence across blocks, `input()` numeric typing,
    `mkdir('-p')`, `systemtime` format strings. Expect minutes of format
    fixing, not architecture changes.
+   *2026-09-14: ANSWERED for the external-driver form.* Per block,
+   `<params> wexp='svf(\'<absolute path>\')' au` sent into a running
+   VnmrJ via `listenon` + `send2Vnmr`, waiting for the `.fid` to appear
+   before the next: 66/66 blocks OK. wexp quoting, `au` chaining and
+   absolute-path `svf` work on 3.2. `spin_noise_run.mac` itself —
+   created `sn_*` parameter persistence, `input()` typing,
+   `mkdir('-p')`, `systemtime` formats — is still untested.
 6. **Timestamps and the clock audit.** `unixtime` resolution on the
    workstation and its NTP discipline (`chronyc tracking`/`ntpq -pn`);
    then wire `spin_noise_times.txt` into per-experiment
@@ -251,27 +297,141 @@ numbers.
    + OCXO-implied durations — both are available here: at·nt per
    block). Also check what timestamps procpar itself carries
    (`time_run`?) and their timezone.
+   *2026-09-14: PARTIAL.* procpar carries `time_run`, `time_complete`
+   and `time_saved` (also `time_submitted`, `time_svfdate`) as
+   `YYYYMMDDTHHMMSS` in console-local wall-clock time; the packer now
+   fills `started_local`/`finished_local` from them. NTP discipline of
+   the console still needs checking at every session: the partner
+   console was found 2 h 54 min fast in UTC and in the wrong zone, with
+   ntpd stopped for 92 days, and was corrected before either session —
+   a bundle built from an undisciplined clock passes `--selftest` and
+   `--verify-only` with every timestamp wrong. `unixtime` resolution
+   and the `clock_audit` block remain to be wired.
 7. **`svf` behavior.** Absolute session paths, the exact file set
    written on 3.2 (procpar/fid/text/log), collision behavior, and
    whether `svf(..., 'nodb')` is preferable on a database-enabled
    install.
+   *2026-09-14: PARTLY.* `svf` writes `<name>.fid` holding `fid`,
+   `log`, `procpar` and `text`; absolute session paths work; names
+   starting with a digit are accepted. Collision behavior and `'nodb'`
+   were not tested.
 8. **VnmrJ version provenance.** A machine-readable source for the
    VnmrJ version (procpar parameter? `/vnmr/vnmrrev`?) so
    `instrument.vnmrj_version` stops being operator-entered.
+   *2026-09-14: ANSWERED.* `/vnmr/vnmrrev` is machine-readable — "VnmrJ
+   VERSION 3.2 REVISION A / September 21, 2011 / vnmrsdd2" — and the
+   packer fills `instrument.agilent.vnmrj_version` from a copy of it
+   placed at the top of the session directory as `vnmrrev` whenever
+   answers.json does not give one, so the value need not be
+   operator-entered.
 9. **External reference input.** Whether the DD2 console accepts an
    external 10 MHz reference (future GPSDO clock option; facility
    consent required) — record model and connector, do not touch.
+   *2026-09-14: OPEN.* Not examined.
 10. **Live-console surprises.** Parse a fresh session from the DD2 with
     `agilent_reader.py inspect` and the packer; fix whatever the
     documentation did not teach us (procpar record wrapping, arrayed
     parameters, status-bit surprises, big-endian assumptions).
+    *2026-09-14: CLEARED.* fid/procpar implementation correct against
+    real DD2 output: 537 procpar keys parsed, structure OK, zero
+    warnings; `tbytes = np·ebytes`, `bbytes = tbytes + 28`, file size
+    = 32 + 28 + data; status 201 → float32 (`ebytes` 4). Big-endian
+    layout, procpar record format and status bits all confirmed on
+    no-pulse noise blocks, references and ladder steps.
+
+## Observed on the real console (SIU Carbondale, 2026-09-14)
+
+Notes from the two partner sessions that belong next to the checklist
+without being checklist items. One console family, one instrument.
+
+* **`send2Vnmr` location.** The `listenon` manual page says
+  `/vnmr/acqbin/send2Vnmr`; on this install it is
+  `/vnmr/bin/send2Vnmr`. The `listenon` macro writes to
+  `$vnmruser/.talk`. Anything scripting VnmrJ from outside should look
+  in both places.
+* **Do not shim against radiation damping.** On the 90/10 H₂O/D₂O tube
+  the water line was ~32 Hz FWHM and asymmetric — it looks like a shim
+  failure and is not one. Controlled test, identical shims and
+  acquisition (gain 30, pw 0.05, tpwr 56, at 2 s), only the tube
+  swapped: 1% H₂O + Gd, FWHM 8.50 Hz, asymmetry 1.00; 90% H₂O, FWHM
+  32.37 Hz, asymmetry 1.59. Field inhomogeneity does not depend on
+  proton concentration, so 3.8× broadening at ~90× proton density is
+  radiation damping, and the FID shape agrees (log-magnitude curvature
+  −301 vs +2.2; first-twelfth decay ratio 74× vs 13×). Three
+  gradient-shim iterations on the 90/10 tube moved z3–z5 by hundreds
+  of DAC units (z4 +747, z5 +658, z3 −376) while FWHM changed < 0.2 Hz
+  and asymmetry < 0.02 — the shim iterated against a linewidth it
+  cannot influence and the high-order terms diverged. Judge shim
+  quality on the lock signal or a dilute/doped tube, and not by DAC
+  magnitudes (z3 −8499, z4 7327, z3y −8304 gave the symmetric 8.5 Hz
+  line). Dip depth goes as f_c·λ_r/λ_tot and λ_r *is* radiation
+  damping, so a strongly RD-broadened near-neat sample is the regime
+  that produces a large Guéron dip: the broad line is the phenomenon,
+  not a defect.
+* **Lock ON during the noise blocks**, unless there is a reason not to.
+  Opening-to-closing reference drift: locked session +537.54 →
+  +537.79 Hz (0.25 Hz over a 38 min bracket, procpar `time_run`
+  17:36:25 → 18:14:37), asymmetry 1.66 → 1.66; unlocked session
+  +533.79 → +534.35 Hz (0.56 Hz over a 78 min bracket, 14:42:27 →
+  16:00:07), asymmetry 1.38 → 1.18. That is 0.0065 vs 0.0072 Hz/min —
+  the same drift rate within what two brackets can show — and the
+  unlocked session's lineshape change is confounded by its closing
+  reference having been taken at 2.25× the opening flip angle (Tier-1
+  step 4). The two sessions therefore do not measure what the lock
+  buys; the recommendation is operator practice. (FWHM is not
+  comparable between the sessions — different samples.) `alock='n'` in
+  the block parameters disables automatic re-locking only. Record the
+  state either way.
+* **Scale the gain ladder to the sample.** The maximum non-overflowing
+  gain was 60 dB on the 1% H₂O Gd-doped tube and 40 dB on the 90/10
+  tube — same probe, same day. A fixed 0/20/40/60 ladder is not
+  portable; four gains spaced evenly from 0 to the operator-found
+  maximum is. Read the stored `gain` back after setting it: the
+  session-2 driver asked for 13.3 and 26.7 dB and the console stored
+  14 and 26, so the ladder that ran was 0/14/26/40.
+* **Record length.** `np` ≤ 524288 caps `at` at 524288/(2·sw) — ~41 s
+  at sw = 6410 Hz. Both sessions used 30 s records (62 and 60 noise
+  blocks); derive the block count from a target duration.
+* **Console clock.** Found set to America/Los_Angeles while in Central
+  time and ~2 h 54 min fast in UTC, ntpd stopped for 92 days (ntp.conf
+  fine, daemon not running); corrected before either session (zone
+  set, stepped from the pool, hwclock synced, ntpd enabled, stratum-1
+  GPS peer, offset ~−64 ms). Check `ntpq -pn` on the console before
+  every session — the procpar timestamps are only as good as that
+  clock.
+* **The external acquisition driver.** Session 2 was acquired
+  unattended by a Python 2.6 stdlib-only script running on the console
+  workstation (RHEL 6.1, Python 2.6.6, OpenSSL 1.0.0 — the console
+  cannot run the tooling or reach the endpoint, and never holds the
+  token). It submits one block at a time into a running VnmrJ via
+  `listenon` + `send2Vnmr`, waits for the `.fid` to land, then submits
+  the next — no self-chaining, no `sn_*` parameters, ordinary
+  prompting, debuggable. It makes a new session folder per run, writes
+  `answers.json` *before* acquiring (an aborted session is still
+  packable), derives `at` from the `np` cap and the block count from a
+  target duration, scales the gain ladder to an operator-supplied
+  maximum, takes both references identically, persists an operator
+  profile so a repeat session re-asks only what changed, and has a
+  `--dry-run` mode. Offered upstream as a contribution to this
+  directory. It is the tested form of Tier 2 today; the MAGICAL macro
+  remains the untested one.
+* **Session 1 sample caveat — a worked example of why the H₂O fraction
+  is the measurement.** The session-1 tube was a 1% H₂O in D₂O
+  Gd-doped lineshape standard (0.1 mg/ml GdCl₃, 0.1% DSS): ~100×
+  proton-diluted, plus paramagnetic broadening. Per PROTOCOL.md the
+  2022 null had a 95% upper limit of 0.70% and neat water would show
+  25–65%; at 100× dilution the expected dip is ~0.25–0.65%, at or
+  below that limit, so session 1 cannot settle the 2022 question. It
+  stands as a clean software-validation run and a known-fraction anchor
+  point, not a physics result. Session 2 (90% H₂O, no Gd, no DSS,
+  fraction recorded) is the one intended to bear on the physics.
 
 ## Bundle mapping summary (schema 2.0)
 
 | meta.json field | source |
 |---|---|
 | `vendor` | `"agilent"` |
-| `instrument.agilent.vnmrj_version` | operator-entered (checklist 8) |
+| `instrument.agilent.vnmrj_version` | answers `instrument.vnmrj_version` when given; else parsed from `/vnmr/vnmrrev` copied into the session directory as `vnmrrev` (checklist 8) |
 | `instrument.agilent.receiver_gain_db` | procpar `gain` (dB, verbatim; noise-block = max) |
 | `instrument.agilent.data_format` | `"varian-fid"` |
 | `instrument.agilent.field_state_notes` | operator-entered (lock/z0 state — the BSMS-confirmation analog) |
@@ -285,6 +445,8 @@ numbers.
 | `experiments[].rg` | 10^(`gain`/20) (linear amplitude, Bruker-comparable; same mapping as the Magritek adapter) |
 | `experiments[].ns` | procpar `nt` |
 | `experiments[].aq_s_per_row` | procpar `at` (= np/(2·sw)) |
+| `experiments[].started_local` | procpar `time_run` (`YYYYMMDDTHHMMSS`, console-local wall clock — checklist 6) |
+| `experiments[].finished_local` | procpar `time_complete` (else `time_saved`) |
 | `checksums` | SHA-256 of every packed `data/…` file |
 
 ## Attribution and references

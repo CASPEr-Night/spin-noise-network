@@ -38,17 +38,25 @@ STATUS / HONESTY:
         values (basictype 2) double-quoted, the first on the count line
         and each further value on its own line; then one enumerable
         line (a count and the allowed values), which this reader skips.
-  * NO REAL VnmrJ 3.2 / DD2 OUTPUT HAS BEEN PARSED YET. Unlike the JEOL
-    reader (verified against a 38-file public corpus) and the Magritek
-    reader (verified against real V2.02.27 output), no public corpus of
-    raw Agilent .fid directories was found during development; the
-    partner-facility session (vendors/agilent/README.md checklist item
-    10) must parse a fresh session from the real instrument. Everything
-    below therefore checks STRUCTURAL consistency (header arithmetic vs
-    file size) rather than asserting magic values.
-  * UNVERIFIED items carried by this module are marked UNVERIFIED(n),
-    keyed to the partner validation checklist in
-    vendors/agilent/README.md.
+  * VERIFIED against real VnmrJ 3.2 / DD2 output (SIU Carbondale,
+    2026-09-14, checklist item 10): two sessions, 134 .fid directories
+    (no-pulse noise blocks, references, gain-ladder steps), 526 procpar
+    records each (parse_procpar returns all 526, nothing under
+    _unparsed), zero reader warnings; tbytes = np*ebytes, bbytes =
+    tbytes+28, file = 32+28+data, status 201 -> float32 (ebytes 4).
+    The checks below stay STRUCTURAL (header arithmetic vs file size)
+    rather than asserting magic values, so an unexpected variant
+    surfaces as a warning instead of a silent misparse.
+  * procpar wall-clock stamps (confirmed on the same files): time_run,
+    time_complete, time_saved (also time_submitted, time_svfdate) are
+    strings "YYYYMMDDTHHMMSS" in the CONSOLE's local time -- no zone,
+    and only as trustworthy as the console clock/NTP (checklist item
+    6); vnmrj_time_iso() converts them.  The VnmrJ version is machine-
+    readable from /vnmr/vnmrrev (checklist item 8): parse_vnmrrev().
+  * Still UNVERIFIED (marked UNVERIFIED(n) against the checklist in
+    vendors/agilent/README.md): items 2 (tof/sfrq conventions) and 3
+    (transmitter silence at pw=0); item 1 partially (legal gains are
+    integer dB; the amplitude transfer curve is not fitted yet).
 
 Python 3 standard library only, nothing newer than 3.6 (same
 portability rules as the uploader and packer).
@@ -62,10 +70,16 @@ from __future__ import print_function
 import argparse
 import json
 import os
+import re
 import struct
 import sys
+import time
 
-READER_VERSION = "0.1.0-draft"
+READER_VERSION = "0.2.0"
+
+_VNMRJ_TIME_RE = re.compile(r"^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})$")
+_VNMRREV_RE = re.compile(r"^\s*(?:Open)?VnmrJ\s+VERSION\s+(\S+)\s+REVISION\s+"
+                         r"(\S+)", re.IGNORECASE)
 
 # fid file-header status bits (names and values per nmrglue varian.py)
 S_DATA = 0x1
@@ -156,8 +170,9 @@ def parse_procpar(path):
                 except ValueError:
                     values.append(tok)
             while len(values) < count and i < n and basictype == "1":
-                # defensive: some writers may wrap long arrays
-                # (UNVERIFIED(10) -- not seen in nmrglue's description)
+                # defensive: some writers may wrap long arrays (not in
+                # nmrglue's description, not seen in the real DD2 files
+                # of 2026-09-14 either; kept as a guard)
                 extra = lines[i].split()
                 probe = []
                 ok = True
@@ -197,6 +212,53 @@ def scalar(params, name):
     if isinstance(v, list):
         return v[0] if v else None
     return v
+
+
+def vnmrj_time_iso(value):
+    """A procpar wall-clock stamp ("YYYYMMDDTHHMMSS", console-local, as
+    VnmrJ 3.2 writes time_run/time_complete/time_saved) as ISO 8601
+    "YYYY-MM-DDTHH:MM:SS" without zone; None for anything that is not a
+    well-formed calendar stamp (the empty time_exp/time_processed
+    strings included) -- the caller must then leave the field alone."""
+    if not isinstance(value, str):
+        return None
+    m = _VNMRJ_TIME_RE.match(value.strip())
+    if not m or int(m.group(6)) > 59:   # strptime admits leap seconds 60/61
+        return None
+    iso = "%s-%s-%sT%s:%s:%s" % m.groups()
+    try:
+        time.strptime(iso, "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return None
+    return iso
+
+
+def parse_vnmrrev(path):
+    """Parse a copy of the console's /vnmr/vnmrrev (three lines on VnmrJ
+    3.2: "VnmrJ VERSION 3.2 REVISION A" / "September 21, 2011" /
+    "vnmrsdd2").  Returns {"version", "revision", "vnmrj_version",
+    "date", "system"} with vnmrj_version = "<ver> Revision <rev>", or
+    None when the first line does not carry the VERSION/REVISION pair."""
+    try:
+        # utf-8-sig: a copy saved through Windows Notepad carries a BOM
+        with open(path, "r", encoding="utf-8-sig", errors="replace") as fh:
+            lines = [ln.strip() for ln in fh.read().splitlines()]
+    except OSError as exc:
+        raise AgilentReadError("cannot read %s: %s" % (path, exc))
+    lines = [ln for ln in lines if ln]
+    if not lines:
+        return None
+    m = _VNMRREV_RE.match(lines[0])
+    if not m:
+        return None
+    version, revision = m.group(1), m.group(2)
+    return {
+        "version": version,
+        "revision": revision,
+        "vnmrj_version": "%s Revision %s" % (version, revision),
+        "date": lines[1] if len(lines) > 1 else "",
+        "system": lines[2] if len(lines) > 2 else "",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +400,11 @@ def main(argv=None):
                   "nt": scalar(result["procpar"], "nt"),
                   "tn": scalar(result["procpar"], "tn"),
                   "seqfil": scalar(result["procpar"], "seqfil"),
+                  "time_run": scalar(result["procpar"], "time_run"),
+                  "time_complete": scalar(result["procpar"],
+                                          "time_complete"),
+                  "started_local": vnmrj_time_iso(
+                      scalar(result["procpar"], "time_run")),
                   "fid": result["fid"],
                   "warnings": result["warnings"]}
     elif os.path.basename(path) == "procpar" or path.endswith(".par"):

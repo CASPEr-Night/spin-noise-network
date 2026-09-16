@@ -45,15 +45,38 @@ how much it matters: a 2022 archival measurement on a room-temperature
 400 MHz instrument — a companion run to the 2020 dataset that seeded this
 network, taken before this protocol existed — searched a nominally aqueous
 sample for the Guéron dip and found none at all, with a 95% upper limit of
-0.70% of the spin-coupled noise floor. Neat water on that probe would have
-shown an unmistakable dip, so the null itself carries the lesson: the sample
-must have been heavily D₂O-diluted, by a factor of at least ~35 in proton
-density. The measurement was fine — the unknown was what was in the tube,
-because nobody had recorded it. Hence the sample dialog: tap water,
-distilled water, and D₂O-doped water are all perfectly fine samples — **as
-long as you tell us which one it is**. If you add a little D₂O for lock
-(10% is typical), that is fine and expected — just answer the H₂O-fraction
-question honestly.
+0.70% of the spin-coupled noise floor. The leading explanation was heavy
+D₂O dilution of the sample — a factor of ~35 or more in proton density would
+do it. The first network sessions complicate that reading: in September 2026
+a room-temperature 400 MHz instrument at SIU Carbondale showed a clear
+spin-noise feature (+27% of the floor) even on a 1% H₂O tube, so the 2022
+null cannot be pinned on dilution alone. The probe's tuning state — which
+sets the feature's sign and can null it at the bump-to-dip crossover — and
+a BSMS field sweep left running during acquisition (documented for that 2022
+archive, see below) are equally live explanations. The measurement was fine
+— the unknowns were what was in the tube, how the probe was tuned, and
+whether the field was sweeping, because nobody had recorded them. The
+protocol therefore records all three. On the sample: tap water, distilled
+water, and D₂O-doped water are all perfectly fine — **as long as you tell us
+which one it is**. If you add a little D₂O for lock (10% is typical), that
+is fine and expected — just answer the H₂O-fraction question honestly.
+
+One shimming caution follows from the same physics: **do not shim against
+radiation damping.** On a near-neat water sample the ¹H line carries, on
+top of the width field inhomogeneity gives it, a broadening from the
+probe's back-action on the spins, and gradient shimming cannot touch that
+part. A controlled test on the SIU Carbondale 400 MHz instrument is the
+demonstration: identical shims and identical acquisition, only the tube
+swapped, gave a symmetric 8.5 Hz line on a dilute tube (1% H₂O in D₂O,
+Gd-doped) and a 32 Hz asymmetric line on 90/10 H₂O/D₂O — the dilute tube
+bounds what inhomogeneity contributes, and the excess on the 90/10 tube is
+radiation damping — while three gradient-shim iterations against the 90/10
+line moved the high-order shims by hundreds of DAC units and changed the
+linewidth by under 0.2 Hz. Judge shim quality on the lock signal or on a
+dilute tube, not on the near-neat water line. The dip depth goes as
+f_c·λ_r/λ_tot and λ_r *is* the radiation-damping rate, so a strongly
+broadened near-neat line is the regime that produces a large noise
+feature — leave it as it is.
 
 ## The six operator questions (and why each exists)
 
