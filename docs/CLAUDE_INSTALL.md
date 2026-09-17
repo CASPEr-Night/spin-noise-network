@@ -140,7 +140,14 @@ For non-Bruker vendors (Bruker's orchestrator bundles by itself):
 
 `packer/answers.example.json` shows the operator-questions file; fill
 it WITH the human (sample description, temperatures, lock state —
-their answers, not your guesses). The packer prints the bundle path.
+their answers, not your guesses). Temperatures are physical: on a
+room-temperature probe coil and preamp both sit at the lab ambient,
+and a measured value beats an assumed 298 K. For an Agilent session
+that followed the quickstart, the packer reads each experiment's role
+from its save name and builds `calibration.rg_ladder` from the ladder
+rungs' stored gains; the `tuning` entries of the spin-noise tuning
+ladder (quickstart 2.6) are the human's console readings — ask for
+them, never invent them. The packer prints the bundle path.
 
 VERIFY:
 
@@ -161,9 +168,10 @@ to the human verbatim. Large bundles resume automatically if rerun.
 ## Step 8 — validation campaign: what to TEST on a first-time facility
 
 The first bundle from a new facility — and ESPECIALLY the first real
-data through a young vendor path (the Agilent and Nanalysis readers
-have so far been validated against synthetic fixtures and the
-published binary layouts, never against a real console's files) —
+data through a young vendor path (the Nanalysis reader has so far been
+checked against synthetic fixtures and the vendor's documented export
+format, never against a real console's files; the Agilent reader has
+met one real console — SIU Carbondale, 2026-09-14 — and no other) —
 doubles as a software validation run. Work through this checklist and
 put the results in your report. A precise "it failed at V3, here is
 the exact output" is worth exactly as much to the project as all-pass.
@@ -178,7 +186,7 @@ reference_open / reference_close plus EITHER a `noise` experiment OR
 a field-stepped session's `noise_sweep` blocks (with `sweep_verify`
 and, from v0.6, one `sweep_signcal`), and `clock_audit.blocks` is
 non-empty" (read the zip's meta.json; you can do all of this without
-touching TopSpin). V3, V5, V6, V7 apply unchanged.
+touching TopSpin). V3, V5, V6, V7, V8 apply unchanged.
 
 V1 — source-data sanity (before packing). For each noise record the
 human saved: the data directory is complete (Agilent: `.fid/` with
@@ -215,7 +223,9 @@ CITATION.cff), using this template:
     Vendor, console, software version (e.g. VnmrJ 3.2 on a DD2):
     Probe + nominal 1H frequency:
     OS + python3 version on the machine used:
-    Checklist V1..V6: PASS/FAIL each, one line of detail
+    Checklist V1..V8: PASS/FAIL each, one line of detail
+    External reference used for V8: which one, its value, and the
+      pipeline value it was compared against
     Packer warnings (verbatim):
     Upload receipt:
     Attached: one procpar (or vendor equivalent) from a noise record
@@ -223,6 +233,34 @@ CITATION.cff), using this template:
       if anything failed, the first 64 bytes of the matching fid:
       python3 -c "print(open('fid','rb').read(64).hex())"
     Anything odd the human noticed during acquisition:
+
+V8 — external-reference check. Every validation campaign must include
+at least one number computed OUTSIDE the pipeline under test and
+compared against the pipeline's own value. Any one of these counts:
+the V4 byte round-trip with the sha256 computed by a different tool
+than the packer (`shasum -a 256` / `sha256sum` / `certutil -hashfile
+... SHA256` on the source fid, compared against that file's entry in
+the bundle's `meta.json` checksums); the console clock against an
+external NTP source (`ntpq -pn` or `chronyc tracking` on the console,
+or the wall clock of an NTP-disciplined phone against the procpar
+`time_run` of a block the human watched start); a sample VALUE
+asserted against a file read by a different tool (for example the
+first complex point of a noise record as the report prints it, against
+`struct.unpack('>2f', open('fid','rb').read()[60:68])` on the raw
+bytes — big-endian, after the 32-byte file header and the 28-byte block
+header; `>2f` for the DD2's float32 records, `>2i` for an int32 fid,
+which the file header's status bits tell apart); or an independent
+re-derivation of one headline number (the
+record length from np and sw, `at = np/(2*sw)`, against the report's
+`aq_s_per_row`). State in the report WHICH reference you used and both
+values. Reason: the one real pipeline incident so far — the report
+reading Agilent fids with the Bruker parser (2026-09-14) — passed
+V1–V6 cleanly and was confidently wrong; and the SIU console clock,
+found 2 h 54 min fast with ntpd stopped for 92 days, was caught only
+because someone ran `ntpq` on the console before the sessions — had
+nobody looked, the bundles would have passed V1–V6 with every
+timestamp wrong. A pipeline cannot detect that class of error from
+inside; only a number it did not produce can.
 
 If you get BLOCKED at any step: check `docs/TROUBLESHOOTING.md`
 first (symptom-indexed; quotes the exact error texts), then collect

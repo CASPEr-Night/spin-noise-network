@@ -85,7 +85,15 @@ decorative; each one has burned somebody.
 
 1. **Facility confirmation** — confirms your facility slug and instrument so
    the bundle is attributed correctly. Wrong attribution means your probe's
-   point lands on someone else's curve.
+   point lands on someone else's curve. The hardware-check dialogs that
+   follow also ask for the probe's coil and preamplifier temperatures, and
+   they mean *physical* temperatures: on a room-temperature probe the coil
+   sits at the probe-body temperature, which is the lab ambient, and the
+   preamplifier at its own physical ambient — enter the measured lab
+   temperature (a thermometer reading of 296.5 K beats an assumed 298 K)
+   and leave the field blank only if you have no reading. A better number
+   learned after the upload goes to the maintainer as a number; it is
+   applied at analysis time, not by re-uploading.
 2. **Sample composition** — water type, H₂O fraction (%), D₂O doping (%),
    additives, tube OD, volume. See above: proton density sets the signal.
 3. **VT setpoint** — the sample temperature T_s is one of the four
@@ -126,7 +134,14 @@ itself — a pseudo-2D using the `zgnoise2d` pulse program, which contains *no
 pulse at all*, just receiver-open acquisition row after row at maximum
 stable gain; and a closing reference identical to the opening one (drift
 check). Nothing in the protocol pulses your sample at high power, and
-nothing touches your probe beyond ordinary tune/match and shimming.
+nothing touches your probe beyond ordinary tune/match and shimming. On the
+vendor paths (the packer's Agilent quickstart, from v0.7.1) the gain ladder
+is randomized and repeated — integer-dB levels in ~5 dB steps from 0 to the
+sample's non-overflow maximum, each visited three times in one random
+order — because a monotonic ladder cannot separate receiver compression
+from signal drift: both SIU sessions showed a ~10% amplitude roll-off
+toward the top rung that was degenerate with drift; the TopSpin script
+follows in a later release.
 
 **Expected wall-clock time:** ~45 minutes for the default run, of which you
 are needed for the first ~5 (the dialogs). Then walk away.

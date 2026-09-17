@@ -3,6 +3,9 @@
 % Single-recipient quickstart for Agilent sessions on the partner instrument
 % (Boyd Goodson's 400 MHz DD2, VnmrJ 3.2, 5 mm HCN, room temperature);
 % two sessions ran on it 2026-09-14.
+% v0.7.1: randomized repeated gain ladder (2.2), spin-noise tuning ladder
+% (2.6), axis-sign check (2.7), physical probe temperatures (2.1, 3.2);
+% roles now come from the save names and rg_ladder from the rungs.
 % Distilled from vendors/agilent/README.md (Tier 1 + partner checklist),
 % packer/answers.example.json, and uploader/upload_bundle.py.
 % Build: pdflatex x2.
@@ -58,7 +61,7 @@
 \large (SIU Carbondale --- 400\,MHz DD2, VnmrJ 3.2)}
 \author{John W. Blanchard (\href{mailto:jwbquantum@gmail.com}{jwbquantum@gmail.com})
 \and Reza Ebadi \and Claude (Anthropic)}
-\date{Software v0.6.0 --- September 15, 2026}
+\date{Software v0.7.1 --- September 16, 2026}
 
 \begin{document}
 \maketitle
@@ -69,7 +72,10 @@ This guide covers one specific session: a receive-only spin-noise
 measurement on the SIU Carbondale 400\,MHz Agilent DD2 (VnmrJ~3.2, 5\,mm
 HCN probe, room temperature). It is the Agilent leg of the CASPEr@night
 network --- the same physics protocol the Bruker fleet runs, recording
-the Gu\'eron absorption dip of water on a room-temperature probe ---
+the spin-noise feature of water on a room-temperature probe (the
+Gu\'eron absorption dip in equilibrium; the September sessions here
+showed a +27\% emission bump instead, which is why the tuning ladder of
+2.6 now exists) ---
 acquired by hand with ordinary VnmrJ tools (\texttt{s2pul},
 \texttt{go}, \texttt{svf}) and converted into a network bundle
 afterward on any laptop. Nothing in the session pulses the sample above
@@ -109,9 +115,11 @@ https://github.com/CASPEr-Night/spin-noise-network/releases/latest
       doped} --- a retired shim/lineshape sample is fine, as long as
       you know (or can best-guess) the composition. The \htwo{}
       fraction \emph{is} the measurement.
-\item \textbf{About 1 hour of instrument time} --- roughly 15\,min of
-      setup you attend, then ${\geq}30$\,min of noise blocks the
-      console mostly runs itself.
+\item \textbf{About 1\,h\,20\,min of instrument time} --- roughly
+      20\,min of setup and calibration you attend, ${\geq}30$\,min of
+      noise blocks the console mostly runs itself, then some 15\,min
+      for the tuning ladder and the axis-sign check (2.6--2.7; about
+      25\,min with the six-block ladder a 1\%-class tube needs).
 \end{enumerate}
 \end{tcolorbox}
 
@@ -121,8 +129,12 @@ https://github.com/CASPEr-Night/spin-noise-network/releases/latest
 Everything below is standard VnmrJ operation --- no macro, nothing
 installed on the console. Save every experiment with \texttt{svf} into
 one session directory, one \file{.fid} per step; the leading number in
-each save name is what the converter reads (the rest of the name is
-free).
+each save name identifies the experiment and the \texttt{\_sn\_\ldots}
+part tells the converter its role, so keep both as printed. Anything
+after them is free as long as it does not run straight on in letters:
+\texttt{17\_sn\_noise\_b} and \texttt{17\_sn\_noise2} are noise blocks,
+\texttt{17\_sn\_noisetest} is not recognised and the converter stops
+and says so.
 
 \subsection*{2.1\quad Setup (nothing new here, ${\sim}15$\,min)}
 
@@ -159,58 +171,106 @@ tpwr} --- the questionnaire wants both, and the closing reference
 must reuse them. Start from your standard \hnmr{} water setup in
 \texttt{s2pul} and leave \texttt{sw} at your usual value throughout.
 
-\subsection*{2.2\quad Gain ladder (${\sim}5$\,min)}
+\textbf{Probe temperatures.} The questionnaire (3.2) asks for the coil
+and preamplifier temperatures, and it means \emph{physical}
+temperatures: on a room-temperature probe the coil sits at the
+probe-body temperature, which is the lab ambient, and the preamplifier
+at its own physical ambient. Read the lab thermometer (or the bore/VT
+readout with VT off) while you are at the magnet and enter that --- a
+measured 296.5\,K beats an assumed 298\,K; \texttt{null} is for having
+no reading at all. If a better number turns up after the upload, e-mail
+it to the maintainer: corrections are applied at analysis time, as
+numbers, never by re-uploading.
 
-Four one-scan 1Ds at ascending receiver gain, with a tiny flip so
-nothing saturates. First find your ladder maximum: the highest
-\texttt{gain} at which a tiny-flip 1D of this tube does not overflow
-the receiver. \textbf{It is strongly sample-dependent} --- on this
-probe 60\,dB was fine on a 1\% \htwo{} Gd-doped tube and a 90/10
-\htwo{}/\dtwo{} tube needed 40\,dB --- so the ladder is scaled to
-your maximum, not fixed at 0/20/40/60: four gains spaced evenly from 0
-to the maximum, rounded to whole dB (legal gains are integer dB), e.g.
-0/20/40/60 for a 60\,dB maximum or 0/14/26/40 for 40\,dB. After each
-\texttt{gain=} check the value the console stored --- it is what the
-saved \file{procpar} carries: asked for 13.3 and 26.7\,dB, this console
-stored 14 and 26. Set \texttt{pw} to pw90/90 --- 0.11\,$\mu$s for a 10\,$\mu$s pw90, about
-a $1^{\circ}$ tip --- and \texttt{tpwr} to your calibrated observe
-power (57 below stands in for yours). Write both values down: the two
-references in 2.3 and 2.5 must use exactly these. Never use
+\subsection*{2.2\quad Gain ladder (${\sim}3$\,min)}
+
+A randomized, repeated ladder of one-scan tiny-flip 1Ds --- the
+receiver-linearity calibration. First find your ladder maximum: the
+highest \texttt{gain} at which a tiny-flip 1D of this tube does not
+overflow the receiver. \textbf{It is strongly sample-dependent} --- on
+this probe 60\,dB was fine on a 1\% \htwo{} Gd-doped tube and the 90/10
+\htwo{}/\dtwo{} tube needed 40\,dB. The ladder then visits every level
+from 0 to that maximum in 5\,dB steps (legal gains are integer dB: 0,
+5, \ldots, 40 for a 40\,dB maximum, nine levels; thirteen for 60\,dB),
+\textbf{each level three times, in one random order}, with
+\texttt{pad=1} so the receiver settles for a second after every gain
+change. The September sessions used four ascending gains, and in both
+the rungs' amplitude per unit gain fell by about 10\% from the bottom
+rung to the top one (11\% and 10\%) --- which a monotonic ladder
+cannot attribute: receiver
+compression and signal drift are degenerate when gain and time rise
+together. Visiting each level three times at random moments separates
+them: compression follows the gain, drift follows the clock.
+Twenty-seven acquisitions of a few seconds each, about 3 minutes in
+all.
+
+Set \texttt{pw} to pw90/90 --- 0.11\,$\mu$s for a 10\,$\mu$s pw90,
+about a $1^{\circ}$ tip --- and \texttt{tpwr} to your calibrated
+observe power (57 below stands in for yours). Write both values down:
+the references in 2.3, 2.5 and 2.7 must use exactly these. Never use
 \texttt{gain='n'} (autogain), and wait for each acquisition to finish
-before saving. Shown for a 60\,dB maximum:
+before saving. The console may store a different gain than you typed
+--- asked for 13.3 and 26.7\,dB, this console stored 14 and 26 ---
+which is why the converter reads the stored gain from each rung's
+\file{procpar} and you list nothing. Save the rungs under four-digit
+numbers counting up from 1000 in the order acquired (a number that can
+never collide with a noise block); the gain in the name is for your
+eyes only. One random order for a 40\,dB maximum, drawn once and
+printed here so you need not draw it at the console --- any other
+random order is as good, and the order that ran is on record in each
+file's time stamp:
+
+\begin{center}\small
+\begin{tabular}{@{}l*{9}{r}@{}}
+\toprule
+save as & 1000 & 1001 & 1002 & 1003 & 1004 & 1005 & 1006 & 1007 & 1008\\
+\texttt{gain} & 35 & 35 & 5 & 40 & 15 & 30 & 10 & 15 & 40\\
+\midrule
+save as & 1009 & 1010 & 1011 & 1012 & 1013 & 1014 & 1015 & 1016 & 1017\\
+\texttt{gain} & 10 & 25 & 30 & 20 & 5 & 40 & 30 & 35 & 0\\
+\midrule
+save as & 1018 & 1019 & 1020 & 1021 & 1022 & 1023 & 1024 & 1025 & 1026\\
+\texttt{gain} & 20 & 0 & 0 & 10 & 15 & 25 & 5 & 25 & 20\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The first three rungs, then, are:
 
 \begin{lstlisting}
 pw=0.11
 tpwr=57
 nt=1
-gain=0
+pad=1
+gain=35
 go
-svf('10_sn_ladder_a')
-gain=20
+svf('1000_sn_ladder_35')
+gain=35
 go
-svf('14_sn_ladder_b')
-gain=40
+svf('1001_sn_ladder_35')
+gain=5
 go
-svf('15_sn_ladder_c')
-gain=60
-go
-svf('16_sn_ladder_d')
+svf('1002_sn_ladder_05')
 \end{lstlisting}
 
-Read every \texttt{gain=60} below as your ladder-maximum value, and
-note the four values the console stored in the questionnaire.
+and so on down the table. For a 60\,dB maximum use the levels 0, 5,
+\ldots, 60 (13 levels, 39 rungs, about 4 minutes), each three times,
+in an order you shuffle yourself before you start --- write it down
+first. Read every \texttt{gain=40} below as your ladder-maximum value.
 
 \subsection*{2.3\quad Opening reference (${\sim}1$\,min)}
 
 One more tiny-flip 1D at the ladder-max gain, with a 2\,s record.
 \texttt{pw} and \texttt{tpwr} are the two values you wrote down in
-2.2 (the same stand-ins below):
+2.2 (the same stand-ins below), and \texttt{pad} goes back to 0 --- the
+ladder left \texttt{pad=1} behind:
 
 \begin{lstlisting}
 pw=0.11
 tpwr=57
+pad=0
 at=2
-gain=60
+gain=40
 go
 svf('11_sn_ref_open')
 \end{lstlisting}
@@ -229,7 +289,7 @@ ss=0
 pad=0
 wshim='n'
 alock='n'
-gain=60
+gain=40
 at=30
 go
 svf('12_sn_noise')
@@ -264,8 +324,12 @@ Three notes --- two settled on this console, one still open:
       and describe it in the questionnaire notes.
 \item \textbf{Save names.} \texttt{svf} accepts names starting with a
       digit on this console --- both sessions saved every experiment
-      under the \file{NN\_\ldots} pattern. Only the leading number is
-      parsed.
+      under the \file{NN\_\ldots} pattern. The leading number and the
+      \texttt{\_sn\_noise} part are parsed; anything after them is
+      free unless it runs straight on in letters
+      (\texttt{17\_sn\_noise\_b}, \texttt{17\_sn\_noise2} and
+      \texttt{17\_sn\_noise-1} are read as noise blocks;
+      \texttt{17\_sn\_noisetest} is not).
 \end{itemize}
 
 \subsection*{2.5\quad Closing reference (${\sim}1$\,min)}
@@ -284,12 +348,13 @@ angle, for exactly this reason. Save as 13:
 pw=0.11
 tpwr=57
 at=2
-gain=60
+gain=40
 go
 svf('13_sn_ref_close')
 \end{lstlisting}
 
-That is the whole session. An external acquisition driver --- a
+That is the main session; 2.6 and 2.7 add two short calibration series
+to it. An external acquisition driver --- a
 Python~2.6 script that runs on the console workstation itself,
 submits one block at a time to a running VnmrJ through
 \texttt{listenon}/\texttt{send2Vnmr}, and waits for each \file{.fid}
@@ -298,6 +363,112 @@ to end on 2026-09-14 (66 of 66 blocks, unattended). It is being
 contributed to \file{vendors/agilent/}; until it ships there, the
 manual steps above are the recommended path. The draft VnmrJ macro
 (\file{spin\_noise\_run.mac}) has still not run on hardware.
+
+\subsection*{2.6\quad Spin-noise tuning ladder (15--25\,min)}
+
+The sign and shape of the spin-noise feature depend on how the probe
+is tuned. Equilibrium physics expects the Gu\'eron absorption dip on a
+room-temperature probe; both September sessions on this probe showed a
+clear feature of the opposite sign --- an emission bump, +27\% of the
+floor on the 1\% \htwo{} tube --- which says the probe was tuned away
+from the spin-noise tuning optimum, a setting that is in general not
+the wobble minimum you tune to. Stepping the tuning changes the shape
+of the feature as well as its size: at the optimum the dispersive
+admixture vanishes and the feature is the purest absorptive dip; away
+from it a dispersive component grows, and at the setting where the
+feature nulls and flips from bump to dip the absorptive part is
+passing through zero, so what remains is nearly pure dispersion ---
+that crossover is a setting \emph{far} from the optimum, not the
+optimum itself. The report fits every setting with the same
+absorptive-plus-dispersive model as the main block, ranks the settings
+that reach 5$\sigma$ by their dispersive fraction $|b/a|$, and names
+the smallest as nearest the optimum; the null-or-flip setting is the
+one it ranks farthest, so do not label it the optimum in your notes.
+So after the closing reference, step the tuning
+deliberately and record noise blocks at each setting: \textbf{at
+least five settings bracketing your normal one} --- the normal tuning,
+then one and two steps to either side, where a step is whatever you
+can set and read reproducibly (a number of turns of the tune or match
+capacitor, a reflected-power reading on the wobble display, a
+wobble-curve minimum in dB). Same no-pulse parameters as 2.4,
+\texttt{at=30}, two blocks per setting on the recommended 90/10 tube;
+setting 0 is your normal tuning, saved as 2000 and 2001:
+
+\begin{lstlisting}
+pw=0
+tpwr=-16
+nt=1
+ss=0
+pad=0
+wshim='n'
+alock='n'
+gain=40
+at=30
+go
+svf('2000_sn_tune_0')
+go
+svf('2001_sn_tune_0')
+\end{lstlisting}
+
+Then retune to setting 1 and save \texttt{2010\_sn\_tune\_1} and
+\texttt{2011\_sn\_tune\_1}, setting 2 as 2020/2021, and so on: setting
+$k$ goes to 20$k$0 and 20$k$1, and the trailing \texttt{\_}$k$ tells
+the converter which setting a block belongs to. \textbf{How many blocks
+per setting depends on the tube.} The report claims a feature only at
+5$\sigma$ and ranks only settings that reach it. On this instrument
+the 90/10 tube gave about 11$\sigma$ per 30\,s block, so two blocks
+are plenty; the 1\% \htwo{} Gd-doped tube gave about 2.5$\sigma$ per
+block --- two blocks reach 3.5$\sigma$, every setting comes out
+``undetermined'', and four reach 5$\sigma$ only just. On a 1\%-class
+tube take six blocks per setting (20$k$0 to 20$k$5, about 25\,min for
+five settings). Do the normal setting
+\emph{within} the ladder, as its own blocks, so the ladder carries
+its own anchor even though 2.4 was acquired at the same tuning. For
+every setting, \textbf{write down whatever the console shows} for tune
+and match --- the readings go into the \texttt{tuning} entries of the
+questionnaire (3.2), in whatever units you have. These blocks are
+analysed as a ladder of their own and are \textbf{never averaged into
+the main noise block} of 2.4. Retune to normal when you are done.
+
+\subsection*{2.7\quad Axis-sign check (${\sim}1$\,min)}
+
+On this console a positive FFT-convention offset points the opposite
+way from the physical one: the axis is \emph{mirrored}, the physical
+line frequency is carrier $-$ $f_{\mathrm{FFT}}$. That was established
+on the partner console two independent ways (vendor checklist item 2):
+a $+200$\,Hz \texttt{tof} step moved the apparent line by $+199.6$\,Hz,
+and VnmrJ's lock referencing (\texttt{reffrq}, the 0\,ppm frequency)
+places water ${\sim}500$\,Hz \emph{below} the carrier where the FFT
+convention had it ${\sim}540$\,Hz above. \texttt{tof} itself is
+recorded verbatim as \texttt{o1\_hz}, no sign flip. The report still
+resolves the sign for every bundle instead of assuming it: from the
+one extra acquisition below when it is present, otherwise from the
+\file{procpar}'s own referencing (\texttt{reffrq}, \texttt{rfl},
+\texttt{rfp} against the water shift), and it flags a disagreement
+between the two. The acquisition is the reference of 2.5 once more,
+identical in every parameter, with the transmitter offset moved by
+exactly $+200$\,Hz. With the probe back at its normal tuning:
+
+\begin{lstlisting}
+pw=0.11
+tpwr=57
+pad=0
+at=2
+gain=40
+tof=tof+200
+go
+svf('3000_sn_signcal')
+tof=tof-200
+\end{lstlisting}
+
+The saved \file{procpar} carries the displaced \texttt{tof}; the
+converter records it, and the report takes \texttt{tof}(sign check)
+$-$ \texttt{tof}(reference) as the displacement. In the physical
+convention the water line's apparent offset in the window would
+\emph{drop} by exactly that much --- 200\,Hz; on this console it
+\emph{rises} by 200\,Hz, which is the mirrored axis, and the report
+states which it found. The last line puts \texttt{tof} back so nothing
+you run next inherits the shift.
 
 \section{Back at your desk}
 
@@ -349,7 +520,9 @@ are yours to edit:
   "spectrometer": {
     "probe_type": "RT",
     "console": "Agilent DD2 400",
-    "probe_string": "5 mm HCN"
+    "probe_string": "5 mm HCN",
+    "coil_temp_k": 296.5,
+    "preamp_temp_k": 296.5
   },
   "instrument": {
     "vnmrj_version": "3.2 Revision A",
@@ -359,34 +532,38 @@ are yours to edit:
   "calibration": {
     "p90_us": 10.0,
     "p90_power_db_or_w": "FILL IN (tpwr, dB)",
-    "topshim_ok": false,
-    "rg_ladder": [
-      { "expno": 10, "rg": 1.0,    "tip_deg": 1.0 },
-      { "expno": 14, "rg": 10.0,   "tip_deg": 1.0 },
-      { "expno": 15, "rg": 100.0,  "tip_deg": 1.0 },
-      { "expno": 16, "rg": 1000.0, "tip_deg": 1.0 }
-    ]
+    "topshim_ok": false
   },
   "experiments": [
-    { "expno": 10, "role": "rg_ladder" },
-    { "expno": 14, "role": "rg_ladder" },
-    { "expno": 15, "role": "rg_ladder" },
-    { "expno": 16, "role": "rg_ladder" },
-    { "expno": 11, "role": "reference_open" },
-    { "expno": 12, "role": "noise" },
-    { "expno": 17, "role": "noise" },
-    { "expno": 18, "role": "noise" },
-    { "expno": 13, "role": "reference_close" }
+    { "expno": 2000, "tuning": { "setting_index": 0, "label": "FILL IN (normal tuning)", "tune_reading": null, "match_reading": null, "units": "FILL IN" } },
+    { "expno": 2001, "tuning": { "setting_index": 0, "label": "FILL IN (normal tuning)", "tune_reading": null, "match_reading": null, "units": "FILL IN" } },
+    { "expno": 2010, "tuning": { "setting_index": 1, "label": "FILL IN", "tune_reading": null, "match_reading": null, "units": "FILL IN" } },
+    { "expno": 2011, "tuning": { "setting_index": 1, "label": "FILL IN", "tune_reading": null, "match_reading": null, "units": "FILL IN" } },
+    { "expno": 2020, "tuning": { "setting_index": 2, "label": "FILL IN", "tune_reading": null, "match_reading": null, "units": "FILL IN" } },
+    { "expno": 2021, "tuning": { "setting_index": 2, "label": "FILL IN", "tune_reading": null, "match_reading": null, "units": "FILL IN" } },
+    { "expno": 2030, "tuning": { "setting_index": 3, "label": "FILL IN", "tune_reading": null, "match_reading": null, "units": "FILL IN" } },
+    { "expno": 2031, "tuning": { "setting_index": 3, "label": "FILL IN", "tune_reading": null, "match_reading": null, "units": "FILL IN" } },
+    { "expno": 2040, "tuning": { "setting_index": 4, "label": "FILL IN", "tune_reading": null, "match_reading": null, "units": "FILL IN" } },
+    { "expno": 2041, "tuning": { "setting_index": 4, "label": "FILL IN", "tune_reading": null, "match_reading": null, "units": "FILL IN" } }
   ]
 }
 \end{lstlisting}
 
-Two mechanical notes: add one
-\texttt{\{ "expno": NN, "role": "noise" \}} line per noise block you
-saved beyond 18, and the ladder \texttt{"rg"} values are
-$10^{\mathrm{dB}/20}$ of the four gains \emph{as the console stored
-them} --- pre-filled for 0/20/40/60\,dB, so correct them if your
-ladder used different values (for 0/14/26/40: 1, 5.01, 19.95, 100).
+Three mechanical notes. The two temperatures are the physical lab
+ambient you read in 2.1 --- replace 296.5 with your reading, or
+\texttt{null} if you have none. Nothing else needs listing: the
+converter reads each experiment's role from its save name
+(\texttt{\_sn\_ladder}, \texttt{\_sn\_ref\_open}, \texttt{\_sn\_noise},
+\texttt{\_sn\_ref\_close}, \texttt{\_sn\_tune}, \texttt{\_sn\_signcal})
+and builds the gain ladder from the 27 rungs' stored gains, so the
+questionnaire no longer lists noise blocks or ladder rungs. The
+\texttt{tuning} entries are the one thing only you know: setting 0 is
+your normal tuning, \texttt{tune\_reading} and \texttt{match\_reading}
+are the numbers the console showed at that setting (or \texttt{null}),
+\texttt{units} names them (``turns'', ``\% reflected'', ``dB''), and
+\texttt{label} is free text; add a line per block for settings beyond
+4 or for blocks beyond the second (20$k$2 to 20$k$5 on a 1\%-class
+tube).
 
 \subsection*{3.3\quad Pack, check, upload}
 
@@ -437,7 +614,7 @@ link is fine if it is large); we take it from there.
 \noindent\rule{\textwidth}{0.4pt}\\[2pt]
 {\small Contact: John W. Blanchard
 (\href{mailto:jwbquantum@gmail.com}{jwbquantum@gmail.com}) ---
-CASPEr@night software v0.6.0 --- September 15, 2026. Your raw data remain
+CASPEr@night software v0.7.1 --- September 16, 2026. Your raw data remain
 yours, and contributing facilities are co-authors on network
 publications their data enter.}
 
