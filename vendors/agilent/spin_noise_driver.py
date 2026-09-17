@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-casper_run.py -- spin-noise session driver for Agilent/Varian VnmrJ.
+spin_noise_driver.py -- spin-noise session driver for Agilent/Varian VnmrJ.
 
 Runs ON THE SPECTROMETER WORKSTATION. Written for VnmrJ-era consoles, which
 typically have Python 2.6 and nothing newer, so this is Python 2.6 STANDARD
@@ -26,12 +26,28 @@ WHAT IT DOES NOT DO
 PRECONDITIONS
   * In VnmrJ, join the experiment you set up, then type:  listenon
     (that writes $vnmruser/.talk, which is how this script talks to VnmrJ)
-  * Sample shimmed and locked as you want it.
+  * SHIM ON THE TUBE YOU ARE ABOUT TO RUN, and CHECK THE LINESHAPE. Take one
+    short pulsed reference and look at the water linewidth before committing
+    to a long session. This is not boilerplate: a shim set optimised on a
+    different sample can leave the line several times broader, and nothing in
+    the procpar shows it except the shim values themselves. We lost a 10 h
+    run to exactly that -- the line was 27 Hz where the same tube had given
+    9 Hz two days earlier, and the spin-noise feature came out 4x smaller and
+    3x broader in proportion.
+    Beware also that a concentrated (near-neat H2O) sample CANNOT diagnose a
+    shim: radiation damping dominates its linewidth, so the line barely
+    responds to the shims. Judge the shim on a dilute or doped tube, or on
+    the lock level -- never on the water line of a near-neat sample.
+  * Optionally save the result so the session can reload it:  svs('<name>')
+    A saved shim set belongs to the sample it was optimised on. This script
+    offers to reload one but NEVER defaults to yes, and tells you how old the
+    file is.
+  * Lock as you want it -- the state is recorded either way.
   * pw90 calibrated -- you will be asked for it.
 
 USAGE
-    python casper_run.py --dry-run     # prints every command, sends nothing
-    python casper_run.py               # for real
+    python spin_noise_driver.py --dry-run   # prints every command, sends nothing
+    python spin_noise_driver.py             # for real
 
     --bracket            split the gain ladder across the session (half at the
                          start, half at the end) so receiver compression and
@@ -53,8 +69,8 @@ LONG RUNS
     roughly 8 s of overhead per block on top of `at`). For anything of that
     length use:
 
-        screen -S casper            # so a dropped ssh does not kill the run
-        casper --bracket --continue-on-fail
+        screen -S spinnoise          # so a dropped ssh does not kill the run
+        python spin_noise_driver.py --bracket --continue-on-fail
 
     answers.json is written BEFORE acquisition and PRUNED afterwards to the
     experiments that actually landed, so a partial session packs as-is with no
@@ -520,7 +536,28 @@ def main():
                        env.get("preamp_temp_k", coil_k), float)
         opnotes = ask("  Operator notes", "none")
 
-    reshim = ask_yn("\nReload saved shims from %s?" % SHIM_FILE, True)
+    # Shims. A saved shim set belongs to the SAMPLE it was optimised on.
+    # Reloading one that was optimised on a different tube is a quiet way to
+    # start a long session on a line several times broader than it should be,
+    # with nothing in the procpar to show for it except the shim values
+    # themselves. So: never silently, never by default, and always say how old
+    # the file is.
+    reshim = False
+    if os.path.exists(SHIM_FILE):
+        age_s = time.time() - os.path.getmtime(SHIM_FILE)
+        print("\nSaved shim set : %s" % SHIM_FILE)
+        print("  last written : %s  (%.1f days ago)"
+              % (time.strftime("%Y-%m-%d %H:%M",
+                               time.localtime(os.path.getmtime(SHIM_FILE))),
+                 age_s / 86400.0))
+        print("  A shim set belongs to the sample it was optimised on. If it")
+        print("  was saved on a different tube, do NOT reload it here.")
+        reshim = ask_yn("  Reload it?", False)
+    else:
+        print("\nNo saved shim set at %s" % SHIM_FILE)
+        print("  Using whatever shims are currently loaded on the console.")
+        print("  To save one for next time: shim on THIS sample, then in")
+        print("  VnmrJ run  svs('%s')" % SHIM_FILE)
 
     # ---- derive record length from the REAL cap, block count from duration
     at_max = NP_MAX / (2.0 * sw)
@@ -550,20 +587,28 @@ def main():
     # Build the ladder schedule: LADDER_VISITS visits of each gain level.
     # One visit -> the classic ascending ladder. More than one -> randomized,
     # which is what makes non-linear drift separable from compression.
-    sched = []
-    for v in range(max(1, LADDER_VISITS)):
-        for g in gains:
-            sched.append(g)
-    if LADDER_VISITS > 1:
-        random.shuffle(sched)
+    def _group(nvisits):
+        g = []
+        for v in range(nvisits):
+            for x in gains:
+                g.append(x)
+        if nvisits > 1 or LADDER_VISITS > 1:
+            random.shuffle(g)
+        return g
 
-    # With --bracket, split the schedule so half runs before the noise and half
-    # after; that keeps a long time baseline across the session.
-    if BRACKET and len(sched) > 1:
-        half = len(sched) // 2
-        open_gains, close_gains = sched[:half], sched[half:]
+    if BRACKET:
+        # EVERY level must appear in BOTH halves, or drift is not identifiable
+        # and the bracket achieves nothing. An earlier revision split a single
+        # pass down the middle, which gave each level exactly once, at one end
+        # of the session or the other -- worse than no bracket at all, because
+        # compression and drift are then fully confounded AND there is no
+        # repeat to separate them. Build each half independently instead.
+        per_half = max(1, (max(1, LADDER_VISITS) + 1) // 2)
+        open_gains = _group(per_half)
+        close_gains = _group(per_half)
     else:
-        open_gains, close_gains = sched, []
+        open_gains = _group(max(1, LADDER_VISITS))
+        close_gains = []
 
     # canonical expnos for the first four opening rungs, then spares
     canon = [10, 14, 15, 16]
@@ -805,11 +850,11 @@ def main():
     if ok:
         print("\nClosing reference (identical to the opening one)")
         # Deliberately identical to expno 11. An earlier revision of the
-        # operator quickstart specified pw=0.11 / tpwr=57 here, which
-        # contradicted "identical to step 2" in this directory's README and
-        # produced mismatched references (1.0 deg vs 2.25 deg) in the first
-        # validation session. The two references must bracket the noise block
-        # under identical conditions or they cannot measure drift.
+        # operator quickstart specified pw=0.11 / tpwr=57 here, contradicting
+        # "identical to step 2" in this directory's README and producing
+        # mismatched references (1.0 deg vs 2.25 deg) in the first validation
+        # session. The two references must bracket the noise block under
+        # identical conditions or they cannot measure drift.
         ok = block("sn_ref_close", 13,
                    "pw=%g tpwr=%g nt=1 ss=0 pad=0 gain=%g at=%g"
                    % (ref_pw, ref_tpwr, max(gains), at_ref), at_ref)
