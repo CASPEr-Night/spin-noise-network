@@ -39,13 +39,14 @@
     "probe_string": "5 mm BBO",
     "coil_temp_k": null,
     "preamp_temp_k": null,
+    "_temperature_note": "PHYSICAL temperatures in kelvin, null if unknown. Room-temperature probe: the coil sits at the probe-body temperature, i.e. the lab ambient, and the preamp at its own physical ambient -- a measured lab temperature (e.g. 296.5) beats an assumed 298. Corrections learned later go to the maintainer as numbers, not as a re-upload.",
     "_h1_freq_mhz": "usually read from the vendor files (Bruker acqus BF1); uncomment to override",
     "_field_tesla": "computed from h1_freq_mhz if omitted"
   },
 
   "instrument": {
     "topspin_version": "4.1.4",
-    "_note": "vendor-specific answers; for vendor=jeol supply delta_version, for vendor=magritek supply spinsolve_software_version (those readers are drafts pending partner/bench validation)"
+    "_note": "vendor-specific answers; for vendor=jeol supply delta_version, for vendor=magritek supply spinsolve_software_version (those readers are drafts pending partner/bench validation); for vendor=agilent supply vnmrj_version or copy /vnmr/vnmrrev into the session directory"
   },
 
   "calibration": {
@@ -55,7 +56,7 @@
     "rg_ladder": [
       { "expno": 10, "rg": 1.0, "tip_deg": 1.0 }
     ],
-    "_rg_ladder_note": "omit rg_ladder entirely if you acquired none; the packer records a single-entry ladder from a reference experiment and flags the limitation"
+    "_rg_ladder_note": "one entry per rung IN ACQUISITION ORDER; the same rg may appear more than once (the randomized repeated ladder: each level visited three times in random order) and nothing sorts or dedups the list. Omit rg_ladder entirely to have the packer build it from the rg_ladder experiments' stored gains (tip_deg from reference_tip_deg, default 1.0); with no ladder experiments either, a single-entry ladder is taken from a reference experiment and the limitation flagged."
   },
 
   "experiments": [
@@ -63,5 +64,15 @@
     { "expno": 12, "role": "noise" },
     { "expno": 13, "role": "reference_close" }
   ],
-  "_experiments_note": "one entry per expno: 'role' is required (setup | rg_ladder | reference_open | noise | reference_close). Acquisition parameters (td, td1_rows, sw_hz, o1_hz, rg, ns, started_local, finished_local) are read from the vendor files where possible; anything the files lack must be added here."
+  "_experiments_note": "one entry per expno: 'role' is one of setup | rg_ladder | reference_open | noise | reference_close | noise_tune | sweep_signcal. For vendor=agilent the Tier-1 save-name suffix implies the role (NN_sn_ladder, _sn_ref_open, _sn_noise, _sn_ref_close, _sn_tune_k, _sn_signcal; the role word may be followed by anything but a letter, so 17_sn_noise2 reads as noise and 17_sn_noisetest reads as nothing), so only entries that add information need listing; an entry's role overrides the name. Acquisition parameters (td, td1_rows, sw_hz, o1_hz, rg, ns, started_local, finished_local) are read from the vendor files where possible; anything the files lack must be added here.",
+  "_experiments_agilent_example": [
+    { "expno": 2000, "role": "noise_tune",
+      "tuning": { "setting_index": 0, "label": "operator's normal tuning (wobble minimum)", "tune_reading": null, "match_reading": null, "units": "", "note": "" } },
+    { "expno": 2010, "role": "noise_tune",
+      "tuning": { "setting_index": 1, "label": "tune capacitor +1 turn", "tune_reading": 1, "match_reading": null, "units": "turns from normal", "note": "" } },
+    { "expno": 3000, "role": "sweep_signcal" }
+  ],
+  "_experiments_agilent_example_note": "what the tuning-ladder and axis-sign entries of an Agilent session look like (quickstart 2.6-2.7); move them into 'experiments' for such a session. They sit under an ignored _ key here so that this Bruker-flavoured template packs a Bruker session without 'describes expno N but the data directory has no such experiment' WARNs.",
+  "_tuning_note": "OPTIONAL per-experiment 'tuning' object (spin-noise tuning ladder, v0.7.1), passed through verbatim: setting_index (integer >= 0, REQUIRED; 0 = the operator's normal tuning), label (text), tune_reading and match_reading (whatever numbers the console shows, or null), units (names them), note. No other keys. noise_tune blocks are grouped by setting_index and never co-added with the headline noise block; an Agilent save named NN_sn_tune_k supplies setting_index k when this object is absent.",
+  "_sweep_signcal_note": "sweep_signcal: one extra small-flip 1D with the transmitter carrier displaced by a known amount (Agilent: tof + 200 Hz), same pulse/gain/record length as the references. The packer records o1_hz from the vendor files; the report takes o1_hz(signcal) - o1_hz(reference) as the displacement and resolves the frequency-axis sign from where the line moved (physical convention: its apparent in-window offset DROPS by the displacement)."
 }
