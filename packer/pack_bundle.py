@@ -76,9 +76,36 @@ on real hardware/software before the corresponding reader is trusted):
     clock's, hence the clock-sanity WARN), /vnmr/vnmrrev is the
     machine-readable version source (item 8), and the record-length
     limit is the np <= 524288 point-count cap (item 4).  Still
-    UNVERIFIED: 'tof' offset convention (item 2), transmitter silence at
-    pw=0 (item 3); receiver-gain linearity is measured but not yet
-    fitted (item 1, legal gains are integer dB).
+    UNVERIFIED: transmitter silence at pw=0 (item 3); receiver-gain
+    linearity is measured but not yet fitted (item 1, legal gains are
+    integer dB).  The 'tof' axis-sign convention (item 2) is resolved
+    per bundle from v0.7.1 on by a sweep_signcal 1D (one extra
+    reference with tof displaced by a known amount: o1_hz(signcal) -
+    o1_hz(reference) is the displacement, and the line's apparent
+    in-window offset must DROP by exactly that much; a rise means the
+    axis is mirrored) -- no real session has carried one yet.
+
+Vendor-path roles (v0.7.1): besides the Bruker plan's five roles the
+packer accepts noise_tune (pulse-free blocks at deliberately varied
+probe tuning/match settings -- the spin-noise tuning ladder, each
+carrying an optional experiments[].tuning object with setting_index 0
+= the operator's normal tuning; never co-added with the headline noise
+block) and sweep_signcal (above).  Agilent Tier-1 save names imply the
+role (NN_sn_ladder, _sn_ref_open, _sn_noise, _sn_ref_close,
+_sn_tune_k, _sn_signcal) and _sn_tune_k implies tuning.setting_index
+k; answers.json entries override both.  The role word must not run
+straight into letters (12_sn_noise, 12_sn_noise_b and 12_sn_noise2
+all read as noise; 12_sn_noisetest reads as nothing), and the tune
+index is the digits right after _sn_tune_.  calibration.rg_ladder is
+recorded VERBATIM -- the randomized repeated ladder lists rungs in
+acquisition order with duplicate gains, and nothing here sorts,
+dedups or expects monotonic gains; omitted, it is built from the
+rg_ladder experiments' stored gains.  An answered ladder is
+cross-checked against the session: a rung whose expno is not in the
+data, or whose rg differs from that experiment's stored gain by more
+than rounding, gets a WARN (the analysis uses experiments[].rg).  The
+sweep_signcal 1D never votes on spectrometer.h1_freq_mhz: on VnmrJ
+sfrq tracks tof, so its carrier is the displaced one by design.
   * Bruker: nothing pending -- acqus parameter names used here (TD,
     SW_h, SFO1, BF1, O1, RG, NS, PULPROG, BYTORDA, DTYPA, GRPDLY) are
     standard JCAMP-DX labels already exercised by this repository's
@@ -91,6 +118,7 @@ import argparse
 import calendar
 import hashlib
 import json
+import math
 import os
 import random
 import re
@@ -100,12 +128,13 @@ import zipfile
 
 # Kept in sync with the repository VERSION file (a literal, because this
 # script may be copied standalone); testing/static_check.py enforces it.
-PACKER_VERSION = "0.7.0"
+PACKER_VERSION = "0.7.1"
 SCHEMA_VERSION = "2.0"
 
 GAMMA_1H_MHZ_PER_T = 42.5774806   # same constant spin_noise_run.py uses
 
-ROLES = ("setup", "rg_ladder", "reference_open", "noise", "reference_close")
+ROLES = ("setup", "rg_ladder", "reference_open", "noise", "reference_close",
+         "noise_tune", "sweep_signcal")
 RUN_MODES = ("live", "simulate", "desktest", "archival-repackage",
              "synthetic-injection", "external-acquisition")
 
@@ -749,10 +778,15 @@ class AgilentReader(VendorReader):
     two sessions, zero reader warnings, byte round-trip exact).  Parsing
     is delegated to vendors/agilent/agilent_reader.py; the fid/procpar
     layout follows nmrglue's varian reader (BSD-3-Clause).  Still
-    UNVERIFIED (vendors/agilent/README.md checklist): 'tof' offset
-    convention (item 2) and transmitter silence at pw=0 (item 3);
-    'gain' is integer dB with the amplitude transfer curve not yet
-    fitted (item 1).
+    UNVERIFIED (vendors/agilent/README.md checklist): transmitter
+    silence at pw=0 (item 3); 'gain' is integer dB with the amplitude
+    transfer curve not yet fitted (item 1).  The 'tof' axis sign (item
+    2) is resolved per bundle by the sweep_signcal pair when a session
+    carries one (module docstring).
+
+    The save name carries the role: the Tier-1 suffix after the NN_
+    prefix (infer_role_from_name) fills experiments[].role when
+    answers.json does not, and _sn_tune_k fills tuning.setting_index.
 
     Parameter mapping (README.md table):
       td   = np                (Varian np is TOTAL points, re+im
@@ -768,8 +802,9 @@ class AgilentReader(VendorReader):
                                 comparable LINEAR amplitude convention,
                                 same mapping the Magritek adapter uses;
                                 raw dB kept in instrument.agilent)
-      o1_hz = tof              (transmitter offset, Hz assumed --
-                                sign/reference convention UNVERIFIED)
+      o1_hz = tof              (transmitter offset, Hz; the axis sign
+                                is resolved per bundle by the
+                                sweep_signcal pair, item 2)
       ns   = nt
       aq_s_per_row = at        (s; falls back to np/(2*sw))
       h1_freq_mhz = sfrq       (MHz) when tn is the proton channel
@@ -928,12 +963,17 @@ class AgilentReader(VendorReader):
                 and isinstance(tn, str) and tn.upper() in ("H1", "1H",
                                                            "PROTON"):
             found["h1_freq_mhz"] = float(sfrq)
-        # o1 analog: tof (transmitter offset). UNVERIFIED(2) that tof is
-        # the exact analog of Bruker O1 (sign and reference convention);
-        # recorded verbatim in Hz, override in answers.json if wrong.
+        # o1 analog: tof (transmitter offset), verbatim in Hz. Its sign
+        # relative to Bruker O1 (item 2) is what the sweep_signcal pair
+        # resolves per bundle; override in answers.json if wrong.
         tof = sc(pp, "tof")
         if isinstance(tof, (int, float)):
             found["o1_hz"] = float(tof)
+        role_hint, tune_idx = infer_role_from_name(os.path.basename(dirpath))
+        if role_hint:
+            found["_role_hint"] = role_hint
+        if tune_idx is not None:
+            found["_tuning_setting_index"] = tune_idx
         # time_run is stamped when acquisition starts and time_complete
         # when it ends (the svf-written log agrees to the second); the
         # file mtime is the save time, i.e. the END of the record.
@@ -1216,6 +1256,89 @@ def infer_role(pulprog):
     return None
 
 
+_SN_NAME_ROLES = {
+    "setup": "setup",
+    "ladder": "rg_ladder",
+    "ref_open": "reference_open",
+    "ref_close": "reference_close",
+    "noise": "noise",
+    "tune": "noise_tune",
+    "signcal": "sweep_signcal",
+}
+_SN_NAME_RE = re.compile(
+    r"_sn_(setup|ladder|ref_open|ref_close|noise|tune|signcal)(?![a-z])")
+_SN_TUNE_INDEX_RE = re.compile(r"_sn_tune_(\d+)(?![0-9a-z])")
+
+
+def infer_role_from_name(name):
+    """(role, tuning setting_index) implied by a Tier-1 save name such
+    as 12_sn_noise, 1004_sn_ladder_15db or 2010_sn_tune_1 (vendor
+    README naming; extension stripped, case-insensitive).  Whatever
+    follows the role word is free as long as it does not run straight
+    into letters: 12_sn_noise2 and 17_sn_noise-1 are noise blocks,
+    12_sn_noisetest is not recognised.  The index is None unless the
+    name carries _sn_tune_<digits>; both are None when the name
+    carries no _sn_ suffix."""
+    stem = os.path.splitext(str(name))[0].lower()
+    m = _SN_NAME_RE.search(stem)
+    if not m:
+        return None, None
+    role = _SN_NAME_ROLES[m.group(1)]
+    idx = None
+    if role == "noise_tune":
+        mi = _SN_TUNE_INDEX_RE.search(stem)
+        if mi:
+            idx = int(mi.group(1))
+    return role, idx
+
+
+TUNING_STR_KEYS = ("label", "units", "note")
+TUNING_READING_KEYS = ("tune_reading", "match_reading")
+TUNING_KEYS = ("setting_index",) + TUNING_STR_KEYS + TUNING_READING_KEYS
+
+
+def check_tuning(expno, tuning, problems):
+    """Minimal type check of one experiments[].tuning object (the
+    schema's tuning subschema, spelled out so the operator reads which
+    key is wrong instead of a validator path).  Returns True when the
+    object may be passed through verbatim."""
+    n0 = len(problems)
+    tag = "experiment %d: tuning" % expno
+    if not isinstance(tuning, dict):
+        problems.append("%s must be an object {\"setting_index\": k, ...}, "
+                        "got %r" % (tag, tuning))
+        return False
+    unknown = sorted(k for k in tuning if k not in TUNING_KEYS)
+    if unknown:
+        problems.append("%s has unknown key(s) %s -- allowed: %s"
+                        % (tag, unknown, list(TUNING_KEYS)))
+    if "setting_index" not in tuning:
+        problems.append("%s.setting_index missing (required: integer >= 0; "
+                        "0 = the operator's normal tuning)" % tag)
+    else:
+        si = tuning["setting_index"]
+        if not isinstance(si, int) or isinstance(si, bool) or si < 0:
+            problems.append("%s.setting_index must be an integer >= 0, "
+                            "got %r" % (tag, si))
+    for k in TUNING_STR_KEYS:
+        if k in tuning and not isinstance(tuning[k], str):
+            problems.append("%s.%s must be a string, got %r"
+                            % (tag, k, tuning[k]))
+    for k in TUNING_READING_KEYS:
+        v = tuning.get(k)
+        if k in tuning and v is not None \
+                and (isinstance(v, bool) or not isinstance(v, (int, float))):
+            problems.append("%s.%s must be a number or null, got %r"
+                            % (tag, k, v))
+        elif isinstance(v, float) and not math.isfinite(v):
+            # json.load turns 1e400 into inf and accepts the literal
+            # NaN; either would land in meta.json as a token strict
+            # JSON parsers reject
+            problems.append("%s.%s must be a finite number or null, got %r"
+                            % (tag, k, v))
+    return len(problems) == n0
+
+
 def stamp_to_epoch(value, tz_min):
     """UTC epoch seconds for a zone-less "YYYY-MM-DDTHH:MM:SS" stamp that
     is known to be in the UTC+tz_min zone, or None."""
@@ -1291,12 +1414,21 @@ def build_experiments(reader, experiments_found, answers, problems, warnings):
         disc = reader.read_experiment(dirpath)
         ov = overrides.get(expno, {})
         entry = {"expno": expno}
-        role = ov.get("role") or infer_role(
-            ov.get("pulprog") or disc.get("pulprog"))
+        role = ov.get("role")
+        name_role = disc.get("_role_hint")
+        if role and name_role and role != name_role:
+            warnings.append("experiment %d: answers.json role %r overrides "
+                            "the role %r implied by the save name"
+                            % (expno, role, name_role))
+        if not role:
+            role = name_role or infer_role(
+                ov.get("pulprog") or disc.get("pulprog"))
         if role not in ROLES:
             problems.append(
                 "experiment %d: no valid role -- add {\"expno\": %d, "
-                "\"role\": one of %s} to answers.json 'experiments'"
+                "\"role\": one of %s} to answers.json 'experiments' (Agilent "
+                "Tier-1 save names NN_sn_ladder / _sn_ref_open / _sn_noise / "
+                "_sn_ref_close / _sn_tune_k / _sn_signcal imply it)"
                 % (expno, expno, list(ROLES)))
         entry["role"] = role
         entry["pulprog"] = ov.get("pulprog") or disc.get("pulprog") or ""
@@ -1345,8 +1477,65 @@ def build_experiments(reader, experiments_found, answers, problems, warnings):
             entry[name] = v
         check_experiment_clock(expno, stamps["started_local"],
                                stamps["finished_local"], tz_min, warnings)
+        tuning = ov.get("tuning")
+        name_idx = disc.get("_tuning_setting_index")
+        if tuning is None and name_idx is not None:
+            tuning = {"setting_index": name_idx}
+        elif isinstance(tuning, dict) and name_idx is not None \
+                and tuning.get("setting_index") != name_idx:
+            warnings.append("experiment %d: answers.json tuning.setting_index "
+                            "%r overrides the index %d in the save name"
+                            % (expno, tuning.get("setting_index"), name_idx))
+        if tuning is not None:
+            if check_tuning(expno, tuning, problems):
+                entry["tuning"] = tuning
+        elif role == "noise_tune":
+            warnings.append("experiment %d: role noise_tune without a "
+                            "'tuning' object -- add {\"tuning\": "
+                            "{\"setting_index\": k}} to its answers.json "
+                            "entry (or name the save NN_sn_tune_k); the "
+                            "report cannot place it on the tuning ladder "
+                            "otherwise" % expno)
         out.append((entry, disc))
     return out
+
+
+RG_LADDER_MATCH_TOL = 0.01
+
+
+def check_ladder_against_session(ladder, exp_entries, warnings):
+    """WARN for every answered rung that the session contradicts: an
+    expno the data directory does not hold (a template ladder copied
+    from another session), or an rg differing from that experiment's
+    stored gain by more than RG_LADDER_MATCH_TOL relative (a requested
+    gain the console rounded -- SIU 2026-09-14 stored 14 and 26 dB for
+    the requested 13.3 and 26.7).  The list itself stays verbatim; the
+    analysis reads experiments[].rg, so the damage is a misleading
+    calibration record, which is still worth a line."""
+    by_expno = dict((e["expno"], e) for e, _d in exp_entries)
+    for rung in ladder:
+        if not isinstance(rung, dict) or isinstance(rung.get("expno"), bool) \
+                or not isinstance(rung.get("expno"), int):
+            continue        # the schema validation names malformed rungs
+        expno = rung["expno"]
+        if expno not in by_expno:
+            warnings.append("calibration.rg_ladder names expno %d but the "
+                            "data directory has no such experiment -- a "
+                            "ladder copied from another session? (recorded "
+                            "verbatim; the analysis skips it)" % expno)
+            continue
+        rg_ans, rg_file = rung.get("rg"), by_expno[expno].get("rg")
+        if isinstance(rg_ans, (int, float)) and not isinstance(rg_ans, bool) \
+                and rg_ans > 0 and isinstance(rg_file, (int, float)) \
+                and rg_file > 0 \
+                and abs(rg_ans / rg_file - 1.0) > RG_LADDER_MATCH_TOL:
+            warnings.append("calibration.rg_ladder expno %d: answered rg %s "
+                            "(%.1f dB) but the vendor files store rg %.6g "
+                            "(%.1f dB) -- the console may have rounded the "
+                            "requested gain; recorded verbatim, the analysis "
+                            "uses the stored value"
+                            % (expno, rg_ans, 20.0 * math.log10(rg_ans),
+                               rg_file, 20.0 * math.log10(rg_file)))
 
 
 def build_meta(vendor, reader, data_dir, answers):
@@ -1408,8 +1597,14 @@ def build_meta(vendor, reader, data_dir, answers):
     spec_ans = answers.get("spectrometer", {})
     h1 = spec_ans.get("h1_freq_mhz")
     if not isinstance(h1, (int, float)) or isinstance(h1, bool) or h1 <= 0:
-        h1s = set(d.get("h1_freq_mhz") for d in discovered.values()
-                  if d.get("h1_freq_mhz"))
+        # the sign-check 1D runs with the carrier displaced on purpose,
+        # and on VnmrJ sfrq tracks tof, so it does not vote
+        h1s = set(d.get("h1_freq_mhz") for e, d in exp_entries
+                  if d.get("h1_freq_mhz")
+                  and e.get("role") != "sweep_signcal")
+        if not h1s:
+            h1s = set(d.get("h1_freq_mhz") for d in discovered.values()
+                      if d.get("h1_freq_mhz"))
         if len(h1s) == 1:
             h1 = h1s.pop()
         elif len(h1s) > 1:
@@ -1450,25 +1645,43 @@ def build_meta(vendor, reader, data_dir, answers):
     p90_pw = cal_ans.get("p90_power_db_or_w", "unknown")
     if not isinstance(p90_pw, (int, float, str)) or isinstance(p90_pw, bool):
         p90_pw = "unknown"
+    # Recorded verbatim: the randomized repeated ladder lists its rungs
+    # in acquisition order with duplicate gains, and the analysis needs
+    # exactly that order -- never sort, dedup or expect monotonic gains.
     ladder = cal_ans.get("rg_ladder")
-    if not (isinstance(ladder, list) and ladder):
-        # synthesize a single-entry ladder from a reference experiment,
-        # exactly the honest fallback repackage_epfl.py uses
-        ladder = []
+    if isinstance(ladder, list) and ladder:
+        check_ladder_against_session(ladder, exp_entries, warnings)
+    else:
+        tip = cal_ans.get("reference_tip_deg", 1.0)
+        rungs = [e for e, _d in exp_entries
+                 if e.get("role") == "rg_ladder" and e.get("rg")]
+        ladder = [{"expno": e["expno"], "rg": e["rg"], "tip_deg": tip}
+                  for e in rungs]
+        if ladder:
+            warnings.append("no calibration.rg_ladder answered; built a "
+                            "%d-rung ladder from the rg_ladder experiments "
+                            "in meta order (rg from the vendor files' stored "
+                            "gains, tip_deg %s from calibration."
+                            "reference_tip_deg or its 1.0 default)"
+                            % (len(ladder), tip))
         for e, _d in exp_entries:
-            if e.get("role") in ("rg_ladder", "reference_open",
-                                 "reference_close") and e.get("rg"):
+            if ladder:
+                break
+            # synthesize a single-entry ladder from a reference
+            # experiment, exactly the honest fallback repackage_epfl.py
+            # uses
+            if e.get("role") in ("reference_open", "reference_close") \
+                    and e.get("rg"):
                 ladder = [{"expno": e["expno"], "rg": e["rg"],
-                           "tip_deg": cal_ans.get("reference_tip_deg", 1.0)}]
+                           "tip_deg": tip}]
                 warnings.append("no calibration.rg_ladder answered; recorded "
                                 "a single-entry ladder from expno %d (rg=%s) "
                                 "-- receiver-linearity checks will be "
                                 "limited" % (e["expno"], e["rg"]))
-                break
         if not ladder:
             problems.append("missing answer: calibration.rg_ladder (list of "
-                            "{expno, rg, tip_deg}) and no reference "
-                            "experiment to synthesize one from")
+                            "{expno, rg, tip_deg}) and no rg_ladder or "
+                            "reference experiment to build one from")
     cal = {
         "p90_us": p90,
         "p90_power_db_or_w": p90_pw,
@@ -1568,8 +1781,15 @@ def write_bundle(meta, data_files, out_dir, slug):
     bundle_name = "spinnoise_%s_%s_%04x.zip" % (
         slug, utc_stamp_compact(), random.randint(0, 0xFFFF))
     bundle_path = os.path.join(out_dir, bundle_name)
+    try:
+        # strict JSON: a NaN/Infinity that slipped past the answer checks
+        # must fail here, not land in meta.json as a non-standard token
+        text = json.dumps(meta, indent=2, allow_nan=False)
+    except ValueError as exc:
+        raise PackError("meta.json would not be strict JSON (%s) -- a "
+                        "non-finite number in answers.json?" % exc)
     with zipfile.ZipFile(bundle_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("meta.json", json.dumps(meta, indent=2) + "\n")
+        zf.writestr("meta.json", text + "\n")
         for arcname, fs_path in data_files:
             zf.write(fs_path, arcname)
     return bundle_path
