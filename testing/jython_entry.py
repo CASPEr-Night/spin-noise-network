@@ -38,6 +38,15 @@ import re
 import sys
 import time
 import traceback
+import json as _jsonmod   # a later function-local `import json` would shadow the plain name
+import __builtin__
+import java.lang as _jl
+CATCHABLE = (__builtin__.Exception, _jl.Exception)   # harness runs under plain Jython
+# What the execfile() catcher turns into a FAIL line: any Python exception
+# or ANY Java throwable -- Throwable, not Exception, so a java.lang.Error
+# (StackOverflowError, OutOfMemoryError) escaping the script still yields
+# the readable FAIL instead of killing the harness with a raw Java trace.
+SCRIPT_ESCAPES = (__builtin__.Exception, _jl.Throwable)
 
 TESTING_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(TESTING_DIR)
@@ -142,7 +151,10 @@ DIALOG_ANSWERS = {
     "spin-noise run: hardware check":
         [u"4.1.4", u"AVANCE III HD",
          u"5 mm CryoProbe Prodigy BBO BB-H&F/D Z-GRD"],
-    "spin-noise run: probe temperatures (optional)": [u"80", u"298"],
+    # Left BLANK on purpose: the dialog says "blank=unknown", and a blank
+    # answer is what a room-temperature facility types.  The first live run
+    # died here (float("") behind a catch-all TopSpin's namespace defeated).
+    "spin-noise run: probe temperatures (optional)": [u"", u""],
     "spin-noise run: 90-degree pulse": [u"8.5", u"-11.79"],
     # Must NOT fire (harness answers 298 K, in range); scripted so a
     # regression shows as a wrong outcome, not a stuck harness.
@@ -231,12 +243,19 @@ def main():
     # Run the real script, unmodified, the way xpy would.
     sys.argv = ["spin_noise_run", mode] + features
     script_globals = {"__name__": "__main__", "__file__": SCRIPT}
+    # TopSpin executes user scripts in a namespace that carries java.lang.*
+    # (String, Exception, ...), so the bare name Exception is
+    # java.lang.Exception on a real console.  Reproduce that here: a catch-all
+    # written as `except Exception:` must fail in the harness exactly as it
+    # failed at Torino (TopSpin 4.4.0, 2026-09-17).
+    import java.lang
+    script_globals["Exception"] = java.lang.Exception
     run_error = None
     try:
         execfile(SCRIPT, script_globals)
     except SystemExit:
         pass          # EXIT() outside main()'s own catcher; treated below
-    except Exception:
+    except SCRIPT_ESCAPES:
         run_error = traceback.format_exc()
 
     # ------------------------------------------------------------ checks
@@ -254,6 +273,31 @@ def main():
 
     check("script ran to completion without an uncaught exception",
           run_error is None, run_error or "")
+    # The script's CATCHABLE must catch a Python exception under BOTH
+    # conceivable TopSpin shadowing mechanisms: java.lang names installed
+    # into the script's globals (modelled above for the whole run) or into
+    # __builtin__ (modelled here, briefly, around one float("")).  A tuple
+    # built from __builtin__.Exception degenerates to (java.lang.Exception,
+    # java.lang.Exception) under the second mechanism; exceptions.Exception
+    # does not.
+    _cat = script_globals.get("CATCHABLE")
+    _robust = 0
+    if _cat is not None:
+        _real_exc = __builtin__.Exception
+        __builtin__.Exception = java.lang.Exception
+        try:
+            try:
+                try:
+                    float("")
+                except _cat:
+                    _robust = 1
+            except ValueError:
+                _robust = 0
+        finally:
+            __builtin__.Exception = _real_exc
+    check("script CATCHABLE still catches a Python exception with "
+          "__builtin__.Exception shadowed by java.lang.Exception",
+          _robust, "CATCHABLE = %r" % (_cat,))
     check("no hardware-guard breaches (XCMD/ZG never reached)",
           not topspin_stub.BREACHES, "; ".join(topspin_stub.BREACHES))
     unscripted = ["%s [%s]" % (a, t) for a, t in topspin_stub.UNSCRIPTED]
@@ -345,6 +389,15 @@ def main():
           'harness run \\u2014 synthetic operator input' in meta_text)
     check("meta.json facility_slug from dialog answer",
           '"facility_slug": "harness-lab"' in meta_text)
+    try:
+        _spec = _jsonmod.loads(meta_text).get("spectrometer", {})
+    except CATCHABLE:
+        _spec = {}
+    check("meta.json coil_temp_k/preamp_temp_k are null when the optional "
+          "temperature fields are left blank",
+          _spec.get("coil_temp_k", 0) is None
+          and _spec.get("preamp_temp_k", 0) is None,
+          repr((_spec.get("coil_temp_k"), _spec.get("preamp_temp_k"))))
 
     # ---- clock audit (schema 1.2).  Jython 2.7 ships json, so the
     # harness can parse what the script's hand-rolled writer emitted.

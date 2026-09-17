@@ -52,6 +52,7 @@ VERSION_PATH = os.path.join(REPO, "VERSION")
 SCHEMA_PATH = os.path.join(REPO, "schema", "meta.schema.json")
 UPLOADER_PATH = os.path.join(REPO, "uploader", "upload_bundle.py")
 PACKER_PATH = os.path.join(REPO, "packer", "pack_bundle.py")
+ENTRY_PATH = os.path.join(REPO, "testing", "jython_entry.py")
 
 FAILURES = []
 
@@ -120,6 +121,7 @@ check("syntax: compiles after py2-print rewrite (Jython-compat proxy)",
 # at load on TopSpin 2.x consoles -- the review of 2026-09-03 caught
 # exactly this in a fresh edit. AST-based: comments/strings never
 # false-positive.
+_tree = None
 try:
     import ast
     _tree = ast.parse(rewrite_prints(LINES))
@@ -305,6 +307,72 @@ m = re.search(r'^HW_COMMANDS\s*=\s*\(([^)]*)\)', SRC, re.M)
 hw_commands = re.findall(r'"([^"]+)"', m.group(1)) if m else []
 check("guard: HW_COMMANDS tuple declared", bool(hw_commands),
       "HW_COMMANDS not found")
+
+# TopSpin's Jython namespace shadows the bare name Exception with
+# java.lang.Exception, so an except clause naming bare Exception misses
+# every Python exception on a real console (Torino, TopSpin 4.4.0,
+# 2026-09-17).  Catch-alls must use the module's CATCHABLE tuple, which
+# names both worlds.  AST-based, so comments and strings never
+# false-positive, and so the tuple form `except (X, Exception):`,
+# `raise Exception(...)` and `isinstance(e, Exception)` are all caught:
+# EVERY bare-Name use of `Exception` in code is an offender (the tuple
+# itself uses the attribute forms exceptions.Exception and
+# java.lang.Exception).  A bare `except:` is refused too: it swallows
+# SystemExit, i.e. abort()/EXIT().
+if _tree is not None:
+    _bare_exception = sorted(set(
+        n.lineno for n in ast.walk(_tree)
+        if isinstance(n, ast.Name) and n.id == "Exception"))
+    _bare_except = sorted(set(
+        h.lineno for n in ast.walk(_tree) if isinstance(n, ast.Try)
+        for h in n.handlers if h.type is None))
+    check("guard: no bare-name 'Exception' anywhere in the TopSpin script "
+          "code (use CATCHABLE)", not _bare_exception,
+          "lines %s -- TopSpin shadows Exception with java.lang.Exception"
+          % _bare_exception)
+    check("guard: no bare 'except:' in the TopSpin script (swallows SystemExit)",
+          not _bare_except, "lines %s" % _bare_except)
+check("guard: CATCHABLE = (exceptions.Exception, java.lang.Exception) declared, "
+      "with the no-java fallback (exceptions module, not __builtin__)",
+      re.search(r"^import exceptions\s*$", SRC, re.M) is not None
+      and re.search(r"CATCHABLE\s*=\s*\(exceptions\.Exception,"
+                    r"\s*java\.lang\.Exception\)", SRC) is not None
+      and re.search(r"CATCHABLE\s*=\s*\(exceptions\.Exception,\)", SRC)
+      is not None,
+      "CATCHABLE tuple, its fallback, or 'import exceptions' not found")
+check("guard: no '__builtin__.Exception' in the TopSpin script (a console "
+      "may install java.lang names into __builtin__)",
+      "__builtin__.Exception" not in SRC)
+# The self-test must be at module level and fatal (EXIT() inside its block).
+_st = [i for i, ln in enumerate(LINES)
+       if ln.startswith("if not _catchable_selftest():")]
+_st_fatal = False
+if _st:
+    j = _st[0] + 1
+    while j < len(LINES) and (LINES[j].startswith((" ", "\t"))
+                              or LINES[j].strip() == ""):
+        if LINES[j].strip() == "EXIT()":
+            _st_fatal = True
+        j += 1
+check("guard: import-time CATCHABLE self-test present at module level and "
+      "fatal (EXIT())",
+      "def _catchable_selftest():" in SRC and bool(_st) and _st_fatal)
+
+# The harness can only see this bug class because it reproduces TopSpin's
+# namespace and answers the temperature dialog blank; pin both so a later
+# cleanup of jython_entry.py cannot silently revert the reproduction.
+with open(ENTRY_PATH, "r", encoding="utf-8") as fh:
+    ENTRY_SRC = fh.read()
+check("guard: the Jython harness shadows Exception in the script's globals "
+      "(reproduces the TopSpin namespace)",
+      re.search(r'script_globals\["Exception"\]\s*=\s*java\.lang\.Exception',
+                ENTRY_SRC) is not None,
+      "testing/jython_entry.py no longer injects java.lang.Exception")
+check("guard: the Jython harness answers the probe-temperature dialog blank "
+      "(the Torino input)",
+      re.search(r'"spin-noise run: probe temperatures \(optional\)":\s*'
+                r'\[u"",\s*u""\]', ENTRY_SRC) is not None,
+      "testing/jython_entry.py no longer leaves the temperature fields blank")
 for cmd in hw_commands:
     routed = re.search(
         r'(safe_hw_cmd|xcmd_or_dialog)\(\s*\n?\s*"%s' % re.escape(cmd), SRC)

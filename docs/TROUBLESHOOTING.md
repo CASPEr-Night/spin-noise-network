@@ -39,6 +39,27 @@ without `Avance.incl`: open the pp file and comment out the
 press OK through that dialog: it would finish the session with no
 noise data in the bundle.
 
+**`ValueError: invalid literal for float:` right after the optional
+probe-temperature dialog (script v0.7.1 or earlier).**
+Leaving the coil/preamp temperature fields blank, as that dialog itself
+suggests, crashed the script on a real console (TopSpin 4.4.0,
+2026-09-17) because TopSpin's Jython namespace shadows the name
+`Exception`, so the script's catch-alls never caught the empty string.
+Fixed in v0.7.2 — every catch-all now names both the Python and the Java
+exception classes, and the script proves at start-up that its handlers
+catch a Python exception on the console it is running on. Workaround on
+an older script: type the physical temperatures instead of leaving the
+fields blank (on a room-temperature probe both are the lab ambient, e.g.
+`298`), which is also the value the analysis wants.
+
+**`spin_noise_run: cannot run on this console` before the first dialog
+(v0.7.2 or later).**
+The start-up self-test above failed: this console's Jython resolves the
+exception classes in a way the script does not handle, and continuing
+would reproduce the crash above at the first blank field. Nothing was
+started. Send us the message text and the TopSpin version; there is no
+operator workaround.
+
 **TopSpin pops its own errors about `atma` / `topshim` / `pulsecal`.**
 Normal on consoles without an ATM unit or those licences: the script
 detects the failure and degrades to an operator dialog asking you to
