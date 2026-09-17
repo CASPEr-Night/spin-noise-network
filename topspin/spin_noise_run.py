@@ -116,7 +116,7 @@ AUTOSTEP = False          # True (with SWEEP): TIER-2 programmatic field
 
 # Single source of truth for the script version.  KEEP IN SYNC with the
 # repository VERSION file (testing/static_check.py enforces the match).
-SCRIPT_VERSION  = "0.7.1"
+SCRIPT_VERSION  = "0.7.2"
 PROGRAM_VERSION = SCRIPT_VERSION  # alias kept for meta.json 'program_version'
 # This TopSpin orchestrator still writes schema 1.2 bundles (the last
 # Bruker-only schema).  The repository schema is 2.0 (vendor-neutral:
@@ -166,6 +166,29 @@ import traceback
 import math
 import re
 import struct
+
+# TopSpin runs this file inside a Jython namespace that has java.lang.*
+# imported, so the bare name Exception is java.lang.Exception there, and
+# an except clause naming that bare name lets every PYTHON exception
+# through (first live run, TopSpin 4.4.0, 2026-09-17: a blank optional
+# dialog field reached float("") and the script died at a clause meant
+# to catch it).  Every catch-all below therefore names both worlds
+# explicitly via CATCHABLE.  The Python half is taken from the stdlib
+# `exceptions` module rather than from __builtin__: it is the same class
+# as the pristine builtin, and it stays that class even if a console
+# installs the java.lang names into __builtin__ instead of into the
+# script's globals (TopSpin does not document which; the harness,
+# testing/jython_entry.py, models the globals variant and additionally
+# checks CATCHABLE against the __builtin__ variant).  SystemExit is not
+# in the tuple: EXIT()/abort() must still unwind.  _catchable_selftest()
+# below proves both properties on the running interpreter before any
+# dialog opens.
+import exceptions
+try:
+    import java.lang
+    CATCHABLE = (exceptions.Exception, java.lang.Exception)
+except ImportError:
+    CATCHABLE = (exceptions.Exception,)
 
 IN_TOPSPIN = 1
 try:
@@ -252,6 +275,47 @@ if IN_TOPSPIN:
 else:
     java = None
 
+
+# Import-time proof that CATCHABLE really catches a Python exception on
+# THIS interpreter and does not swallow SystemExit.  The failure mode is
+# silent until the first error a catch-all was meant to absorb, so it is
+# tested here, before any dialog opens, instead of surfacing mid-session
+# as it did at Torino.  ValueError and SystemExit are looked up by their
+# bare names on purpose: java.lang has neither, so a console cannot
+# shadow them the way it shadows Exception.
+def _catchable_selftest():
+    ok = 1
+    try:
+        try:
+            float("")
+            ok = 0                    # float("") must raise
+        except CATCHABLE:
+            pass
+    except ValueError:
+        ok = 0                        # escaped the catch-all
+    try:
+        try:
+            raise SystemExit(0)
+        except CATCHABLE:
+            ok = 0                    # abort()/EXIT() could not unwind
+    except SystemExit:
+        pass
+    return ok
+
+
+if not _catchable_selftest():
+    _msg = ("This console's Jython resolves the exception classes in a way "
+            "this script (v%s) does not handle: its error handlers would "
+            "not catch Python exceptions, so a session cannot run safely."
+            "\n\nNothing was started. Please send this message and your "
+            "TopSpin version to the CASPEr@night maintainers."
+            % SCRIPT_VERSION)
+    try:
+        ERRMSG(_msg, "spin_noise_run: cannot run on this console", None, 1)
+    except CATCHABLE:
+        print "spin_noise_run: " + _msg
+    EXIT()
+
 # Runtime mode flags from the command line:
 #   "xpy spin_noise_run simulate"   -> SIMULATE
 #   "xpy spin_noise_run desktest"   -> DESKTEST (Tier-0 desk test)
@@ -268,7 +332,7 @@ try:
             SWEEP = True
         if _al in ("autostep", "--autostep"):
             AUTOSTEP = True
-except Exception:
+except CATCHABLE:
     pass
 
 
@@ -280,11 +344,11 @@ def say(msg):
     """Non-blocking progress announcement (status line + stdout)."""
     try:
         SHOW_STATUS("spin_noise_run: " + msg)
-    except Exception:
+    except CATCHABLE:
         pass
     try:
         print "spin_noise_run: " + msg
-    except Exception:
+    except CATCHABLE:
         pass
 
 
@@ -307,13 +371,13 @@ def tz_offset_min():
         if IN_TOPSPIN:
             tz = java.util.TimeZone.getDefault()
             return tz.getOffset(java.lang.System.currentTimeMillis()) / 60000
-    except Exception:
+    except CATCHABLE:
         pass
     try:
         if time.daylight and time.localtime().tm_isdst:
             return int(-time.altzone / 60)
         return int(-time.timezone / 60)
-    except Exception:
+    except CATCHABLE:
         return 0
 
 
@@ -355,16 +419,16 @@ def wall_clock_ms():
         return int(HARNESS_WALL_MS())      # test seam (harness only)
     except NameError:
         pass
-    except Exception:
+    except CATCHABLE:
         pass
     try:
         if IN_TOPSPIN:
             return int(java.lang.System.currentTimeMillis())
-    except Exception:
+    except CATCHABLE:
         pass
     try:
         return int(time.time() * 1000)
-    except Exception:
+    except CATCHABLE:
         return 0
 
 
@@ -378,7 +442,7 @@ def harness_clock_advance(seconds):
         HARNESS_ADVANCE_S(seconds)         # injected by testing/jython_entry
     except NameError:
         pass
-    except Exception:
+    except CATCHABLE:
         pass
 
 
@@ -426,12 +490,12 @@ def _shell_capture(cmd):
         rc = None
         try:
             rc = p.close()
-        except Exception:
+        except CATCHABLE:
             rc = None
         out = to_text(out).strip()
         if out != "" and (rc is None or rc == 0):
             return out[:2000]
-    except Exception:
+    except CATCHABLE:
         pass
     return None
 
@@ -460,7 +524,7 @@ def rand4hex():
     """4 hex chars for bundle-name uniqueness (no 'random' dependency)."""
     try:
         n = int(time.time() * 1000)
-    except Exception:
+    except CATCHABLE:
         n = 0
     n = (n ^ (n >> 16)) & 0xFFFF
     return "%04x" % n
@@ -469,14 +533,14 @@ def rand4hex():
 def to_float(s, default=None):
     try:
         return float(str(s).strip())
-    except Exception:
+    except CATCHABLE:
         return default
 
 
 def to_int(s, default=None):
     try:
         return int(float(str(s).strip()))
-    except Exception:
+    except CATCHABLE:
         return default
 
 
@@ -493,10 +557,10 @@ def to_text(v):
         return v
     try:
         return str(v)
-    except Exception:
+    except CATCHABLE:
         try:
             return repr(v)
-        except Exception:
+        except CATCHABLE:
             return "(unprintable)"
 
 
@@ -527,7 +591,7 @@ def abort(msg):
     try:
         MSG(msg + "\n\nThe run was cancelled. Nothing was uploaded.",
             "spin_noise_run: cancelled")
-    except Exception:
+    except CATCHABLE:
         pass
     EXIT()
 
@@ -659,7 +723,7 @@ def script_self_sha256():
         finally:
             f.close()
         return "sha256:" + h.hexdigest()
-    except Exception:
+    except CATCHABLE:
         return "unavailable"
 
 
@@ -742,7 +806,7 @@ def copy_tree(src, dst):
         else:
             try:
                 copy_file(s, d)
-            except Exception:
+            except CATCHABLE:
                 # unreadable file (permissions, live lock file): skip,
                 # but tell the terminal so it can be diagnosed later.
                 print "spin_noise_run: WARNING could not copy %s" % s
@@ -761,11 +825,11 @@ def remove_tree(path):
         else:
             try:
                 os.remove(p)
-            except Exception:
+            except CATCHABLE:
                 print "spin_noise_run: WARNING could not remove %s" % p
     try:
         os.rmdir(path)
-    except Exception:
+    except CATCHABLE:
         print "spin_noise_run: WARNING could not remove dir %s" % path
 
 
@@ -792,7 +856,7 @@ def safe_xcmd(cmd, describe=None):
         try:
             if ct is not None:
                 res = ct.getResult()
-        except Exception:
+        except CATCHABLE:
             res = None
         # The manual: getResult() is negative on failure.  Without this
         # check a console lacking the command (no ATM unit, no topshim
@@ -802,14 +866,14 @@ def safe_xcmd(cmd, describe=None):
             if res is not None and int(res) < 0:
                 say("command '%s' reported failure (%s)" % (cmd, res))
                 return (0, res)
-        except Exception:
+        except CATCHABLE:
             pass
         return (1, res)
-    except Exception:
+    except CATCHABLE:
         print "spin_noise_run: hardware command '%s' failed:" % cmd
         try:
             traceback.print_exc()
-        except Exception:
+        except CATCHABLE:
             pass
         return (0, None)
 
@@ -879,7 +943,7 @@ def getpar(name, default=""):
         if v is None or str(v).strip() == "":
             return default
         return str(v)
-    except Exception:
+    except CATCHABLE:
         return default
 
 
@@ -888,7 +952,7 @@ def putpar(name, value):
     try:
         PUTPAR(name, str(value))
         return 1
-    except Exception:
+    except CATCHABLE:
         print "spin_noise_run: PUTPAR %s=%s failed" % (name, value)
         return 0
 
@@ -909,7 +973,7 @@ def ask_select(title, message, buttons, default_abort=1):
     v = SELECT(title, message, buttons)
     try:
         v = int(v)
-    except Exception:
+    except CATCHABLE:
         v = -1
     if v < 0:
         if default_abort:
@@ -959,11 +1023,11 @@ def open_expno(template_curd, name, expno):
     try:
         WR(target, "y")   # silent overwrite if it already exists
         made = 1
-    except Exception:
+    except CATCHABLE:
         print "spin_noise_run: WR() to %s failed" % str(target)
         try:
             traceback.print_exc()
-        except Exception:
+        except CATCHABLE:
             pass
     if not made:
         # Last resort: ask the operator to create it interactively.
@@ -977,7 +1041,7 @@ def open_expno(template_curd, name, expno):
             "spin_noise_run: manual dataset creation")
     try:
         RE(target, "y")
-    except Exception:
+    except CATCHABLE:
         abort("Could not open dataset %s/%s -- cannot continue."
               % (name, expno))
     cd = CURDATA()
@@ -1070,7 +1134,7 @@ def run_zg_and_wait(expno_dir, what, ocxo_s=None):
     try:
         ZG()          # documented per-command function; blocks
         ok = 1
-    except Exception:
+    except CATCHABLE:
         ok = 0
     if not ok:
         ok, _r = safe_hw_cmd("zg", "zg (%s)" % what)
@@ -1205,7 +1269,7 @@ def _acqus_scalar(expno_dir, key, default):
         m = re.search(r"##\$" + key + r"=\s*([-+0-9.eE]+)", txt)
         if m:
             return float(m.group(1))
-    except Exception:
+    except CATCHABLE:
         pass
     return default
 
@@ -1246,7 +1310,7 @@ def read_fid_points(expno_dir, n_want):
             pts.append((float(vals[i]), float(vals[i + 1])))
             i += 2
         return pts
-    except Exception:
+    except CATCHABLE:
         return None
 
 
@@ -1318,7 +1382,7 @@ def fid_envelope_decay(points, dwell_s, skip):
         slope = (nn * sxy - sx * sy) / denom
         intercept = (sy - slope * sx) / nn
         return -slope, math.exp(intercept)
-    except Exception:
+    except CATCHABLE:
         return None, None
 
 
@@ -1346,7 +1410,7 @@ def fid_dominant_offset_hz(points, dwell_s, skip):
         if sr == 0.0 and si == 0.0:
             return None
         return math.atan2(si, sr) / (2.0 * math.pi * dwell_s)
-    except Exception:
+    except CATCHABLE:
         return None
 
 
@@ -1381,7 +1445,7 @@ def clear_raw_data(expno_dir):
             p = os.path.join(expno_dir, fn)
             if os.path.isfile(p):
                 os.remove(p)
-        except Exception:
+        except CATCHABLE:
             pass
 
 
@@ -1621,7 +1685,7 @@ def _read_text(path):
         txt = f.read()
         f.close()
         return txt
-    except Exception:
+    except CATCHABLE:
         return None
 
 
@@ -1631,7 +1695,7 @@ def _write_text(path, txt):
         f.write(txt)
         f.close()
         return 1
-    except Exception:
+    except CATCHABLE:
         return 0
 
 
@@ -1641,7 +1705,7 @@ def sleep_s(seconds):
     mid-ladder with the lock table still holding the dummy row."""
     try:
         SLEEP(seconds)
-    except Exception:
+    except CATCHABLE:
         pass
 
 
@@ -1653,14 +1717,14 @@ def find_tshome():
             p = java.lang.System.getProperty("XWINNMRHOME")
             if p:
                 cands.append(str(p))
-    except Exception:
+    except CATCHABLE:
         pass
     for env in ("XWINNMRHOME", "TOPSPIN_HOME", "TS_HOME"):
         try:
             p = os.environ.get(env)
             if p:
                 cands.append(p)
-        except Exception:
+        except CATCHABLE:
             pass
     for c in cands:
         if os.path.isdir(os.path.join(c, "conf", "instr")):
@@ -1689,7 +1753,7 @@ def autostep_lock_table_path():
             p = os.path.join(idir, d, "2Hlock")
             if os.path.isfile(p):
                 hits.append(p)
-    except Exception:
+    except CATCHABLE:
         pass
     if len(hits) == 1:
         return hits[0]
@@ -1783,7 +1847,7 @@ def autostep_install_lock_aus():
         if not os.path.isdir(d):
             try:
                 os.makedirs(d)
-            except Exception:
+            except CATCHABLE:
                 continue
         ok = 1
         for name, body in (("sn_lockoff", AU_SN_LOCKOFF),
@@ -1899,7 +1963,7 @@ def _autostep_clean_table(st):
         done = _write_text(st["path"], st["snapshot"])
     try:
         os.remove(st["path"] + ".spinnoise_backup")
-    except Exception:
+    except CATCHABLE:
         pass
     return done
 
@@ -2148,7 +2212,7 @@ def autostep_actuate(st, sweep, target_hz, bf1_mhz, k):
             {"step": k, "shift_ppm_written": val,
              "actuator_sign": sign, "lock_state": lock_state,
              "actuated": bool(ok)})
-    except Exception:
+    except CATCHABLE:
         pass
     return ok
 
@@ -2161,7 +2225,7 @@ def autostep_restore(st, sweep):
         if st.get("cur_shift") is not None:
             walked = autostep_goto(st, st["base_shift"],
                                    "return to baseline")
-    except Exception:
+    except CATCHABLE:
         walked = 0
     cleaned = 0
     try:
@@ -2177,12 +2241,12 @@ def autostep_restore(st, sweep):
             safe_hw_cmd("xau sn_lockoff", "autostep: lock off")
             sleep_s(2)
             safe_hw_cmd("xau sn_sweepoff", "autostep: sweep off")
-    except Exception:
+    except CATCHABLE:
         pass
     try:
         sweep["autostep"]["restored_table"] = bool(cleaned)
         sweep["autostep"]["returned_to_baseline"] = bool(walked)
-    except Exception:
+    except CATCHABLE:
         pass
 
 
@@ -2285,7 +2349,7 @@ def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
     try:
         nuc = ((meta.get("spectrometer") or {}).get("observe_nucleus")
                or "1H")
-    except Exception:
+    except CATCHABLE:
         pass
     gam = abs(NUC_GAMMA_MHZ_T.get(nuc, 42.5774806))
     # Autolock capture is a FIELD excursion (~8 kHz expressed at 1H), so
@@ -2661,7 +2725,7 @@ def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
                             "baseline value in one go FIRST, and only "
                             "then re-lock.)\n"
                             % (-last_set_hz, hop_hz / bf1_mhz))
-        except Exception:
+        except CATCHABLE:
             pass
         sel = ask_select(
             "spin-noise sweep: restore field",
@@ -2738,14 +2802,14 @@ def find_pp_user_dir():
             p = java.lang.System.getProperty("XWINNMRHOME")
             if p:
                 candidates.append(p)
-    except Exception:
+    except CATCHABLE:
         pass
     for env in ("XWINNMRHOME", "TOPSPIN_HOME", "TS_HOME"):
         try:
             p = os.environ.get(env)
             if p:
                 candidates.append(p)
-        except Exception:
+        except CATCHABLE:
             pass
     for c in candidates:
         d = os.path.join(c, "exp", "stan", "nmr", "lists", "pp", "user")
@@ -2754,7 +2818,7 @@ def find_pp_user_dir():
             if not os.path.isdir(d):
                 try:
                     os.makedirs(d)
-                except Exception:
+                except CATCHABLE:
                     pass
             if os.path.isdir(d):
                 return d
@@ -2786,7 +2850,7 @@ def install_pulse_program():
         f.close()
         say("pulse program installed: %s" % target)
         return target
-    except Exception:
+    except CATCHABLE:
         MSG("Could not write the pulse program to:\n  %s\n\n"
             "Please copy the file 'zgnoise2d' from the distribution's\n"
             "topspin/pp/ folder into that directory by hand, then close\n"
@@ -2810,7 +2874,7 @@ def parse_console(expno_dir):
         f = open(p, "r")
         lines = f.readlines()
         f.close()
-    except Exception:
+    except CATCHABLE:
         return None
     hit = None
     for ln in lines:
@@ -2867,7 +2931,7 @@ def main():
                     os.path.join(os.getcwd(), "sim_data")]
         try:
             os.makedirs(ds_path(template))
-        except Exception:
+        except CATCHABLE:
             pass
 
     # ---------------------------------------------------------------- 1
@@ -3000,7 +3064,7 @@ def main():
     nuc1 = ""
     try:
         nuc1 = to_text(getpar("NUC1")).strip().strip("<>")
-    except Exception:
+    except CATCHABLE:
         pass
     if not nuc1 or nuc1.lower() in ("off", "none"):
         nuc1 = "1H"
@@ -3021,7 +3085,7 @@ def main():
     locnuc = ""
     try:
         locnuc = to_text(getpar("LOCNUC")).strip().strip("<>")
-    except Exception:
+    except CATCHABLE:
         pass
     bf2_mhz = to_float(getpar("BF2"))
     sfo2_mhz = to_float(getpar("SFO2"))
@@ -3034,7 +3098,7 @@ def main():
             home = java.lang.System.getProperty("XWINNMRHOME")
             if home:
                 ts_guess = os.path.basename(str(home))
-    except Exception:
+    except CATCHABLE:
         pass
     console_guess = parse_console(ds_path(template))
     if console_guess is None:
@@ -3357,7 +3421,7 @@ def main():
             % (n_rows, row_secs, n_rows * row_secs / 60.0, noise_rg))
         try:
             SLEEP(30)
-        except Exception:
+        except CATCHABLE:
             pass
         # zgnoise2d spends TWO d1 delays per row (before go, before wr).
         ocxo_s = ocxo_expected_s(TD_ROW, SWH_HZ, 1, n_rows, D1_NOISE_S, 2)
@@ -3480,16 +3544,16 @@ try:
     main()
 except SystemExit:
     pass
-except Exception:
+except CATCHABLE:
     _tb = ""
     try:
         _tb = traceback.format_exc()
-    except Exception:
+    except CATCHABLE:
         _tb = "(traceback unavailable)"
     _cleaned = 0
     try:
         _cleaned = autostep_emergency_cleanup()
-    except Exception:
+    except CATCHABLE:
         _cleaned = 0
     _extra = ""
     if _cleaned:
@@ -3502,5 +3566,5 @@ except Exception:
                "the SPINNOISE_* dataset.\n" + _extra +
                "\nDetails:\n" + _tb,
                "spin_noise_run: error", None, 1)
-    except Exception:
+    except CATCHABLE:
         print _tb

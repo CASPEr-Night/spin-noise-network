@@ -2,9 +2,10 @@
 
 Operational script for the remote supervised pilot: we screen-share (or
 NoMachine) into the facility's TopSpin workstation while a local colleague
-sits at the console. This is the first time `topspin/spin_noise_run.py`
-(v0.7.0) touches a real spectrometer; Tier −1 and Tier 0 are already green
-(`testing/tier0_desktest.md`).
+sits at the console. `topspin/spin_noise_run.py` (v0.7.2) has not yet run a
+full session on a real spectrometer: its first live contact (Torino, TopSpin
+4.4.0, 2026-09-17, unsupervised desktest) stopped at a dialog on a namespace
+bug fixed in v0.7.2. Tier −1 and Tier 0 are green (`testing/tier0_desktest.md`).
 
 The pilot runs the plain default session only. The optional modes that
 exist as of v0.6 (`rdopt`, `sweep`, `AUTOSTEP`) stay OFF — each has its
