@@ -58,8 +58,10 @@ USAGE
                          randomizing handles NON-linear drift too.
     --tuning-ladder K    after the standard session, K tuning settings x 2
                          no-pulse blocks, role "noise_tune". YOU retune by hand
-                         between settings; the script waits. NOT PACKABLE until
-                         v0.7.1 adds the role to the schema.
+                         between settings; the script waits. Needs v0.7.1 or
+                         later (that is where the role and the tuning block
+                         entered the schema).
+    --grace S            extra wait after a block timeout (default 120 s)
     --retries N          extra attempts per block before giving up (default 2)
     --continue-on-fail   skip a failed noise block instead of ending the run
     --tof-test           two references at tof and tof+shift (checklist item 2)
@@ -76,17 +78,34 @@ LONG RUNS
     experiments that actually landed, so a partial session packs as-is with no
     hand-editing.
 
-ALWAYS --dry-run FIRST on a new console. The wexp quoting below is the one
-construct that has never been exercised on VnmrJ 3.2 (validation checklist
-item 5); if a block does not save, that is where to look.
+ALWAYS --dry-run FIRST on a new console: it prints the exact command stream
+without sending anything, which is the only way to inspect it without a live
+VnmrJ. The wexp/au chaining itself is exercised (66/66 and 70/70 blocks on a
+VnmrJ 3.2 DD2), but if a block does not save on a new console that is still
+the first place to look.
+
+WHAT HAS AND HAS NOT RUN ON HARDWARE
+  Exercised: the default session, and one bracketed ladder (SIU DD2,
+  VnmrJ 3.2, sessions 2-3), plus a 966-block 10 h run with zero failures.
+  NOT yet exercised on a console: the randomized ladder (--ladder-visits > 1),
+  the tuning ladder, --tof-test, and the retry / timeout / disarm paths.
 """
 
 import os
 import sys
+
+if sys.version_info[0] != 2:
+    sys.stderr.write(
+        "This driver targets the Python 2.6 that VnmrJ-era consoles ship.\n"
+        "Run it with that interpreter, e.g. /usr/bin/python2.6 %s\n"
+        % (sys.argv[0] if sys.argv else "spin_noise_driver.py"))
+    raise SystemExit(2)
+
 import json
 import time
 import math
 import random
+import re
 import subprocess
 
 # Session directory. Defaults to <vnmruser>/casper, which is wherever VnmrJ
@@ -147,11 +166,17 @@ KEEP_GOING = "--continue-on-fail" in sys.argv
 # --ladder-visits 1 keeps the original single ascending ladder.
 LADDER_VISITS = _argval("--ladder-visits", 1)
 
-# Tuning ladder (schema role "noise_tune", fixed by the maintainer 2026-09-16).
-# NOTE: noise_tune is NOT in the v0.6.0 schema -- the packer will reject these
-# bundles until v0.7.1 is released. Acquire now, pack later.
+# Tuning ladder: schema role "noise_tune" plus the per-experiment tuning
+# block, both present from v0.7.1. Against an older schema these sessions
+# acquire fine but will not pack.
 TUNING_SETTINGS = _argval("--tuning-ladder", 0)
 TUNE_BLOCKS_PER_SETTING = 2
+
+# console parameters captured at startup, restored by disarm()
+SAVED_STATE = None
+
+# extra wait after a block timeout, before concluding it is dead
+GRACE_S = _argval("--grace", 120)
 
 
 # ----------------------------------------------------------------- prompting
@@ -172,6 +197,19 @@ def ask(prompt, default=None, cast=str):
             print("  -> not a valid %s." % cast.__name__)
 
 
+def ask_num(prompt):
+    """Optional number. Blank / none / unknown -> None, because the schema
+    types these ["number","null"] and a string fails validation."""
+    while True:
+        t = raw_input("%s: " % prompt).strip()
+        if t == "" or t.lower() in ("none", "unknown", "n/a", "na"):
+            return None
+        try:
+            return float(t)
+        except ValueError:
+            print("  -> enter a number, or leave blank for none.")
+
+
 def ask_yn(prompt, default=True):
     if default:
         d = "Y/n"
@@ -190,8 +228,10 @@ def ask_yn(prompt, default=True):
 # ----------------------------------------------------------------- VnmrJ I/O
 def talkfile():
     cands = [os.path.expanduser("~/vnmrsys/.talk"),
-             os.path.expanduser("~/.talk"),
-             os.path.join(os.environ.get("vnmruser", ""), ".talk")]
+             os.path.expanduser("~/.talk")]
+    vu = os.environ.get("vnmruser", "")
+    if vu:                       # else this yields a RELATIVE ".talk"
+        cands.append(os.path.join(vu, ".talk"))
     for c in cands:
         if c and os.path.exists(c):
             return c
@@ -229,6 +269,60 @@ def procpar_get(fid_dir, key):
             if len(parts) > 1:
                 return parts[1].split()[0].strip('"')
     return None
+
+
+def read_live(names, path):
+    """Ask the RUNNING VnmrJ for parameter values and read them back.
+    Never parse curpar: VnmrJ flushes it lazily and it can be minutes stale."""
+    if DRY:
+        print("    [dry-run] would read live: %s" % ", ".join(names))
+        return None
+    fmt = " ".join(["%s=%%g" % n for n in names])
+    vnmr("write('reset','%s') write('file','%s','%s',%s)"
+         % (path, path, fmt, ",".join(names)))
+    for _ in range(10):
+        time.sleep(1)
+        try:
+            f = open(path)
+            txt = f.read().strip()
+            f.close()
+            if txt:
+                out = {}
+                for tok in txt.split():
+                    if "=" in tok:
+                        k, v = tok.split("=", 1)
+                        try:
+                            out[k] = float(v)
+                        except ValueError:
+                            pass
+                return out or None
+        except IOError:
+            pass
+    print("    WARNING: no readback from VnmrJ for %s" % ", ".join(names))
+    return None
+
+
+def disarm(saved=None):
+    """Leave the joined experiment safe to use.
+
+    Every block sets wexp='svf(<session>/<name>)'. If that is left armed, the
+    NEXT au anyone runs in this experiment saves into a finished session
+    folder, onto a name that already exists -- svf collision behaviour is
+    unverified and the packer reads such a folder verbatim. Clearing wexp is
+    one command and removes the hazard entirely.
+    """
+    if talkfile() is None and not DRY:
+        return                       # listenoff already run; nothing to send
+    vnmr("wexp=''")
+    if saved:
+        pairs = []
+        for k in ("pw", "tpwr", "gain", "at"):
+            if k in saved:
+                pairs.append("%s=%.10g" % (k, saved[k]))
+        if pairs:
+            vnmr(" ".join(pairs))
+    print("  experiment disarmed (wexp cleared%s)"
+          % (", parameters restored" if saved else ""))
 
 
 def prune_answers(session, answers):
@@ -281,8 +375,12 @@ def wait_for(path, timeout_s, label):
     stable = 0
     while time.time() - t0 < timeout_s:
         time.sleep(2)
-        if os.path.isdir(target) and os.path.exists(fidfile):
+        if (os.path.isdir(target) and os.path.exists(fidfile)
+                and os.path.exists(os.path.join(target, "procpar"))):
             sz = os.path.getsize(fidfile)
+            if sz <= 32:            # header only, or truncated -- not landed
+                last = sz
+                continue
             if sz == last and sz > 0:
                 stable = stable + 1
                 if stable >= 2:
@@ -448,6 +546,10 @@ def main():
     # ---- session folder: a NEW one every run
     default_name = time.strftime("session_%Y%m%d_%H%M%S")
     name = ask("Session folder name", default_name)
+    if not re.match(r"^[A-Za-z0-9_.-]+$", name):
+        print("ERROR: session name must be [A-Za-z0-9_.-] only -- it is")
+        print("       interpolated into a MAGICAL command string.")
+        sys.exit(1)
     session = os.path.join(CASPER_DIR, name)
     if os.path.exists(session):
         print("ERROR: %s already exists. Pick another name." % session)
@@ -582,7 +684,12 @@ def main():
     # the noise range. Time order is read from procpar, not from expno
     # ordering -- confirmed by the maintainer.
     noise_no = [12] + range(17, 17 + nblocks - 1)
-    spare = max(noise_no) + 1          # first free expno after the noise block
+    # Must clear BOTH the noise block and the fixed expnos 10-16. With a
+    # short smoke-test session (nblocks<=1) max(noise_no) is 12, and spare
+    # would land on 13 -- the closing reference -- so an extra rung or the
+    # first tune block would be saved beside 13_sn_ref_close.fid and the
+    # packer would reject the whole session.
+    spare = max([13, 16] + noise_no) + 1
 
     # Build the ladder schedule: LADDER_VISITS visits of each gain level.
     # One visit -> the classic ascending ladder. More than one -> randomized,
@@ -750,6 +857,25 @@ def main():
             ok = wait_for(path, int(seconds * 1.5) + 120, tag)
             if ok:
                 break
+
+            # A timeout does NOT mean the block is dead -- it may just be late
+            # (console busy, queued, paused). The experiment still has
+            # wexp='svf(<this path>)' armed, so a late completion would save
+            # correctly. But if we submit ANOTHER au now, that same late
+            # acquisition can complete against the NEW wexp and be saved under
+            # the next block's name; wait_for would accept it and the real next
+            # block would collide or be lost.
+            #
+            # So: grace period first, and if it is still absent, clear wexp so
+            # nothing can be saved under a stale or future name.
+            print("    grace period: %ds more before giving up on %s"
+                  % (GRACE_S, tag))
+            if wait_for(path, GRACE_S, tag):
+                ok = True
+                break
+            print("    still nothing; clearing wexp so a late acquisition")
+            print("    cannot save under the wrong name")
+            vnmr("wexp=''")
         log.append((expno, label, ok, time.strftime("%Y-%m-%dT%H:%M:%S")))
         return ok
 
@@ -851,10 +977,8 @@ def main():
         print("\nClosing reference (identical to the opening one)")
         # Deliberately identical to expno 11. An earlier revision of the
         # operator quickstart specified pw=0.11 / tpwr=57 here, contradicting
-        # "identical to step 2" in this directory's README and producing
-        # mismatched references (1.0 deg vs 2.25 deg) in the first validation
-        # session. The two references must bracket the noise block under
-        # identical conditions or they cannot measure drift.
+        # "identical to step 2" and producing mismatched references
+        # (1.0 deg vs 2.25 deg) in the first validation session.
         ok = block("sn_ref_close", 13,
                    "pw=%g tpwr=%g nt=1 ss=0 pad=0 gain=%g at=%g"
                    % (ref_pw, ref_tpwr, max(gains), at_ref), at_ref)
@@ -909,8 +1033,10 @@ def main():
             print("  SETTING %d of %d" % (k + 1, TUNING_SETTINGS))
             print("-" * 66)
             label = ask("  Label for this setting (e.g. 'normal', '-2 turns')")
-            tune_r = ask("  Tune reading", "unknown")
-            match_r = ask("  Match reading", "unknown")
+            # schema types these ["number","null"] with additionalProperties
+            # false -- a string here makes the whole session unpackable
+            tune_r = ask_num("  Tune reading (number, or blank for none)")
+            match_r = ask_num("  Match reading (number, or blank for none)")
             units = ask("  Units of those readings", "arb")
             note = ask("  Note (optional)", "none")
             raw_input("\n  Set the probe to this tuning, then press Enter... ")
@@ -1019,17 +1145,51 @@ def tof_test():
         vnmr("%s wexp='svf(\\'%s\\')' au" % (base, path))
         return wait_for(path, int(at_ref * 1.5) + 120, label)
 
-    print("\n1/2  at the current tof")
-    ok = shot("tof_base")
+    # Capture the LIVE tof before touching anything, so the restore can be
+    # absolute. A relative "tof=tof-shift" is wrong whenever the +shift never
+    # landed: it would leave the console `shift` Hz BELOW where the operator
+    # set it, while printing "restoring tof".
+    live = read_live(["tof"], os.path.join(session, "tof0.txt"))
+    tof0 = live.get("tof") if live else None
+    if tof0 is None:
+        if not DRY:
+            print("\nERROR: could not read the live tof. Refusing to shift it,")
+            print("       because the restore could not then be verified.")
+            sys.exit(1)
+        tof0 = 0.0          # dry-run stand-in so the arithmetic is printable
+        print("\n  live tof before the test: (dry-run, using 0.0 as a stand-in)")
+    else:
+        print("\n  live tof before the test: %.4f Hz" % tof0)
 
-    if ok:
-        print("\n2/2  at tof + %g Hz" % shift)
-        vnmr("tof=tof+%g" % shift)
-        ok = shot("tof_plus")
+    shifted = False
+    try:
+        print("\n1/2  at the current tof")
+        ok = shot("tof_base")
 
-    # put it back whatever happened, so the console is left as we found it
-    print("\nrestoring tof")
-    vnmr("tof=tof-%g" % shift)
+        if ok:
+            print("\n2/2  at tof + %g Hz" % shift)
+            if vnmr("tof=%.10g" % (tof0 + shift)):
+                shifted = True
+                ok = shot("tof_plus")
+            else:
+                print("    tof shift was not accepted; not acquiring")
+                ok = False
+    finally:
+        # restore ONLY if we actually moved it, and to an ABSOLUTE value
+        if shifted:
+            print("\nrestoring tof to %.4f" % tof0)
+            vnmr("tof=%.10g" % tof0)
+            back = read_live(["tof"], os.path.join(session, "tof1.txt"))
+            if back is not None:
+                got = back.get("tof")
+                if got is not None and abs(got - tof0) < 0.01:
+                    print("  VERIFIED: tof is back at %.4f" % got)
+                else:
+                    print("  *** WARNING: tof reads %s, expected %.4f ***"
+                          % (got, tof0))
+                    print("  *** Set it by hand in VnmrJ before acquiring. ***")
+        else:
+            print("\ntof was never shifted; nothing to restore")
 
     if not DRY and ok:
         t1 = procpar_get(os.path.join(session, "tof_base.fid"), "tof")
@@ -1040,6 +1200,9 @@ def tof_test():
         f.write("requested shift : +%g Hz\n" % shift)
         f.write("tof base        : %s\n" % t1)
         f.write("tof shifted     : %s\n" % t2)
+        f.write("live tof before : %s\n" % tof0)
+        f.write("live tof after  : %s\n"
+                % (back.get("tof") if ("back" in dir() and back) else "unread"))
         f.write("pw=%g tpwr=%g gain=%d at=%g\n" % (ref_pw, ref_tpwr, gain, at_ref))
         f.write("\nAnalyse: FFT both, compare the water line position. If the\n")
         f.write("line moves in the SAME direction as tof, the frequency axis\n")
@@ -1053,10 +1216,14 @@ def tof_test():
 
 if __name__ == "__main__":
     try:
-        if "--tof-test" in sys.argv:
-            tof_test()
-        else:
-            main()
+        try:
+            if "--tof-test" in sys.argv:
+                tof_test()
+            else:
+                main()
+        finally:
+            # runs on success, on error and on Ctrl-C
+            disarm(SAVED_STATE)
     except KeyboardInterrupt:
         print("\n\nInterrupted. VnmrJ may still be running a block -- check the console.")
         sys.exit(1)
