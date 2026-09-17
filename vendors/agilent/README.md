@@ -136,6 +136,7 @@ measurement this port enables.
 | `agilent_reader.py` | Stdlib-only reader: binary `fid` + `procpar` per the nmrglue-documented layout (structural checks, no magic-value assertions). CLI: `python3 agilent_reader.py inspect <dir.fid>`. |
 | `spin_noise_run.mac` | Tier-2 DRAFT MAGICAL acquisition macro (wexp-chained state machine; see its header). Never run on hardware; every unsettled construct is UNVERIFIED(n)-marked against the checklist below. |
 | `make_synthetic_agilent_data.py` | Deterministic synthetic session generator (`.fid` directories + packer questionnaire), so the whole chain is testable today without a spectrometer. |
+| `spin_noise_driver.py` | **Tier 2, VALIDATED ON HARDWARE.** External session driver: prompts the operator, writes `answers.json` itself, then drives VnmrJ block-by-block through `listenon`/`send2Vnmr`, waiting for each `.fid` to land. Python 2.6 stdlib only, because that is what VnmrJ-era consoles have. Unlike `spin_noise_run.mac` it runs *outside* VnmrJ, so it needs no `wexp` self-chaining and no created parameters surviving between blocks. `--dry-run` prints every command and sends nothing. |
 | `test_agilent_chain.sh` | synthetic session → `packer/pack_bundle.py --vendor agilent` → `uploader --selftest` → meta.json + inspector assertions. Working; run it. |
 
 The packer adapter lives in `packer/pack_bundle.py` (`AgilentReader`),
