@@ -49,7 +49,12 @@
 #         ("1 TD" = F1 TD).  Status params: GETPAR("2s SI") or
 #         GETPARSTAT(name, axis).
 #       - PUTPAR(name, value)  -- same name encoding ("1 TD", "status SI",
-#         array params as "P 1", "D 1", "PLdB 1").
+#         array params as "P 1", "D 1", "PLdB 1").  Enumerated parameters
+#         are written by NAME ("2D"), never by ordinal; a rejected PUTPAR
+#         also pops TopSpin's own error dialog.  See the "Dataset
+#         dimensionality" section.
+#       - GETACQUDIM() -> acquisition dimensionality (int); GETPAR("PARMODE")
+#         returns the ORDINAL ("1" = 2D) on 3.x/4.x.
 #       - XCMD(cmd, wait=WAIT_TILL_DONE, arg=None) -> CmdThread; by
 #         default XCMD WAITS UNTIL THE COMMAND IS FINISHED; for
 #         processing commands ct.getResult() is -1 on failure.
@@ -116,7 +121,7 @@ AUTOSTEP = False          # True (with SWEEP): TIER-2 programmatic field
 
 # Single source of truth for the script version.  KEEP IN SYNC with the
 # repository VERSION file (testing/static_check.py enforces the match).
-SCRIPT_VERSION  = "0.7.2"
+SCRIPT_VERSION  = "0.7.3"
 PROGRAM_VERSION = SCRIPT_VERSION  # alias kept for meta.json 'program_version'
 # This TopSpin orchestrator still writes schema 1.2 bundles (the last
 # Bruker-only schema).  The repository schema is 2.0 (vendor-neutral:
@@ -948,11 +953,20 @@ def getpar(name, default=""):
 
 
 def putpar(name, value):
-    """PUTPAR with logging; returns 1 on success."""
+    """PUTPAR with logging; returns 1 on success.  Every failure is counted
+    in PARAM_API (stamped into meta.json): on TopSpin 4.x a failed PUTPAR
+    also pops the console's own error dialog, so the count is the number
+    of stray dialogs the operator saw."""
     try:
         PUTPAR(name, str(value))
         return 1
     except CATCHABLE:
+        PARAM_API["putpar_failures"] = PARAM_API["putpar_failures"] + 1
+        try:
+            PARAM_API["last_putpar_error"] = "%s=%s: %s" % (
+                name, value, to_text(sys.exc_info()[1])[:200])
+        except CATCHABLE:
+            PARAM_API["last_putpar_error"] = "%s=%s" % (name, value)
         print "spin_noise_run: PUTPAR %s=%s failed" % (name, value)
         return 0
 
@@ -1051,29 +1065,376 @@ def open_expno(template_curd, name, expno):
     return cd
 
 
-def make_2d(rows):
-    """Turn the current (1D template) dataset into a pseudo-2D.
+# ----------------------------------------------------------------------------
+# Dataset dimensionality and F1 parameters -- the console's dialect.
+#
+# TopSpin validates enumerated parameters written from Python by NAME.
+# The old script wrote the ordinal, PUTPAR("PARMODE", "1"), and TopSpin
+# 4.4.0 rejected it (Torino, 2026-09-18):
+#     Could not convert '1' into enum: GetEnuOrd[PARMODE]: enumeration
+#     name 1 not found
+# No TopSpin version is documented to accept the ordinal; the documented
+# values are 1D..8D, and public 3.x/4.x scripts write PUTPAR("PARMODE",
+# "1D").  GETPAR("PARMODE"), on the other hand, returns the ORDINAL ("1"
+# = 2D) on 3.x/4.x, so readbacks accept both spellings; GETACQUDIM() is
+# the version-independent readback and is tried first.
+#
+# The same console also rejected PUTPAR("1 FnMODE", "QF") ("1 FnMODE:
+# parameter not found in map") while PUTPAR("1 TD", ...) went through.
+# The leading explanation is a stale in-memory F1 parameter map after the
+# operator's out-of-script 'parmode'; public scripts that switch PARMODE
+# reload the dataset (RE) before writing F1, and so does this one.  The
+# F1 acquisition mode itself is no longer written at all: Bruker's
+# acquisition reference requires it to stay 'undefined' for a pulse
+# program without an mc statement, which is exactly what zgnoise2d is,
+# and nothing downstream reads it.
+#
+# Every rejected PUTPAR also pops TopSpin's OWN error dialog, which the
+# except clause cannot suppress and which may block an unattended run.
+# Therefore: the first dimensionality switch happens while the operator
+# is still at the console (main, just before the 90-degree dialog); a
+# form that the console rejected is never tried again in the session; a
+# dataset that already has the wanted dimensionality (WR() copies it from
+# the current dataset) is recognised and not re-written; and what the
+# console accepted or rejected is stamped into meta['software']
+# ['param_api'], so each real console teaches the next release.
+# ----------------------------------------------------------------------------
 
-    PARMODE: 0 = 1D, 1 = 2D.  Setting it from a script is normally silent
-    (the interactive 'files will be deleted' prompt belongs to the GUI
-    flow), but we VERIFY the result and fall back to an operator dialog.
-    F1 is set to QF (no frequency encoding -- it is just a row counter).
-    """
-    putpar("PARMODE", "1")
-    pm = getpar("PARMODE")
-    if pm.strip() not in ("1", "2D"):
-        ans = CONFIRM("spin_noise_run: make dataset 2D",
-                      "The script could not switch this dataset to 2D "
-                      "automatically.\n\nPlease type 'parmode' in TopSpin, "
-                      "select 2D, confirm any\n'delete files' question, "
-                      "then press OK here.")
+PARAM_API = {
+    "parmode_form": "",            # "name" | "operator" | "" (never written)
+    "parmode_readback": "",        # last raw GETPAR("PARMODE")
+    "acqudim_readback": None,      # last acquisition-dimension readback
+    "parmode_already": 0,          # datasets already of the wanted dimension
+    "parmode_unverified": 0,       # writes accepted with no usable readback
+    "dim_readback_unreliable": 0,  # set when readback contradicted the
+                                   # operator twice: trust writes thereafter
+    "reload_ok": 0,                # RE() reloads after a dimension switch
+    "reload_failed": 0,
+    "f1_td_form": "",              # "1 TD" | "operator"
+    "f1_td_already": 0,            # datasets whose F1 TD already read rows
+    "f1_td_verified": 0,           # 1 when a readback confirmed the rows
+    "f1_readback_unreliable": 0,   # set when readback contradicted the
+                                   # operator twice: trust writes thereafter
+    "f1_td_readback_source": "",   # "getpar" | "getpar-axis" | "acqu2" | ""
+    "f1_td_readback_mismatch": "", # last readback that disagreed, if any
+    "failed_forms": [],            # "KIND:form" per rejected probe (once)
+    "putpar_failures": 0,          # every PUTPAR that raised, any parameter
+    "last_putpar_error": "",
+}
+
+PARMODE_NAME = {1: "1D", 2: "2D"}          # documented enum names
+PARMODE_ORDINAL = {"0": 1, "1D": 1, "1": 2, "2D": 2}   # readback spellings
+
+
+def _form_failed(kind, label):
+    tag = "%s:%s" % (kind, label)
+    if tag not in PARAM_API["failed_forms"]:
+        PARAM_API["failed_forms"].append(tag)
+
+
+def _form_has_failed(kind, label):
+    return ("%s:%s" % (kind, label)) in PARAM_API["failed_forms"]
+
+
+def param_api_needs_operator():
+    """True when this console needed manual steps for dataset setup."""
+    return PARAM_API["parmode_form"] == "operator" or \
+        PARAM_API["f1_td_form"] == "operator"
+
+
+def f1_td_form_rejected():
+    """True when this console rejected (or mis-routed) the scripted F1 TD
+    write: every later pseudo-2D with a new row count needs the operator."""
+    return _form_has_failed("F1 TD", "1 TD")
+
+
+def ensure_template_dim(template_curd, name, ndim):
+    """WR() copies the CURRENT dataset, dimensionality included.  Before
+    creating a dataset that must be ndim-dimensional, make one of that
+    dimensionality current (expno 1 for 1D, the opening reference for 2D)
+    so the copy needs no PARMODE write -- on a console that rejects the
+    scripted write that would mean an unattended operator dialog."""
+    if acqu_dim_readback() == ndim:
+        return
+    if ndim == 1:
+        reopen_expno(template_curd, name, EXP_SETUP)
+    else:
+        reopen_expno(template_curd, name, EXP_REF_OPEN)
+
+
+def reload_current_dataset():
+    """RE() the current dataset so the console's in-memory parameter model
+    reflects a dimensionality change before F1 parameters are touched."""
+    try:
+        cd = CURDATA()
+        if cd is not None:
+            RE(cd, "y")
+            PARAM_API["reload_ok"] = PARAM_API["reload_ok"] + 1
+            return 1
+    except CATCHABLE:
+        pass
+    PARAM_API["reload_failed"] = PARAM_API["reload_failed"] + 1
+    return 0
+
+
+def acqu_dim_readback():
+    """Acquisition dimensionality as the console reports it: GETPAR("PARMODE")
+    first (the console-confirmed readback; ordinal "1" = 2D, name "2D"
+    accepted too), then GETACQUDIM() (documented; absent on old TopSpin).
+    Returns 1, 2 (or higher), or None when the console offers no usable
+    readback -- or when its readback has already contradicted the operator
+    twice this session (then writes are trusted, and no dialog repeats)."""
+    if PARAM_API["dim_readback_unreliable"]:
+        return None
+    pm = getpar("PARMODE").strip()
+    PARAM_API["parmode_readback"] = pm
+    d = None
+    try:
+        d = to_int(GETACQUDIM(), None)
+    except CATCHABLE:
+        d = None
+    PARAM_API["acqudim_readback"] = d
+    if pm in PARMODE_ORDINAL:
+        return PARMODE_ORDINAL[pm]
+    if d is not None and d > 0:
+        return d
+    return None
+
+
+def set_parmode(ndim):
+    """PARMODE := ndim (1 or 2) by the documented enum name, verified by
+    readback.  Returns "already" (dataset was ndim before any write),
+    "name" (write accepted and confirmed), "unverified" (write accepted,
+    no readback on this console), or "" when the write was rejected -- or
+    is already known to be rejected here -- and the caller must ask the
+    operator.  A recognised readback that still disagrees after an
+    accepted write also returns "" (the write did not take), without
+    marking the form failed: no console dialog was involved."""
+    if acqu_dim_readback() == ndim:
+        PARAM_API["parmode_already"] = PARAM_API["parmode_already"] + 1
+        return "already"
+    if _form_has_failed("PARMODE", "name"):
+        return ""
+    if not putpar("PARMODE", PARMODE_NAME[ndim]):
+        _form_failed("PARMODE", "name")
+        return ""
+    reload_current_dataset()
+    d = acqu_dim_readback()
+    if d == ndim:
+        if PARAM_API["parmode_form"] != "operator":   # keep the strongest
+            PARAM_API["parmode_form"] = "name"        # intervention on record
+        return "name"
+    if d is None:
+        say("PARMODE=%s accepted; this console offers no usable readback, "
+            "trusting it" % PARMODE_NAME[ndim])
+        if PARAM_API["parmode_form"] != "operator":
+            PARAM_API["parmode_form"] = "name"
+        PARAM_API["parmode_unverified"] = PARAM_API["parmode_unverified"] + 1
+        return "unverified"
+    say("PARMODE=%s accepted but the dataset reads as %sD -- asking the "
+        "operator" % (PARMODE_NAME[ndim], d))
+    return ""
+
+
+def parmode_operator_dialog(ndim):
+    """Fallback when the scripted PARMODE write does not work on this
+    console.  Bounded: after two confirmations the operator's word is
+    taken (the report cross-checks the data anyway)."""
+    label = PARMODE_NAME[ndim]
+    hint = ("(If TopSpin asks whether existing data files may be deleted, "
+            "confirm:\nthis is a fresh copy holding nothing of value.)")
+    attempts = 0
+    while 1:
+        attempts = attempts + 1
+        ans = CONFIRM("spin_noise_run: make dataset %s" % label,
+                      "The script could not switch this dataset to %s "
+                      "automatically.\n(If TopSpin just showed its own "
+                      "error about PARMODE, that was\nthe automatic "
+                      "attempt -- expected on this console.)\n\n"
+                      "Please type 'parmode' in TopSpin, select %s, "
+                      "then press OK here.\n%s" % (label, label, hint))
         if ans != 1:
-            abort("Dataset could not be made 2D.")
-    # F1 ("indirect") dimension: TD1 rows, QF mode.
-    putpar("1 TD", str(rows))
-    if not putpar("1 FnMODE", "QF"):
-        putpar("FnMODE", "QF")   # older syntax fallback; harmless if no-op
+            abort("Dataset could not be made %s." % label)
+        PARAM_API["parmode_form"] = "operator"
+        reload_current_dataset()
+        d = acqu_dim_readback()
+        if d == ndim or d is None:
+            return
+        if attempts >= 2:
+            say("WARNING: dataset still reads as %sD after the manual "
+                "step; continuing on the operator's confirmation and "
+                "trusting PARMODE writes for the rest of the session" % d)
+            PARAM_API["dim_readback_unreliable"] = 1
+            return
+        say("dataset reads as %sD, expected %s -- asking again" % (d, label))
 
+
+def jcamp_value(path, key):
+    """Value of '##$KEY= value' in a Bruker JCAMP-DX parameter file, or
+    None.  Tiny on purpose: used only to read back what PUTPAR wrote."""
+    try:
+        if not path or not os.path.isfile(path):
+            return None
+        f = open(path, "r")
+        try:
+            lines = f.readlines()
+        finally:
+            f.close()
+    except CATCHABLE:
+        return None
+    tag = "##$%s=" % key
+    for line in lines:
+        if line.startswith(tag):
+            return line[len(tag):].strip()
+    return None
+
+
+def f1_td_readback(td_direct):
+    """F1 TD as the console reports it: GETPAR("1 TD"), GETPAR("TD", 1),
+    then the acqu2 file of the current expno.  A value identical to the
+    direct-dimension TD is distrusted: a console that ignores the axis
+    prefix echoes F2's TD, and trusting that would either falsely verify
+    or trap the operator.  Returns (int, source) or (None, "") -- also
+    (None, "") once this console's readback has contradicted the operator
+    twice this session."""
+    if PARAM_API["f1_readback_unreliable"]:
+        return None, ""
+    for name, axis in (("1 TD", None), ("TD", 1)):
+        raw = None
+        try:
+            if axis is None:
+                raw = GETPAR(name)
+            else:
+                raw = GETPAR(name, axis)
+        except CATCHABLE:
+            raw = None
+        v = to_int(raw, None)
+        if v is not None and str(v) != str(td_direct):
+            if axis is None:
+                return v, "getpar"
+            return v, "getpar-axis"
+    v = None
+    try:
+        d = ds_path(CURDATA())
+        if d:
+            v = to_int(jcamp_value(os.path.join(d, "acqu2"), "TD"), None)
+    except CATCHABLE:
+        v = None
+    if v is not None:
+        return v, "acqu2"
+    return None, ""
+
+
+def set_f1_td(rows):
+    """F1 TD := rows via the documented axis-prefix form "1 TD", VERIFIED
+    by readback where the console allows it.  The row count is the one
+    parameter whose silent failure would waste a session (the wrong
+    number of rows is acquired and the report refuses the bundle:
+    'meta.json td1_rows != rows read'), so a rejected write, a write
+    routed to the wrong dimension, or a recognised mismatch goes to the
+    operator -- at most twice; a console with no usable readback is
+    trusted, and the bundle says so."""
+    td_direct = to_int(getpar("TD"), None)
+    rb, src = f1_td_readback(td_direct)
+    if rb == rows:
+        # Already right (WR() copied it from a neighbour with the same
+        # rows, or this expno was set up at the dialect probe).
+        PARAM_API["f1_td_already"] = PARAM_API["f1_td_already"] + 1
+        PARAM_API["f1_td_readback_source"] = src
+        PARAM_API["f1_td_verified"] = 1
+        if not PARAM_API["f1_td_form"]:
+            PARAM_API["f1_td_form"] = "1 TD"
+        return 1
+    if not _form_has_failed("F1 TD", "1 TD"):
+        if not putpar("1 TD", str(rows)):
+            _form_failed("F1 TD", "1 TD")
+        else:
+            td_after = to_int(getpar("TD"), None)
+            if td_after == rows and td_direct is not None \
+                    and td_after != td_direct:
+                # The console ignored the axis prefix and overwrote the
+                # direct TD.  Restore it; the operator sets F1 TD.
+                say("'1 TD' was routed to the direct dimension on this "
+                    "console -- restoring TD=%d" % td_direct)
+                putpar("TD", str(td_direct))
+                _form_failed("F1 TD", "1 TD")
+            else:
+                rb, src = f1_td_readback(td_direct)
+                PARAM_API["f1_td_readback_source"] = src
+                if rb == rows:
+                    if PARAM_API["f1_td_form"] != "operator":  # keep the
+                        PARAM_API["f1_td_form"] = "1 TD"       # strongest
+                    PARAM_API["f1_td_verified"] = 1            # on record
+                    return 1
+                if rb is None:
+                    say("F1 TD=%d accepted; this console offers no usable "
+                        "readback, trusting it (the report cross-checks "
+                        "the row count)" % rows)
+                    if PARAM_API["f1_td_form"] != "operator":
+                        PARAM_API["f1_td_form"] = "1 TD"
+                    PARAM_API["f1_td_verified"] = 0
+                    return 1
+                PARAM_API["f1_td_readback_mismatch"] = str(rb)
+                say("F1 TD reads %s, expected %d -- asking the operator"
+                    % (rb, rows))
+    attempts = 0
+    while 1:
+        attempts = attempts + 1
+        ans = CONFIRM("spin_noise_run: set F1 TD (number of rows)",
+                      "The script could not set the number of rows (F1 TD)\n"
+                      "of this experiment to %d.\n\nIn TopSpin, type  1 td  "
+                      "and enter %d\n(or set TD in the F1 column of AcquPars "
+                      "to %d),\nthen press OK here.  Cancel aborts the run."
+                      % (rows, rows, rows))
+        if ans != 1:
+            abort("F1 TD could not be set to %d." % rows)
+        PARAM_API["f1_td_form"] = "operator"
+        reload_current_dataset()
+        rb, src = f1_td_readback(td_direct)
+        PARAM_API["f1_td_readback_source"] = src
+        if rb == rows or rb is None:
+            PARAM_API["f1_td_verified"] = int(rb == rows)
+            return 1
+        PARAM_API["f1_td_readback_mismatch"] = str(rb)
+        if attempts >= 2:
+            say("WARNING: F1 TD still reads %s (expected %d); continuing "
+                "on the operator's confirmation, trusting F1 TD writes for "
+                "the rest of the session -- the report cross-checks the row "
+                "count" % (rb, rows))
+            PARAM_API["f1_td_verified"] = 0
+            PARAM_API["f1_readback_unreliable"] = 1
+            return 1
+        say("F1 TD still reads %s (expected %d) -- asking again" % (rb, rows))
+
+
+def make_2d(rows):
+    """Make the current dataset a pseudo-2D with F1 TD = rows, verified.
+    PARMODE is written by its documented name only when the dataset is not
+    already 2D (WR() copies the dimensionality of the current dataset);
+    the operator's 'parmode' is the last resort.  The F1 acquisition mode
+    is deliberately left alone -- see the section comment above."""
+    if not set_parmode(2):
+        parmode_operator_dialog(2)
+    set_f1_td(rows)
+
+
+def reopen_expno(template_curd, name, expno):
+    """Make an EXISTING dataset <name>/<expno> current again (RE only, no
+    WR: the parameters set on it earlier must survive)."""
+    target = list(template_curd)
+    target[0] = name
+    target[1] = str(expno)
+    target[2] = "1"
+    try:
+        RE(target, "y")
+    except CATCHABLE:
+        abort("Could not re-open dataset %s/%s -- cannot continue."
+              % (name, expno))
+    cd = CURDATA()
+    if cd is None or str(cd[0]) != str(name) or str(cd[1]) != str(expno):
+        abort("Dataset switch verification failed for %s/%s."
+              % (name, expno))
+    return cd
 
 # ============================================================================
 # Parameter helpers for the individual experiments
@@ -1418,17 +1779,10 @@ def make_1d():
     """Ensure the current dataset is 1D (PARMODE 0). WR() copies the
     CURRENT dataset's parameter set, so an expno created after a
     pseudo-2D inherits PARMODE=1 -- a 'quick 1D' would then acquire
-    td1 rows. Mirror of make_2d(), same verify + dialog fallback."""
-    putpar("PARMODE", "0")
-    pm = getpar("PARMODE")
-    if pm.strip() not in ("0", "1D"):
-        ans = CONFIRM("spin_noise_run: make dataset 1D",
-                      "The script could not switch this dataset back to "
-                      "1D\nautomatically.\n\nPlease type 'parmode' in "
-                      "TopSpin, select 1D, confirm any\n'delete files' "
-                      "question, then press OK here.")
-        if ans != 1:
-            abort("Dataset could not be made 1D.")
+    td1 rows. Mirror of make_2d(): same dialects, same verify + dialog
+    fallback (see set_parmode / parmode_operator_dialog)."""
+    if not set_parmode(1):
+        parmode_operator_dialog(1)
 
 
 def clear_raw_data(expno_dir):
@@ -1465,8 +1819,9 @@ def acquire_quick_1d(meta, template, dsname, expno, role, o1_hz,
                      p90_us, p90_db, db_par):
     """One small-flip 1D on a fresh expno (scan/verification probe):
     TD_LADDER points, fixed RG, clock-audited. Returns the expno dir."""
+    ensure_template_dim(template, dsname, 1)   # WR() copies a 1D dataset
     cd = open_expno(template, dsname, expno)
-    make_1d()                    # WR copies PARMODE from a 2D neighbor
+    make_1d()                    # verifies; writes only if still not 1D
     putpar("PULPROG", "zg")
     set_common_acq(o1_hz, TD_LADDER, SWH_HZ, 1, D1_REF_S)
     set_small_flip(p90_us, p90_db, db_par)
@@ -2676,6 +3031,7 @@ def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
         expno_n = EXP_SWEEP_NOISE_BASE + k
         say("sweep step %d/%d: noise block (%d rows x %.0f s)"
             % (k + 1, nsteps, n_rows, row_secs))
+        ensure_template_dim(template, dsname, 2)   # WR() copies 2D
         cd = open_expno(template, dsname, expno_n)
         putpar("PULPROG", PP_NAME)
         make_2d(n_rows)
@@ -3161,6 +3517,7 @@ def main():
             "schema_version": SCHEMA_VERSION,
             "script_sha256": script_self_sha256(),
             "run_mode": hw_mode_name().lower(),
+            "param_api": PARAM_API,   # dialects this console accepted
         },
         "created_utc": now_utc(),
         "local_timezone_offset_min": tz_offset_min(),
@@ -3237,6 +3594,36 @@ def main():
     setup_dir = ds_path(cd)
     putpar("PULPROG", "zg")
     set_common_acq(o1_hz, TD_LADDER, SWH_HZ, 1, D1_REF_S)
+
+    # Dataset-dialect probe, while the operator is certainly at the
+    # console (the hardware-check dialogs were just answered; tune/shim
+    # may need them next): the opening reference (expno 11) is created
+    # NOW and switched to 2D, so a console that needs the operator for
+    # that ('parmode' by hand after TopSpin's own error dialog) needs them
+    # here -- not ~15 min into the unattended stretch.  Later datasets
+    # inherit the dimensionality via WR() and are only verified; section 9
+    # re-opens this expno without WR().  The template's raw data is
+    # removed first, so the switch never concerns a file.
+    say("dialect probe: creating expno %d as a pseudo-2D" % EXP_REF_OPEN)
+    cd_probe = open_expno(template, dsname, EXP_REF_OPEN)
+    clear_raw_data(ds_path(cd_probe))
+    putpar("PULPROG", "zg2d")
+    make_2d(REF_ROWS)
+    if param_api_needs_operator():
+        if f1_td_form_rejected():
+            again = ("The row count (F1 TD) will be asked for AGAIN, by "
+                     "hand,\nfor the noise block and for the closing "
+                     "reference (the script\ntells you the number each "
+                     "time) -- please stay, or come back\nwhen the status "
+                     "line asks.")
+        else:
+            again = ("Later datasets inherit the 2D setting from this one; "
+                     "no\nfurther step is expected.")
+        MSG("This console needed your help to set up the first pseudo-2D\n"
+            "dataset.\n\n" + again,
+            "spin_noise_run: dataset setup on this console")
+    cd = reopen_expno(template, dsname, EXP_SETUP)
+
     t0 = now_local()
     # Clock-audit block for setup: wall times only.  The setup expno's
     # duration (tune, shim, pulsecal, operator dialogs) is not
@@ -3363,10 +3750,11 @@ def main():
     moderate_rg = max_rg / 4.0
     if moderate_rg < 1.0:
         moderate_rg = 1.0
-    cd = open_expno(template, dsname, EXP_REF_OPEN)
+    cd = reopen_expno(template, dsname, EXP_REF_OPEN)   # created + made 2D
+    # at the dialect probe (section 7); WR() here would copy the 1D rung.
     putpar("PULPROG", "zg2d")     # any standard small-flip 2D works; the
     # rows are stored serially exactly like the noise block.
-    make_2d(REF_ROWS)
+    make_2d(REF_ROWS)             # already 2D: verifies F1 TD only
     set_common_acq(o1_hz, TD_ROW, SWH_HZ, 1, D1_REF_S)
     set_small_flip(p90_us, p90_db, db_par)
     putpar("RG", str(moderate_rg))
@@ -3400,6 +3788,7 @@ def main():
             n_rows = 4
         say("expno %d: NOISE block, %d rows x %.0f s (~%.0f min)"
             % (EXP_NOISE, n_rows, row_secs, n_rows * row_secs / 60.0))
+        ensure_template_dim(template, dsname, 2)   # WR() copies 2D
         cd = open_expno(template, dsname, EXP_NOISE)
         putpar("PULPROG", PP_NAME)
         make_2d(n_rows)
@@ -3416,9 +3805,19 @@ def main():
         # sessions when the operator walked away after the last question
         # (the ladder + references run ~15 min in between).  Auto-start
         # after a short countdown instead.
+        tail = "no further dialogs until the run completes"
+        if f1_td_form_rejected():
+            tail = ("NOTE: this console needs '1 td' typed by hand; the "
+                    "closing reference AFTER this block will ask for it "
+                    "again (rows = %d). The noise data is safe on disk "
+                    "meanwhile" % REF_ROWS)
+        elif param_api_needs_operator():
+            tail = ("NOTE: your help was needed once at the start; later "
+                    "datasets are handled automatically -- no further step "
+                    "expected")
         say("NOISE BLOCK starting in 30 s: %d rows x %.0f s (~%.0f min), "
-            "RG=%s -- no further dialogs until the run completes"
-            % (n_rows, row_secs, n_rows * row_secs / 60.0, noise_rg))
+            "RG=%s -- %s"
+            % (n_rows, row_secs, n_rows * row_secs / 60.0, noise_rg, tail))
         try:
             SLEEP(30)
         except CATCHABLE:
@@ -3435,7 +3834,8 @@ def main():
     # ---------------------------------------------------------------- 11
     # Reference (close): identical to reference_open.
     say("expno %d: reference_close" % EXP_REF_CLOSE)
-    cd = open_expno(template, dsname, EXP_REF_CLOSE)
+    ensure_template_dim(template, dsname, 2)   # after a sweep the current
+    cd = open_expno(template, dsname, EXP_REF_CLOSE)   # dataset is a 1D
     putpar("PULPROG", "zg2d")
     make_2d(REF_ROWS)
     set_common_acq(o1_hz, TD_ROW, SWH_HZ, 1, D1_REF_S)

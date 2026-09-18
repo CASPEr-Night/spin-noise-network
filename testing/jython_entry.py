@@ -57,6 +57,10 @@ if TESTING_DIR not in sys.path:
 
 import topspin_stub
 
+# Console flavors the stub models (see topspin_stub.py, FLAVOR).
+FLAVORS = ("legacy", "ts44", "ts44-stale", "ts44-strict", "ts44-f1echo",
+           "ts44-dimlie", "ts44-f1route", "ts44-f1mismatch")
+
 
 def build_world(workdir):
     """Create the template dataset and a fake TSHOME pp tree."""
@@ -200,6 +204,20 @@ CONFIRM_ANSWERS = {
     # Failure-path fallbacks that must NOT fire in a clean run.
     "spin_noise_run: make dataset 1D": 1,
 }
+# The strict flavor rejects every scripted PARMODE write, so the operator
+# fallback is EXPECTED there -- exactly once, at the attended probe (the
+# stub performs the operator's parmode as a side effect of answering).
+CONFIRM_ANSWERS_STRICT = {
+    "spin_noise_run: make dataset 1D": 1,
+    "spin_noise_run: make dataset 2D": 1,
+}
+# The F1-TD fault flavors expect the rows dialog (the fixture performs the
+# operator's '1 td' in ts44-f1route; in ts44-f1mismatch nothing can satisfy
+# the lying readback, so the bounded loop must give up after two).
+CONFIRM_ANSWERS_F1 = {
+    "spin_noise_run: make dataset 1D": 1,
+    "spin_noise_run: set F1 TD (number of rows)": 1,
+}
 
 
 def main():
@@ -222,15 +240,25 @@ def main():
         workdir = tempfile.mkdtemp(prefix="spin_noise_harness_")
     if not os.path.isdir(workdir):
         os.makedirs(workdir)
+    flavor = os.environ.get("HARNESS_TS_FLAVOR", "legacy")
+    if flavor not in FLAVORS:
+        print "harness: unknown HARNESS_TS_FLAVOR %r (one of %s)" \
+            % (flavor, "|".join(FLAVORS))
+        return 2
 
-    print "harness: mode=%s features=%s workdir=%s" \
-        % (mode, ",".join(features) or "none", workdir)
+    print "harness: mode=%s features=%s flavor=%s workdir=%s" \
+        % (mode, ",".join(features) or "none", flavor, workdir)
     datadir, tshome = build_world(workdir)
 
     template = [u"WATERTEST", u"1", u"1", datadir.decode("utf-8")]
+    confirm_answers = CONFIRM_ANSWERS
+    if flavor in ("ts44-strict", "ts44-dimlie"):
+        confirm_answers = CONFIRM_ANSWERS_STRICT
+    elif flavor in ("ts44-f1route", "ts44-f1mismatch"):
+        confirm_answers = CONFIRM_ANSWERS_F1
     topspin_stub.configure(template, TEMPLATE_PARAMS,
                            DIALOG_ANSWERS, SELECT_ANSWERS,
-                           CONFIRM_ANSWERS)
+                           confirm_answers, flavor=flavor)
 
     # Register the stub as TopCmds (so `from TopCmds import *` succeeds
     # and IN_TOPSPIN=1 -> real java zip/digest paths) AND inject the API
@@ -398,6 +426,163 @@ def main():
           _spec.get("coil_temp_k", 0) is None
           and _spec.get("preamp_temp_k", 0) is None,
           repr((_spec.get("coil_temp_k"), _spec.get("preamp_temp_k"))))
+
+    # ---- dataset dimensionality / F1 dialect (v0.7.3).  The ts44*
+    # flavors reproduce Torino's TopSpin 4.4.0 (2026-09-18) and its likely
+    # variants (see topspin_stub.py).  Invariants: no dialog in a clean run
+    # except the scripted operator steps of the fault flavors, all at the
+    # attended probe unless the console rejects '1 TD' outright; a form the
+    # console rejected is probed once per session (each rejection is a
+    # stray console dialog); the row count is actually read back; datasets
+    # WR()-copied from a 2D neighbour are recognised as already 2D; a
+    # readback that lies never traps the operator and stops being consulted
+    # after contradicting them twice.
+    try:
+        _pa = _jsonmod.loads(meta_text).get("software", {}).get(
+            "param_api", {})
+    except CATCHABLE:
+        _pa = {}
+    if not isinstance(_pa, dict):
+        _pa = {}
+    _failed = _pa.get("failed_forms", [])
+    _rej = topspin_stub.PUTPAR_FAILURES
+    _log = topspin_stub.LOG
+    _n_put_f1 = len([1 for a, s in _log
+                     if a == "PUTPAR" and s.startswith(u"1 TD = ")])
+    _n_get_f1 = len([1 for a, s in _log
+                     if a == "GETPAR" and s.startswith(u"1 TD = ")])
+    _n_confirm_2d = len([1 for a, s in _log
+                         if a == "CONFIRM" and u"make dataset 2D" in s])
+    _n_confirm_f1 = len([1 for a, s in _log
+                         if a == "CONFIRM" and u"set F1 TD" in s])
+    _n_msg_setup = len([1 for t, m in topspin_stub.MSGS
+                        if t is not None and u"dataset setup on this console" in t])
+    _notice = [s for a, s in _log
+               if a == "SHOW_STATUS" and u"NOISE BLOCK starting" in s]
+    _notice = _notice and _notice[-1] or u""
+    _i_p90 = [k for k, (a, s) in enumerate(_log)
+              if a == "INPUT_DIALOG" and u"90-degree pulse" in s]
+    _i_conf = [k for k, (a, s) in enumerate(_log)
+               if a == "CONFIRM" and (u"make dataset 2D" in s
+                                      or u"set F1 TD" in s)]
+    check("meta.json software.param_api present", bool(_pa),
+          repr(_pa)[:200])
+    check("param_api: putpar_failures == rejected PUTPARs seen by the stub "
+          "(%d)" % len(_rej), _pa.get("putpar_failures") == len(_rej),
+          repr(_pa.get("putpar_failures")))
+    check("param_api: every rejected parameter was probed EXACTLY once "
+          "(no stray dialog repeats) and failed_forms has no duplicates",
+          len(_rej) == len(set([r[0] for r in _rej]))
+          and len(_failed) == len(set(_failed))
+          and len(_rej) <= len(_failed),
+          "rejected=%r failed_forms=%r" % (_rej, _failed))
+    check("param_api: the F1 TD readback actually happened (GETPAR '1 TD' "
+          "%d times for %d PUTPAR '1 TD')" % (_n_get_f1, _n_put_f1),
+          _n_put_f1 >= 1 and _n_get_f1 >= _n_put_f1)
+    check("param_api: dataset reloaded (RE) after the dimension switch",
+          (_pa.get("reload_ok") or 0) >= 1 and not _pa.get("reload_failed"),
+          repr((_pa.get("reload_ok"), _pa.get("reload_failed"))))
+    _E = {
+        # form, f1form, failed, verified, src, already_min, unverified_min,
+        # confirm2d, confirmf1, msg_setup, notice_marker, pm_readback, acqudim
+        "legacy":      dict(form="name", f1form="1 TD", failed=[], verified=1,
+                            src="getpar", already_min=3, unverified_min=0,
+                            c2d=0, cf1=0, msg=0, notice=None, pm="1",
+                            acqudim=None),
+        "ts44":        dict(form="name", f1form="1 TD", failed=[], verified=1,
+                            src="getpar", already_min=3, unverified_min=0,
+                            c2d=0, cf1=0, msg=0, notice=None, pm="1",
+                            acqudim=2),
+        "ts44-stale":  dict(form="name", f1form="1 TD", failed=[], verified=1,
+                            src="getpar", already_min=3, unverified_min=0,
+                            c2d=0, cf1=0, msg=0, notice=None, pm="1",
+                            acqudim=2),
+        "ts44-strict": dict(form="operator", f1form="1 TD",
+                            failed=["PARMODE:name"], verified=1,
+                            src="getpar", already_min=3, unverified_min=0,
+                            c2d=1, cf1=0, msg=1,
+                            notice=u"no further step expected",
+                            pm="1", acqudim=2),
+        "ts44-f1echo": dict(form="name", f1form="1 TD", failed=[], verified=0,
+                            src="", already_min=3, unverified_min=0,
+                            c2d=0, cf1=0, msg=0, notice=None, pm="1",
+                            acqudim=2),
+        "ts44-dimlie": dict(form="operator", f1form="1 TD", failed=[],
+                            verified=1, src="getpar", already_min=0,
+                            unverified_min=3, c2d=2, cf1=0, msg=1,
+                            notice=u"no further step expected", pm="",
+                            acqudim=1),
+        "ts44-f1route": dict(form="name", f1form="operator",
+                             failed=["F1 TD:1 TD"], verified=1, src="getpar",
+                             already_min=3, unverified_min=0, c2d=0, cf1=3,
+                             msg=1, notice=u"'1 td' typed by hand", pm="1",
+                             acqudim=2),
+        "ts44-f1mismatch": dict(form="name", f1form="operator", failed=[],
+                                verified=0, src="", already_min=3,
+                                unverified_min=0, c2d=0, cf1=2, msg=1,
+                                notice=u"no further step expected", pm="1",
+                                acqudim=2),
+    }[flavor]
+    check("param_api[%s]: PARMODE path == %r" % (flavor, _E["form"]),
+          _pa.get("parmode_form") == _E["form"], repr(_pa.get("parmode_form")))
+    check("param_api[%s]: F1 TD path == %r" % (flavor, _E["f1form"]),
+          _pa.get("f1_td_form") == _E["f1form"], repr(_pa.get("f1_td_form")))
+    check("param_api[%s]: failed_forms == %r" % (flavor, _E["failed"]),
+          list(_failed) == _E["failed"], repr(_failed))
+    check("param_api[%s]: F1 TD verified == %d via %r"
+          % (flavor, _E["verified"], _E["src"]),
+          _pa.get("f1_td_verified") == _E["verified"]
+          and _pa.get("f1_td_readback_source") == _E["src"],
+          repr((_pa.get("f1_td_verified"), _pa.get("f1_td_readback_source"))))
+    check("param_api[%s]: datasets recognised as already 2D >= %d, "
+          "unverified writes >= %d" % (flavor, _E["already_min"],
+                                       _E["unverified_min"]),
+          (_pa.get("parmode_already") or 0) >= _E["already_min"]
+          and (_pa.get("parmode_unverified") or 0) >= _E["unverified_min"],
+          repr((_pa.get("parmode_already"), _pa.get("parmode_unverified"))))
+    check("param_api[%s]: readbacks -- PARMODE %r, GETACQUDIM %r"
+          % (flavor, _E["pm"], _E["acqudim"]),
+          _pa.get("parmode_readback") == _E["pm"]
+          and _pa.get("acqudim_readback") == _E["acqudim"],
+          repr((_pa.get("parmode_readback"), _pa.get("acqudim_readback"))))
+    check("param_api[%s]: 'make dataset 2D' dialog x%d, 'set F1 TD' dialog "
+          "x%d" % (flavor, _E["c2d"], _E["cf1"]),
+          _n_confirm_2d == _E["c2d"] and _n_confirm_f1 == _E["cf1"],
+          "seen %d / %d" % (_n_confirm_2d, _n_confirm_f1))
+    check("param_api[%s]: attended 'dataset setup on this console' warning "
+          "x%d" % (flavor, _E["msg"]), _n_msg_setup == _E["msg"],
+          "seen %d" % _n_msg_setup)
+    if sweep_on:
+        pass          # the sweep replaces the single noise block (no notice)
+    elif _E["notice"] is None:
+        check("param_api[%s]: pre-noise-block notice has no manual-step tail"
+              % flavor, u"NOTE:" not in _notice, _notice[:160])
+    else:
+        check("param_api[%s]: pre-noise-block notice says %r"
+              % (flavor, _E["notice"]), _E["notice"] in _notice, _notice[:160])
+    if _E["c2d"] or _E["cf1"]:
+        # Every operator step except a recurring '1 td' happens BEFORE the
+        # 90-degree dialog (operator present); the recurring '1 td' case
+        # is exactly what the attended warning announces.
+        _first_ok = bool(_i_conf) and bool(_i_p90) and _i_conf[0] < _i_p90[0]
+        if flavor == "ts44-f1route":
+            _all_ok = _first_ok
+        else:
+            _all_ok = _first_ok and all([k < _i_p90[0] for k in _i_conf])
+        check("param_api[%s]: operator steps happen BEFORE the 90-degree "
+              "dialog (operator present)%s" % (
+                  flavor, flavor == "ts44-f1route"
+                  and " -- except the announced recurring '1 td'" or ""),
+              _all_ok, "confirms at %r, p90 dialog at %r" % (_i_conf, _i_p90))
+    if flavor in ("ts44-dimlie", "ts44-f1mismatch"):
+        check("param_api[%s]: lying readback flagged unreliable after two "
+              "contradictions" % flavor,
+              (_pa.get("dim_readback_unreliable") == 1) if flavor == "ts44-dimlie"
+              else (_pa.get("f1_readback_unreliable") == 1
+                    and _pa.get("f1_td_readback_mismatch") not in ("", None)),
+              repr((_pa.get("dim_readback_unreliable"),
+                    _pa.get("f1_readback_unreliable"),
+                    _pa.get("f1_td_readback_mismatch"))))
 
     # ---- clock audit (schema 1.2).  Jython 2.7 ships json, so the
     # harness can parse what the script's hand-rolled writer emitted.

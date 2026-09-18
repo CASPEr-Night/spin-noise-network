@@ -53,6 +53,8 @@ SCHEMA_PATH = os.path.join(REPO, "schema", "meta.schema.json")
 UPLOADER_PATH = os.path.join(REPO, "uploader", "upload_bundle.py")
 PACKER_PATH = os.path.join(REPO, "packer", "pack_bundle.py")
 ENTRY_PATH = os.path.join(REPO, "testing", "jython_entry.py")
+STUB_PATH = os.path.join(REPO, "testing", "topspin_stub.py")
+HARNESS_SH_PATH = os.path.join(REPO, "testing", "run_jython_harness.sh")
 
 FAILURES = []
 
@@ -373,6 +375,139 @@ check("guard: the Jython harness answers the probe-temperature dialog blank "
       re.search(r'"spin-noise run: probe temperatures \(optional\)":\s*'
                 r'\[u"",\s*u""\]', ENTRY_SRC) is not None,
       "testing/jython_entry.py no longer leaves the temperature fields blank")
+# TopSpin validates enumerated parameters written from Python by NAME
+# (Torino, TopSpin 4.4.0, 2026-09-18: PUTPAR("PARMODE", "1") raised; the
+# same console rejected "1 FnMODE"), and every rejected PUTPAR pops the
+# console's own error dialog.  PARMODE and the F1 parameters may therefore
+# be set only through the dialect-aware helpers (name only, readback-
+# verified, reload after the switch, each rejected form probed once, the
+# first switch while the operator is present), FnMODE is never written
+# (Bruker: 'undefined' is mandatory without an mc statement), and what
+# the console accepted is stamped into meta.json.
+bad = find_offenders('putpar("PARMODE"', {"set_parmode"})
+check("guard: putpar(\"PARMODE\" only inside set_parmode", not bad,
+      "; ".join(bad))
+bad = find_offenders("PUTPAR(", {"putpar"}, skip_def_of="PUTPAR")
+check("guard: PUTPAR( only inside putpar (+ desk stub)", not bad,
+      "; ".join(bad))
+bad = find_offenders('"1 TD"', {None, "set_f1_td", "f1_td_readback",
+                                "f1_td_form_rejected"})
+check("guard: F1 TD addressed only via set_f1_td / f1_td_readback "
+      "(verified readback, bounded operator fallback)", not bad,
+      "; ".join(bad))
+bad = find_offenders("FnMODE", set())
+check("guard: FnMODE never written or read by the script (Bruker requires "
+      "'undefined' without an mc statement)", not bad, "; ".join(bad))
+bad = find_offenders("GETACQUDIM(", {"acqu_dim_readback"})
+check("guard: GETACQUDIM( only inside acqu_dim_readback (wrapped: absent "
+      "on old TopSpin)", not bad, "; ".join(bad))
+_re_bad = []
+for _idx, _line in enumerate(LINES):
+    if is_comment(_line) or not re.search(r"(?<![A-Za-z0-9_])RE\(", _line):
+        continue
+    if re.match(r"^\s*def\s+RE\s*\(", _line):
+        continue
+    if OWNERS[_idx] not in (None, "open_expno", "reopen_expno",
+                            "reload_current_dataset"):
+        _re_bad.append("line %d (in %s): %s"
+                       % (_idx + 1, OWNERS[_idx], _line.strip()))
+check("guard: RE( only inside open_expno / reopen_expno / "
+      "reload_current_dataset (+ desk stub)", not _re_bad, "; ".join(_re_bad))
+_m2 = "\n".join(function_body("make_2d")[0])
+_m1 = "\n".join(function_body("make_1d")[0])
+_sp = "\n".join(function_body("set_parmode")[0])
+_sf = "\n".join(function_body("set_f1_td")[0])
+_po = "\n".join(function_body("parmode_operator_dialog")[0])
+check("guard: make_2d/make_1d route PARMODE through set_parmode + "
+      "parmode_operator_dialog and make_2d verifies F1 TD",
+      "set_parmode(2)" in _m2 and "parmode_operator_dialog(2)" in _m2
+      and "set_f1_td(rows)" in _m2
+      and "set_parmode(1)" in _m1 and "parmode_operator_dialog(1)" in _m1)
+check("guard: set_parmode recognises an already-2D dataset, writes the enum "
+      "NAME, reloads (RE) and reads back; never re-probes a rejected form",
+      "if acqu_dim_readback() == ndim:" in _sp
+      and "PARMODE_NAME[ndim]" in _sp and "reload_current_dataset()" in _sp
+      and "_form_has_failed(" in _sp and '"ordinal"' not in _sp)
+_ar = "\n".join(function_body("acqu_dim_readback")[0])
+check("guard: dimensionality readback consults GETPAR PARMODE (console-"
+      "confirmed ordinal) before GETACQUDIM, and honours the unreliable flag",
+      0 < _ar.find('pm = getpar("PARMODE")') < _ar.find("d = to_int(GETACQUDIM(), None)")
+      and 'if PARAM_API["dim_readback_unreliable"]:' in _ar)
+check("guard: a readback that contradicts the operator twice is flagged "
+      "unreliable (no repeated dialogs later)",
+      'PARAM_API["dim_readback_unreliable"] = 1' in _po
+      and 'PARAM_API["f1_readback_unreliable"] = 1' in _sf
+      and 'if PARAM_API["f1_readback_unreliable"]:'
+      in "\n".join(function_body("f1_td_readback")[0]))
+check("guard: set_f1_td recognises an F1 TD that already reads rows "
+      "(inherited / probed) before writing",
+      _sf.find("rb, src = f1_td_readback(td_direct)") < _sf.find('putpar("1 TD"'))
+check("guard: every pseudo-2D / quick-1D creation WR()s from a template of "
+      "the right dimensionality (no PARMODE write per dataset)",
+      "ensure_template_dim(template, dsname, 1)"
+      in "\n".join(function_body("acquire_quick_1d")[0])
+      and "ensure_template_dim(template, dsname, 2)"
+      in "\n".join(function_body("run_field_sweep")[0])
+      and SRC.count("ensure_template_dim(template, dsname, 2)") >= 3)
+check("guard: the probe clears the template's raw data before the switch "
+      "and warns the operator when their help was needed",
+      SRC.find("clear_raw_data(ds_path(cd_probe))") < SRC.find("make_2d(REF_ROWS)")
+      and "dataset setup on this console" in SRC)
+check("guard: operator fallbacks are bounded (attempts >= 2) in set_f1_td "
+      "and parmode_operator_dialog",
+      "attempts >= 2" in _sf and "attempts >= 2" in _po)
+check("guard: F1 TD readback distrusts a value equal to the direct TD "
+      "(prefix-ignoring console) and never traps the operator",
+      "str(v) != str(td_direct)" in "\n".join(function_body("f1_td_readback")[0]))
+_i_probe = SRC.find("dialect probe: creating expno")
+_i_p90 = SRC.find('"spin-noise run: 90-degree pulse"')
+check("guard: the first dimensionality switch (dialect probe) happens "
+      "BEFORE the 90-degree dialog, while the operator is present",
+      0 < _i_probe < _i_p90)
+check("guard: the opening reference is created once (at the probe) and "
+      "RE-opened, not WR-overwritten, in section 9",
+      SRC.count("= open_expno(template, dsname, EXP_REF_OPEN)") == 1
+      and "cd = reopen_expno(template, dsname, EXP_REF_OPEN)" in SRC)
+check("meta: software.param_api stamped (what this console accepted)",
+      '"param_api": PARAM_API' in SRC)
+check("meta: schema documents software.param_api (optional)",
+      "param_api" in schema.get("properties", {}).get("software", {})
+      .get("properties", {})
+      and "param_api" not in schema["properties"]["software"].get("required", []))
+# Pin the harness reproduction of the 4.4 console, as for the namespace bug.
+with open(STUB_PATH, "r", encoding="utf-8") as fh:
+    STUB_SRC = fh.read()
+with open(HARNESS_SH_PATH, "r", encoding="utf-8") as fh:
+    SH_SRC = fh.read()
+check("guard: the stub models the console -- PARMODE by name only "
+      "(GetEnuOrd), ordinal readback, GETACQUDIM, the missing/stale F1 map, "
+      "the strict and echo variants",
+      "GetEnuOrd[PARMODE]" in STUB_SRC
+      and "parameter not found in map" in STUB_SRC
+      and "FnMODE deliberately absent" in STUB_SRC
+      and "_PARMODE_TO_ORDINAL" in STUB_SRC and "def GETACQUDIM" in STUB_SRC
+      and "_F1_FRESH" in STUB_SRC and '"ts44-strict"' in STUB_SRC
+      and '"ts44-f1echo"' in STUB_SRC and '"ts44-dimlie"' in STUB_SRC
+      and '"ts44-f1route"' in STUB_SRC and '"ts44-f1mismatch"' in STUB_SRC
+      and 'raise NameError("GETACQUDIM")' in STUB_SRC)
+check("guard: the harness runs all eight console flavors, the feature "
+      "variant also under the strict flavor",
+      all(f in SH_SRC for f in ('"legacy simulate"', '"legacy desktest"',
+                                '"ts44 desktest"', '"ts44-stale desktest"',
+                                '"ts44-strict desktest"',
+                                '"ts44-f1echo desktest"',
+                                '"ts44-dimlie desktest"',
+                                '"ts44-f1route desktest"',
+                                '"ts44-f1mismatch desktest"',
+                                '"ts44-strict desktest rdopt sweep autostep"'))
+      and "HARNESS_TS_FLAVOR" in SH_SRC and "HARNESS_TS_FLAVOR" in ENTRY_SRC,
+      "testing/run_jython_harness.sh or jython_entry.py no longer run the flavors")
+check("guard: the harness asserts probed-once, an actual readback, the "
+      "attended operator steps and the unreliable-readback flags",
+      "no stray dialog repeats" in ENTRY_SRC
+      and "readback actually happened" in ENTRY_SRC
+      and "operator steps happen BEFORE the 90-degree" in ENTRY_SRC
+      and "flagged unreliable after two" in ENTRY_SRC)
 for cmd in hw_commands:
     routed = re.search(
         r'(safe_hw_cmd|xcmd_or_dialog)\(\s*\n?\s*"%s' % re.escape(cmd), SRC)

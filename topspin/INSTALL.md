@@ -112,6 +112,16 @@ step-by-step checklist with pass criteria is
 - **`parmode` dialog appears** — some TopSpin versions ask before
   converting a dataset to 2D; answer yes/OK (the dataset is fresh, there
   is nothing to lose).
+- **TopSpin shows an error about `PARMODE` / `GetEnuOrd`, then the
+  script asks you to type `parmode`** — TopSpin validates parameters
+  written from a script by name; the old script wrote a number. Script
+  v0.7.3 or later writes the documented name, verifies it, and does the
+  first switch while you are still at the console (at the start of the
+  setup step), so at worst you type `parmode` once. On v0.7.2, do as the
+  dialog says — `parmode`, choose 2D, OK — once; TopSpin's own error
+  pop-up (not the script's request) then recurs at the noise block and
+  at the closing reference and may need closing. See
+  `docs/TROUBLESHOOTING.md`.
 - **Script window shows a Jython error dialog** — the run stopped, but
   any acquisition already started finishes on its own and all data stays
   in `SPINNOISE_<date>_<time>`. Send the error text to the maintainers.

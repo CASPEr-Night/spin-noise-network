@@ -23,6 +23,26 @@ This executes `topspin/spin_noise_run.py` **unmodified** end to end
 buffers, and unicode dialog strings exactly as TopSpin's embedded Jython
 delivers them). Requires `jython` (2.7.x) and `python3` on PATH.
 
+The harness runs the script under eight modelled consoles
+(`HARNESS_TS_FLAVOR` in `testing/run_jython_harness.sh`; a few seconds
+each, ~3 min for the whole suite including the report and clock-recovery
+steps). All of them accept PARMODE by enum name only and read it back as
+the ordinal, as TopSpin does. `legacy` is otherwise permissive and has no
+`GETACQUDIM` (old TopSpin); `ts44` reproduces Torino's TopSpin 4.4.0
+(2026-09-18: `1 FnMODE` absent from the F1 map, a rejected `PUTPAR`
+raising a Java exception); `ts44-stale` makes the F1 map unavailable
+after a PARMODE change until the dataset is reloaded; `ts44-strict`
+rejects even the enum name, so the script must fall back to the operator
+exactly once, at the attended probe at the start of the setup step, with
+later datasets inheriting 2D; `ts44-f1echo` answers F1 readbacks with the
+direct-dimension TD, which the script must distrust without a dialog;
+`ts44-dimlie` has a dimensionality readback that lies (two confirmations
+at the probe, then trusted writes); `ts44-f1route` routes the F1 TD write
+to the direct dimension (detected, undone, operator asked, recurrence
+announced); `ts44-f1mismatch` reads F1 TD back off by one (bounded loop,
+then trusted). The v0.7.2 script fails these flavors (unscripted
+`parmode` dialog), so the test can fail.
+
 One command runs everything:
 
 ```
