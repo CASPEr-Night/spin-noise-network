@@ -8,7 +8,9 @@
 #
 # Requires: jython (2.7.x) and python3 on PATH.
 #
-# For each mode (simulate, desktest) it:
+# For each mode (simulate, desktest) and console flavor (HARNESS_TS_FLAVOR:
+# legacy 2.x/3.x, or the strict TopSpin 4.4.0 parameter validation seen at
+# Torino on 2026-09-18 in three variants -- see testing/topspin_stub.py) it:
 #   1. runs jython_entry.py, which execfile()'s the REAL script unmodified
 #      with topspin_stub.py registered as the TopCmds module -- so the
 #      script runs its IN_TOPSPIN=1 paths: real java.util.zip bundling,
@@ -40,11 +42,22 @@ TESTING="$REPO/testing"
 command -v jython >/dev/null || { echo "ERROR: jython not on PATH"; exit 2; }
 command -v python3 >/dev/null || { echo "ERROR: python3 not on PATH"; exit 2; }
 
-# Three end-to-end variants: the two plain modes, plus desktest with the
-# optional rdopt + sweep features on (structure/dialog/meta coverage --
-# mock modes exercise the flow, not the physics).
-for RUN in "simulate" "desktest" "desktest rdopt sweep autostep"; do
+# Eleven end-to-end variants: the two plain modes on the legacy console
+# model, the desktest under seven TopSpin 4.4 fault flavors (strict F1
+# map; F1 map stale until RE(); enum name rejected -> one scripted operator
+# step; F1 readback echoing the direct TD; lying dimensionality readback;
+# F1 write routed to the direct TD; F1 readback off by one -- see
+# testing/topspin_stub.py), plus desktest with the optional rdopt + sweep
+# features on under legacy AND the strict flavor (structure/dialog/meta
+# coverage -- mock modes exercise the flow, not the physics).
+for RUN in "legacy simulate" "legacy desktest" "ts44 desktest" \
+           "ts44-stale desktest" "ts44-strict desktest" \
+           "ts44-f1echo desktest" "ts44-dimlie desktest" \
+           "ts44-f1route desktest" "ts44-f1mismatch desktest" \
+           "legacy desktest rdopt sweep autostep" \
+           "ts44-strict desktest rdopt sweep autostep"; do
     set -- $RUN
+    FLAVOR="$1"; shift
     MODE="$1"; shift
     FEATURES="$*"
     TAG="$(echo "$RUN" | tr ' ' '_')"
@@ -52,8 +65,9 @@ for RUN in "simulate" "desktest" "desktest rdopt sweep autostep"; do
     LOGF="$WORK/harness_${TAG}.log"
     echo ""
     echo "=== Jython harness: $RUN (workdir $WORK) ==="
-    HARNESS_WORKDIR="$WORK" jython -Dpython.path="$TESTING" \
-        "$TESTING/jython_entry.py" $RUN 2>&1 | tee "$LOGF"
+    HARNESS_WORKDIR="$WORK" HARNESS_TS_FLAVOR="$FLAVOR" \
+        jython -Dpython.path="$TESTING" \
+        "$TESTING/jython_entry.py" $MODE $FEATURES 2>&1 | tee "$LOGF"
 
     BUNDLE="$(grep '^BUNDLE: ' "$LOGF" | tail -1 | sed 's/^BUNDLE: //')"
     if [ -z "$BUNDLE" ] || [ ! -f "$BUNDLE" ]; then
@@ -86,7 +100,8 @@ for RUN in "simulate" "desktest" "desktest rdopt sweep autostep"; do
     # meta.json.  See testing/test_pack_roundtrip.py.  Plain desktest
     # only: the feature variant's expno layout is a schema-1.2 script
     # product, not a packer input contract.
-    if [ "$MODE" = "desktest" ] && [ -z "$FEATURES" ]; then
+    if [ "$FLAVOR" = "legacy" ] && [ "$MODE" = "desktest" ] \
+            && [ -z "$FEATURES" ]; then
         echo ""
         echo "--- packer round-trip (desktest bundle) ---"
         python3 "$TESTING/test_pack_roundtrip.py" "$BUNDLE"
@@ -148,7 +163,8 @@ echo "--- static checks ---"
 python3 "$TESTING/static_check.py"
 
 echo ""
-echo "JYTHON HARNESS: ALL PASS (simulate + desktest + selftest"
+echo "JYTHON HARNESS: ALL PASS (simulate + desktest x 8 console flavors"
+echo "                + selftest"
 echo "                + packer round-trip"
 echo "                + clock-offset recovery: realism, powered, null,"
 echo "                  DE discrimination"

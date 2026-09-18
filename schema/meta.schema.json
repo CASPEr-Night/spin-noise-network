@@ -65,6 +65,10 @@
       "external-acquisition"
      ],
      "description": "How the data came to be: 'live' = real acquisition by the orchestrator; 'simulate'/'desktest' = hardware commands mocked, bundle is a plumbing test, NOT data; 'archival-repackage' = real historical spectrometer data repackaged into the bundle format; 'synthetic-injection' = numerically synthesized data with a known injected feature, used to validate the analysis pipeline (never a science result); 'external-acquisition' = real data acquired by the facility's own vendor software (e.g. Delta, SpinsolveExpert, or manual TopSpin operation) and packed by packer/pack_bundle.py. Optional; enum extension is backward compatible."
+    },
+    "param_api": {
+     "type": "object",
+     "description": "What the console accepted when the orchestrator set up its pseudo-2D datasets (spin_noise_run.py 0.7.3+, optional, diagnostic provenance -- no downstream analysis depends on it). Keys: parmode_form ('name' = PUTPAR by enum name accepted | 'operator' = parmode typed by the operator | '' = never written), parmode_readback (raw GETPAR PARMODE), acqudim_readback (GETACQUDIM or null), parmode_already (datasets already of the wanted dimensionality), parmode_unverified, dim_readback_unreliable (0/1), reload_ok / reload_failed (RE after the switch), f1_td_form ('1 TD' | 'operator'), f1_td_already, f1_td_verified (0/1), f1_td_readback_source ('getpar' | 'getpar-axis' | 'acqu2' | ''), f1_td_readback_mismatch, f1_readback_unreliable (0/1), failed_forms (list of 'KIND:form', each probed at most once per session), putpar_failures (PUTPAR calls the console rejected -- each one was a stray error dialog for the operator), last_putpar_error. Background: TopSpin validates enumerated parameters by name; TopSpin 4.4.0 rejected the ordinal PARMODE the older script wrote (Torino, 2026-09-18)."
     }
    },
    "description": "Provenance of the software that produced the bundle. Required from schema 1.1 onward."

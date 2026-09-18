@@ -60,6 +60,39 @@ would reproduce the crash above at the first blank field. Nothing was
 started. Send us the message text and the TopSpin version; there is no
 operator workaround.
 
+**TopSpin shows `Could not convert '1' into enum: GetEnuOrd[PARMODE]:
+enumeration name 1 not found`, then the script asks you to type `parmode`
+(script v0.7.2 or earlier).**
+TopSpin validates enumerated parameters written from a script by name
+(`2D`); the old script wrote the ordinal (`1`), which TopSpin 4.4.0
+rejected (first seen at Torino, 2026-09-18) and which no TopSpin version
+is documented to accept. The script's request is correct and comes
+once, at the opening reference (~15 min into the unattended stretch):
+type `parmode`, choose 2D, press OK; the later datasets inherit 2D.
+What recurs on v0.7.2 is TopSpin's OWN error pop-up about `PARMODE`
+(and the `1 FnMODE` one below) at every pseudo-2D dataset — three of
+each per session, two of them after you have walked away — and such a
+pop-up may hold the script until it is closed, with the acquired data
+safe on disk. Fixed in v0.7.3: PARMODE is written by its documented
+name, the dimensionality and the number of rows are verified by
+readback, the dataset is reloaded after the switch, and the FIRST switch
+happens while you are certainly at the console — at the start of the
+setup step, before tuning — so if your console does need `parmode` by
+hand, you do it once, there, and the script tells you whether anything
+will be asked again. What the console accepted is recorded in
+`meta.json` (`software.param_api`), and a form the console rejected is
+never tried again in that session. Install v0.7.3 before a live run.
+
+**`1 FnMODE: parameter not found in map` (script v0.7.2 or earlier).**
+Cosmetic. The script tried to set the F1 acquisition mode to QF as a
+courtesy to TopSpin's own 2D processing. Nothing depends on it: the
+noise pulse program is a plain loop without an `mc` statement, for which
+Bruker's acquisition reference requires FnMODE to stay `undefined`, and
+the analysis reads the raw `ser` file directly. Close the message; the
+run continues correctly. v0.7.3 no longer touches FnMODE at all. If you
+want to look at the rows with `xf2` in TopSpin, set the processing
+parameter MC2 to QF — that does not affect acquisition.
+
 **TopSpin pops its own errors about `atma` / `topshim` / `pulsecal`.**
 Normal on consoles without an ATM unit or those licences: the script
 detects the failure and degrades to an operator dialog asking you to
@@ -73,6 +106,10 @@ the automatic steps are then harmless no-ops on top of a good state.
 
 **"When can I walk away?"**
 After the **90-degree pulse confirmation** dialog — the last question.
+(Since v0.7.3 the one step a TopSpin 4 console may need your help with —
+switching the first dataset to 2D — happens at the start of the setup
+step, before tuning, and the script tells you then if anything will be
+asked again.)
 The RG ladder and opening reference then run unattended (~15 min),
 and the noise block auto-starts after a 30 s status-line countdown.
 There is no "noise block starting" dialog (versions before 0.5.1 had
