@@ -64,6 +64,7 @@ commands mocked — runnable on a free processing-only TopSpin install
 | `topspin/spin_noise_run.py` | Jython orchestrator, runs inside TopSpin 2.x–4.x (5.0 untested — reports welcome) |
 | `topspin/pp/zgnoise2d` | no-pulse pseudo-2D pulse program for the noise blocks |
 | `topspin/INSTALL.md` | install paths, expno map, troubleshooting |
+| `analysis/facility_report.py` | the per-facility report (`report.html` + `report.json`) from one bundle; noise rows are streamed, so memory does not grow with the block length (v0.7.4) |
 | `packer/pack_bundle.py` | Python 3 stdlib-only standalone packer: a directory of vendor data files + `answers.json` (the operator questionnaire) → a validated bundle zip, identical in layout to the orchestrator's. Pluggable vendor readers: Bruker implemented (round-trip tested); JEOL/Magritek adapter interface defined |
 | `packer/answers.example.json` | the questionnaire template for the packer (same questions as the TopSpin dialogs) |
 | `uploader/upload_bundle.py` | Python 3 stdlib-only uploader — auto-selects single-shot vs. chunked-resumable upload by size (+ `--selftest` bundle validator; accepts schema v1.0–v2.0 bundles) |
@@ -102,10 +103,14 @@ covers ~10 GB), set the shared token, and hand facilities the endpoint + token p
 
 ## Status and known caveats
 
-- **Not yet exercised on real hardware.** The script has been executed end-to-end
-  under a real Jython 2.7 interpreter with a stubbed TopSpin API — both simulate and
-  desktest modes, bundle validated by the uploader (`testing/run_jython_harness.sh`) —
-  but it has not yet run inside TopSpin itself. Every TopSpin call is pinned to
+- **Not yet run live on Bruker hardware.** The script has been executed end-to-end
+  under a real Jython 2.7 interpreter with a stubbed TopSpin API modelling eight
+  console behaviours — simulate and desktest modes, bundle validated by the uploader
+  (`testing/run_jython_harness.sh`) — and has completed DESKTEST inside TopSpin 4.4.0
+  at a partner facility (Torino, 17–18 September 2026), where two console-specific
+  faults were found and fixed in v0.7.2 and v0.7.3; it has not yet acquired a full
+  live session. The Agilent/VnmrJ path has run three real sessions (SIU Carbondale).
+  Every TopSpin call is pinned to
   Bruker's *Python Programming in TopSpin* manual, with operator-dialog fallbacks
   wherever versions differ; the first run at a pilot facility should be supervised. Known soft spots (all degrade to dialogs,
   none fail silently): dataset creation requires a ¹H dataset open at start; 2D

@@ -58,7 +58,7 @@
 \large (Bruker / TopSpin)}
 \author{John W. Blanchard (\href{mailto:jwbquantum@gmail.com}{jwbquantum@gmail.com})
 \and Reza Ebadi \and Claude (Anthropic)}
-\date{Software v0.3.0 --- August 2026}
+\date{Software v0.7.4 --- September 2026}
 
 \begin{document}
 \maketitle
@@ -200,8 +200,10 @@ by hand (Section~\ref{sec:trouble}).
 \label{sec:verify}
 
 Two test modes let you exercise the whole flow before the magnet is involved.
-Both are started from the \ts{} command line with any \hnmr{} dataset open (a
-PROTON demo set is fine --- it is only a parameter template).
+Both are started from the \ts{} command line with a \textbf{1D} \hnmr{} dataset
+open (a PROTON demo set is fine --- it is only a parameter template; since
+v0.7.4 the script sets the dimensionality of every dataset it creates itself,
+but a 1D template is the clean start).
 
 \subsection*{5.1\quad SIMULATE --- the pure dry run}
 
@@ -246,7 +248,7 @@ it at your desk. Pass criteria, from the release's desk-test checklist:
       \textbf{1, 10, 14, 15, 16, 11, 12, 13}.
 \item \file{meta.json} is written twice (dataset directory and bundle) and
       contains a \texttt{software} block with
-      \texttt{"script\_version": "0.3.0"} (this release),
+      \texttt{"script\_version": "0.7.4"} (this release),
       \texttt{"schema\_version": "1.2"} (the orchestrator's Bruker-only
       metadata vintage, accepted under the repository's vendor-neutral v2.0
       schema), a \texttt{script\_sha256} fingerprint, and
@@ -267,11 +269,14 @@ on the flag --- just do not send it.
 \section{The real run}
 \label{sec:dialogs}
 
-One honest note before the first live run: as of v0.3.0 the script has been
-desk-tested end to end (a real Jython interpreter against a stubbed \ts{}
-API, plus the SIMULATE/DESKTEST modes above), but it has not yet run on real
-spectrometer hardware. We therefore treat the first live run at each facility
-as a supervised pilot --- write to
+One honest note before the first live run: as of v0.7.4 the script has been
+desk-tested end to end (a real Jython interpreter against stubbed \ts{}
+APIs modelling eight console behaviours, plus the SIMULATE/DESKTEST modes
+above) and has completed DESKTEST on a real \ts{} 4.4.0 console (Torino,
+September 2026), where it found two console-specific faults that were fixed
+within a day --- but it has not yet run a full live session on Bruker
+hardware. We therefore treat the first live run at each facility as a
+supervised pilot --- write to
 \href{mailto:jwbquantum@gmail.com}{jwbquantum@gmail.com} and we will
 screen-share through it.
 
@@ -448,6 +453,13 @@ python3 uploader/upload_bundle.py <bundle.zip> --selftest
 \item \textbf{A \texttt{parmode} dialog appears} --- some \ts{} versions ask
       before converting a dataset to 2D. Answer yes/OK --- the dataset is
       fresh, there is nothing to lose.
+\item \textbf{\ts{} shows an error about \texttt{PARMODE} / \texttt{GetEnuOrd},
+      then the script asks you to type \texttt{parmode}} --- \ts{} validates
+      parameters written from a script by name; the old script wrote a
+      number. Script v0.7.3 or later writes the documented name, verifies it,
+      and does the first switch while you are still at the console (at the
+      start of the setup step), so at worst you type \texttt{parmode} once.
+      See \file{docs/TROUBLESHOOTING.md}.
 \item \textbf{Old \ts{} (2.x)} --- everything is written for Jython 2.2-level
       syntax. If \file{Avance.incl} is missing, delete the \texttt{\#include}
       line in \file{zgnoise2d} (it is not used).

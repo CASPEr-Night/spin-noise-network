@@ -177,8 +177,10 @@ check("version: SCRIPT_VERSION (%r) == VERSION file (%r)"
       script_version == version_file and script_version is not None)
 
 m = re.search(r'^PROGRAM_VERSION\s*=\s*SCRIPT_VERSION', SRC, re.M)
-check("version: PROGRAM_VERSION aliases SCRIPT_VERSION (single source)",
-      m is not None)
+check("version: no PROGRAM_VERSION alias (TopCmds exports a function of that "
+      "name; meta.json takes SCRIPT_VERSION directly)",
+      re.search(r"^PROGRAM_VERSION\s*=", SRC, re.M) is None
+      and '"program_version": SCRIPT_VERSION' in SRC)
 
 with open(UPLOADER_PATH, "r", encoding="utf-8") as fh:
     UPLOADER_SRC = fh.read()
@@ -464,6 +466,14 @@ _i_p90 = SRC.find('"spin-noise run: 90-degree pulse"')
 check("guard: the first dimensionality switch (dialect probe) happens "
       "BEFORE the 90-degree dialog, while the operator is present",
       0 < _i_probe < _i_p90)
+check("guard: the setup expno and every ladder rung are made 1D whatever the "
+      "template was (make_1d after their open_expno)",
+      SRC.count("    clear_raw_data(setup_dir)\n    make_1d()\n") == 1
+      and "        cd = open_expno(template, dsname, expno)\n        make_1d()" in SRC)
+check("guard: meta program_version takes SCRIPT_VERSION directly (TopCmds "
+      "exports a PROGRAM_VERSION function that clobbers an alias)",
+      '"program_version": SCRIPT_VERSION' in SRC
+      and re.search(r"^PROGRAM_VERSION\s*=", SRC, re.M) is None)
 check("guard: the opening reference is created once (at the probe) and "
       "RE-opened, not WR-overwritten, in section 9",
       SRC.count("= open_expno(template, dsname, EXP_REF_OPEN)") == 1
@@ -502,6 +512,10 @@ check("guard: the harness runs all eight console flavors, the feature "
                                 '"ts44-strict desktest rdopt sweep autostep"'))
       and "HARNESS_TS_FLAVOR" in SH_SRC and "HARNESS_TS_FLAVOR" in ENTRY_SRC,
       "testing/run_jython_harness.sh or jython_entry.py no longer run the flavors")
+check("guard: the harness runs the 2D-template flavor and checks per-expno "
+      "dimensionality",
+      '"legacy-2dtemplate desktest"' in SH_SRC
+      and "whatever the template was" in ENTRY_SRC)
 check("guard: the harness asserts probed-once, an actual readback, the "
       "attended operator steps and the unreliable-readback flags",
       "no stray dialog repeats" in ENTRY_SRC

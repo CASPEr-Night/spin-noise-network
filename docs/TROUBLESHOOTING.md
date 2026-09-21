@@ -93,6 +93,25 @@ run continues correctly. v0.7.3 no longer touches FnMODE at all. If you
 want to look at the rows with `xf2` in TopSpin, set the processing
 parameter MC2 to QF — that does not affect acquisition.
 
+**The RG ladder rungs take minutes instead of seconds, or the ladder
+expnos hold `ser` files (script v0.7.3 or earlier).**
+The dataset open when you typed `xpy spin_noise_run` was a 2D one. The
+script uses that dataset as the parameter template, and every dataset it
+creates by copying inherits the template's dimensionality — the setup
+expno and the four gain-ladder rungs included, which then acquire the
+template's full row count with `zg`. Torino's first v0.7.3 desktest bundle
+(2026-09-21) showed exactly this inheritance (no harm done in a desk test).
+Fixed in v0.7.4: the setup expno and the rungs are switched to 1D by the
+script whatever the template was, and the pseudo-2D datasets to 2D. On
+an older script, open a 1D ¹H dataset before starting.
+
+**`program_version` in meta.json reads `<function PROGRAM_VERSION at 0x3>`
+(script v0.7.3 or earlier on a real console).**
+Cosmetic. TopSpin's Python API exports a function of that name, and the
+script's own constant was overwritten when the API was imported. The
+value the pipeline uses is `software.script_version`, which is correct;
+the report notes the collision. Fixed in v0.7.4.
+
 **TopSpin pops its own errors about `atma` / `topshim` / `pulsecal`.**
 Normal on consoles without an ATM unit or those licences: the script
 detects the failure and degrades to an operator dialog asking you to

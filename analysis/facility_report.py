@@ -7,6 +7,14 @@ facility_report.py -- the per-facility deliverable of the spin-noise network:
     python3 analysis/facility_report.py <bundle.zip> [--out DIR]
         [--prior-reports PATH ...] [--meta-override PATH]
 
+Memory (v0.7.4): noise rows are STREAMED -- read one at a time from the
+bundle and analysed in two passes -- so the report needs about the same
+memory for an 8-hour block (~1000 rows) as for a 30-minute one; the
+outputs are identical to the earlier stored-rows implementation. One
+exception remains: an Agilent/Varian ARRAYED fid (many traces in one
+file) is still loaded whole, once per pass; the Tier-1 layout the network
+uses (one row per experiment) is unaffected.
+
 Input : one bundle zip in the network format (expno tree per topspin/INSTALL.md,
         meta.json per schema/meta.schema.json). Raw data are read by the
         format each experiment's own parameter file declares: Bruker
@@ -502,6 +510,21 @@ def read_varian_fid(raw):
     return np.array(rows), hdr, np.concatenate(values)
 
 
+def ser_row_stride(size, n_rows, row_bytes, padded):
+    """Byte stride between rows of a Bruker ser: TopSpin pads every row to a
+    1024-byte boundary. A complete file is n_rows x padded; a file that
+    holds fewer rows than meta.json declares (the acquisition was stopped
+    early -- the aborted-run case) is still a whole number of PADDED rows,
+    which the size test against the declared count alone would misread as
+    unpadded and then misalign every row after the first. Only when the
+    file is neither is it read as unpadded rows."""
+    if size >= n_rows * padded:
+        return padded
+    if padded != row_bytes and size >= padded and size % padded == 0:
+        return padded
+    return row_bytes
+
+
 class Bundle(object):
     """Read-only access to the bundle zip contents.
 
@@ -693,6 +716,109 @@ class Bundle(object):
         self._unrecognised(expno)
         return None, {}
 
+    def iter_rows(self, expno, exp_meta, info=None):
+        """Yield the expno's rows one at a time (complex arrays, file
+        order). A Bruker pseudo-2D ser is read in row-sized pieces straight
+        from the zip member, so no more than one row is in memory at a
+        time -- an 8-hour block is ~1000 rows x 1 MiB (v0.7.4 streaming
+        co-add). Agilent/Varian experiments (Tier-1: one row per fid) go
+        through read_rows and are yielded row by row. Refusals and
+        read_log entries are recorded exactly as read_rows records them;
+        a refused experiment yields nothing. `info`, if given, receives
+        info["acq"] (the experiment's parameters) before the first row."""
+        if info is None:
+            info = {}
+        fmt = self.experiment_format(expno)
+        if fmt == "bruker":
+            for x in self._iter_rows_bruker(expno, exp_meta, info):
+                yield x
+            return
+        rows, acq = self.read_rows(expno, exp_meta)
+        info["acq"] = acq
+        if rows is None:
+            return
+        for x in rows:
+            yield x
+
+    def _iter_rows_bruker(self, expno, exp_meta, info):
+        """_read_rows_bruker, streamed: same parameter handling, same
+        refusals, same read_log entry, one row in memory at a time."""
+        acq = self.acqus(expno)
+        info["acq"] = acq
+        if not acq:
+            self._refuse(expno, "acqus present but unparseable: BYTORDA/"
+                                "DTYPA/TD unknown, refused rather than "
+                                "guessed")
+            return
+        td = int(acq.get("TD", exp_meta.get("td", 0)) or 0)
+        n_rows = int(exp_meta.get("td1_rows", 1) or 1)
+        bytord = int(acq.get("BYTORDA", 0) or 0)
+        dtypa = int(acq.get("DTYPA", 0) or 0)
+        if dtypa == 2:
+            dt = np.dtype("<f8" if bytord == 0 else ">f8")
+        else:
+            dt = np.dtype("<i4" if bytord == 0 else ">i4")
+        path = None
+        is_ser = False
+        for fn in ("ser", "fid"):
+            p = "data/%d/%s" % (expno, fn)
+            if self.has(p):
+                path = p
+                is_ser = (fn == "ser")
+                break
+        if path is None:
+            self._refuse(expno, "no ser/fid data file in data/%d/" % expno)
+            return
+        if td < 4:
+            self._refuse(expno, "TD=%d (acqus/meta): no usable record" % td)
+            return
+        row_bytes = td * dt.itemsize
+        padded = int(math.ceil(row_bytes / 1024.0)) * 1024
+        count = 0
+        n_pts = None
+        note = None
+        if is_ser and n_rows > 1:
+            size = self.zf.getinfo(path).file_size
+            stride = ser_row_stride(size, n_rows, row_bytes, padded)
+            fh = self.zf.open(path, "r")
+            try:
+                for _r in range(n_rows):
+                    chunk = fh.read(row_bytes)
+                    if len(chunk) < row_bytes:
+                        break
+                    if stride > row_bytes:
+                        fh.read(stride - row_bytes)      # block padding
+                    v = np.frombuffer(chunk, dtype=dt).astype(np.float64)
+                    count += 1
+                    row = v[0::2] + 1j * v[1::2]
+                    n_pts = int(row.size)
+                    yield row
+            finally:
+                fh.close()
+            if count and count < n_rows:
+                note = ("ser holds %d of the %d rows meta.json declares "
+                        "(acquisition stopped early); the rows present "
+                        "were read" % (count, n_rows))
+        else:
+            raw = self.read(path)
+            v = np.frombuffer(raw[:row_bytes], dtype=dt).astype(np.float64)
+            if v.size < td:
+                v = np.frombuffer(raw, dtype=dt).astype(np.float64)
+            count = 1
+            row = v[0::2] + 1j * v[1::2]
+            n_pts = int(row.size)
+            yield row
+        if not count:
+            self._refuse(expno, "ser shorter than one TD=%d row" % td)
+            return
+        entry = {
+            "format": "bruker", "dtype": str(dt),
+            "n_rows": int(count), "n_points_complex": int(n_pts),
+            "dc_offset_subtracted": False}
+        if note:
+            entry["note"] = note
+        self.read_log[int(expno)] = entry
+
     def _read_rows_bruker(self, expno, exp_meta):
         acq = self.acqus(expno)
         if not acq:
@@ -726,7 +852,7 @@ class Bundle(object):
         padded = int(math.ceil(row_bytes / 1024.0)) * 1024
         rows = []
         if is_ser and n_rows > 1:
-            stride = padded if len(raw) >= n_rows * padded else row_bytes
+            stride = ser_row_stride(len(raw), n_rows, row_bytes, padded)
             for r in range(n_rows):
                 chunk = raw[r * stride: r * stride + row_bytes]
                 if len(chunk) < row_bytes:
@@ -839,17 +965,44 @@ class Bundle(object):
         for fn in ("ser", "fid"):
             p = "data/%d/%s" % (expno, fn)
             if self.has(p):
-                raw = self.read(p)
+                # Streamed (v0.7.4): the member is read in item-aligned
+                # chunks and the maximum taken chunk by chunk -- the same
+                # maximum as over the whole file, without holding an
+                # 8-hour ser (and two float copies of it) in memory.
                 if dtypa == 2:
-                    v = np.frombuffer(raw[: (len(raw) // 8) * 8],
-                                      dtype="<f8" if bytord == 0 else ">f8")
-                    return {"max_abs": float(np.max(np.abs(v))) if v.size else 0.0,
+                    dt = np.dtype("<f8" if bytord == 0 else ">f8")
+                else:
+                    dt = np.dtype("<i4" if bytord == 0 else ">i4")
+                chunk_bytes = (8 << 20) - ((8 << 20) % dt.itemsize)
+                mx = None
+                n_items = 0
+                fh = self.zf.open(p, "r")
+                try:
+                    tail = b""
+                    while True:
+                        buf = fh.read(chunk_bytes)
+                        if not buf:
+                            break
+                        buf = tail + buf
+                        usable = (len(buf) // dt.itemsize) * dt.itemsize
+                        tail = buf[usable:]
+                        if not usable:
+                            continue
+                        v = np.frombuffer(buf[:usable], dtype=dt)
+                        n_items += v.size
+                        if dtypa == 2:
+                            m = float(np.max(np.abs(v)))
+                        else:
+                            m = float(np.max(np.abs(v.astype(np.float64))))
+                        if mx is None or m > mx or m != m:   # NaN propagates
+                            mx = m
+                finally:
+                    fh.close()
+                if dtypa == 2:
+                    return {"max_abs": (mx if n_items else 0.0),
                             "fullscale_fraction": None, "dtype": "float64"}
-                v = np.frombuffer(raw[: (len(raw) // 4) * 4],
-                                  dtype="<i4" if bytord == 0 else ">i4")
-                if not v.size:
+                if not n_items:
                     return None
-                mx = float(np.max(np.abs(v.astype(np.float64))))
                 return {"max_abs": mx, "fullscale_fraction": mx / 2147483647.0,
                         "dtype": "int32"}
         return None
@@ -1226,40 +1379,104 @@ def group_noise_experiments(exps, tune_blocks=False):
     return groups
 
 
-def read_noise_group(bundle, exps):
-    """Rows of a same-parameter noise group in meta order.
+class NoiseRowSource(object):
+    """The rows of a same-parameter noise group, in meta order, as a
+    RE-ITERABLE STREAM (v0.7.4): iterating yields (x, source) one row at
+    a time, reading each experiment's data as it goes, so memory is
+    O(one row) however long the block. .acq (the first readable
+    experiment's parameters) is set at the first row; after a full
+    iteration .sources holds the per-row {expno, row_in_expno,
+    started_local} list, .skipped the [{expno, why}] left out and .n_rows
+    the count -- exactly what read_noise_group returned, row for row, in
+    the same order. Iterating again re-reads the files and reproduces the
+    same rows (the readers are deterministic): that is how the co-add's
+    second pass and the exclusion's own pass get their rows without a
+    stored copy."""
 
-    Returns (rows, acq, sources, skipped): rows an (n, n_complex) array
-    (None when nothing was readable), acq the first readable experiment's
-    parameters, sources one {expno, row_in_expno, started_local} per row,
-    skipped [{expno, why}] for experiments left out.
-    """
-    all_rows, sources, skipped, acq0 = [], [], [], None
-    n_complex = None
-    for e in exps:
-        expno = int(e["expno"])
-        rows, acq = bundle.read_rows(expno, e)
-        if rows is None:
-            skipped.append({"expno": expno,
-                            "why": bundle.read_errors.get(
-                                expno, "raw data unreadable")})
-            continue
-        if n_complex is None:
-            n_complex = int(rows.shape[1])
-            acq0 = acq
-        if int(rows.shape[1]) != n_complex:
-            skipped.append({"expno": expno,
-                            "why": "row length %d differs from the group's "
-                                   "%d complex points" % (rows.shape[1],
-                                                          n_complex)})
-            continue
-        for i, x in enumerate(rows):
-            all_rows.append(x)
-            sources.append({"expno": expno, "row_in_expno": i + 1,
-                            "started_local": e.get("started_local")})
+    def __init__(self, bundle, exps):
+        self.bundle = bundle
+        self.exps = exps
+        self.acq = None
+        self.sources = []
+        self.skipped = []
+        self.n_rows = 0
+        self.n_complex = None
+        self.passes = 0
+
+    def __iter__(self):
+        bundle = self.bundle
+        sources, skipped, acq0 = [], [], None
+        n_complex = None
+        n = 0
+        for e in self.exps:
+            expno = int(e["expno"])
+            info = {}
+            gen = bundle.iter_rows(expno, e, info)
+            got_any = False
+            i = 0
+            for x in gen:
+                if not got_any:
+                    got_any = True
+                    if n_complex is None:
+                        n_complex = int(x.size)
+                        acq0 = info.get("acq") or {}
+                        self.acq = acq0
+                        self.n_complex = n_complex
+                    if int(x.size) != n_complex:
+                        skipped.append({"expno": expno,
+                                        "why": "row length %d differs from "
+                                               "the group's %d complex "
+                                               "points" % (x.size,
+                                                           n_complex)})
+                        for _x in gen:          # exhaust: read_log as before
+                            pass
+                        break
+                i += 1
+                n += 1
+                s = {"expno": expno, "row_in_expno": i,
+                     "started_local": e.get("started_local")}
+                sources.append(s)
+                yield x, s
+            if not got_any:
+                skipped.append({"expno": expno,
+                                "why": bundle.read_errors.get(
+                                    expno, "raw data unreadable")})
+        if acq0 is None:
+            acq0 = {}
+        self.acq = acq0
+        self.sources = sources
+        self.skipped = skipped
+        self.n_rows = n
+        self.passes += 1
+
+
+def iter_analyzed_rows(res):
+    """Re-materialise a block's per-row analyses one at a time from its
+    row source: analyze_noise_row on every row, in order (deterministic,
+    so identical to the first pass). Used by consumers that need every
+    row's spectrum against something only known after the block analysis
+    (the exclusion's line window)."""
+    source = res.get("_source")
+    if source is None:
+        return
+    fs = float(res["fs_hz"])
+    f0_guess = res["_f0_guess"]
+    edge_hz = res["edge_hz"]
+    for x, _s in source:
+        yield analyze_noise_row(x, fs, f0_guess, edge_hz)
+
+
+def read_noise_group(bundle, exps):
+    """Rows of a same-parameter noise group in meta order, MATERIALISED:
+    (rows, acq, sources, skipped) with rows an (n, n_complex) array or
+    None when nothing was readable -- the pre-0.7.4 interface, kept for
+    callers that want the whole block at once. The report itself streams
+    (NoiseRowSource)."""
+    source = NoiseRowSource(bundle, exps)
+    all_rows = [x for x, _s in source]
     if not all_rows:
-        return None, (acq0 or {}), sources, skipped
-    return np.array(all_rows), acq0, sources, skipped
+        return None, (source.acq or {}), source.sources, source.skipped
+    return np.array(all_rows), source.acq, source.sources, source.skipped
 
 
 def analyze_noise_block(bundle, exps, f0_guess, fs_default):
@@ -1269,29 +1486,34 @@ def analyze_noise_block(bundle, exps, f0_guess, fs_default):
     (the Agilent Tier-1 layout of N single-row experiments)."""
     if isinstance(exps, dict):
         exps = [exps]
-    rows, acq, sources, skipped = read_noise_group(bundle, exps)
-    if rows is None:
-        return None
+    # PASS 1 (streaming, v0.7.4): one row in memory at a time. Per-row
+    # analysis and fits as before; the stacks are running sums in row
+    # order (the same sums np.mean over the stored rows formed), and only
+    # the FIRST row's spectra are kept (for the plots and the axis).
+    source = NoiseRowSource(bundle, exps)
     exp = exps[0]
-    fs = float(acq.get("SW_h", exp.get("sw_hz", fs_default)))
-    edge_hz = EDGE_FRAC * fs
-    expnos = []
-    for s in sources:
-        if s["expno"] not in expnos:
-            expnos.append(s["expno"])
-    out = {"expno": exp["expno"], "expnos": expnos,
-           "n_experiments": len(expnos), "fs_hz": fs,
-           "n_rows": int(rows.shape[0]),
-           "n_points_complex": int(rows.shape[1]),
-           "row_seconds": float(rows.shape[1] / fs),
-           "data_format": acq.get("_vendor", "bruker"),
-           "rg": float(exp.get("rg", acq.get("RG", 0)) or 0),
-           "edge_hz": edge_hz, "per_row": [], "_rows": []}
-    if acq.get("_vendor") == "agilent":
-        out["axis_sign_unverified"] = True
-    if skipped:
-        out["skipped_experiments"] = skipped
-    for x, src in zip(rows, sources):
+    out = None
+    fs = edge_hz = None
+    row0 = None
+    sum_all = None
+    sum_fit = None
+    n_fit = 0
+    for x, src in source:
+        if out is None:
+            acq = source.acq
+            fs = float(acq.get("SW_h", exp.get("sw_hz", fs_default)))
+            edge_hz = EDGE_FRAC * fs
+            out = {"expno": exp["expno"], "expnos": [],
+                   "n_experiments": 0, "fs_hz": fs,
+                   "n_rows": 0,
+                   "n_points_complex": int(x.size),
+                   "row_seconds": float(x.size / fs),
+                   "data_format": acq.get("_vendor", "bruker"),
+                   "rg": float(exp.get("rg", acq.get("RG", 0)) or 0),
+                   "edge_hz": edge_hz, "per_row": [],
+                   "_source": source, "_f0_guess": f0_guess}
+            if acq.get("_vendor") == "agilent":
+                out["axis_sign_unverified"] = True
         r = analyze_noise_row(x, fs, f0_guess, edge_hz)
         row = {"expno": src["expno"], "row_in_expno": src["row_in_expno"],
                "started_local": src["started_local"],
@@ -1320,7 +1542,31 @@ def analyze_noise_block(bundle, exps, f0_guess, fs_default):
         except Exception as exc:
             row["fit_error"] = str(exc)
         out["per_row"].append(row)
-        out["_rows"].append(r)
+        if row0 is None:
+            row0 = r
+            sum_all = np.array(r["pnorm"], dtype=np.float64, copy=True)
+        else:
+            sum_all += r["pnorm"]
+        if "fit" in row:
+            if sum_fit is None:
+                sum_fit = np.array(r["pnorm"], dtype=np.float64, copy=True)
+            else:
+                sum_fit += r["pnorm"]
+            n_fit += 1
+    if out is None:
+        return None
+    expnos = []
+    for s in source.sources:
+        if s["expno"] not in expnos:
+            expnos.append(s["expno"])
+    out["expnos"] = expnos
+    out["n_experiments"] = len(expnos)
+    out["n_rows"] = int(source.n_rows)
+    if source.skipped:
+        out["skipped_experiments"] = source.skipped
+    out["_row0"] = row0
+    out["_stack_all"] = {"f": row0["f"],
+                         "avg": sum_all / float(source.n_rows)}
     # Co-add of the normalized PSDs, two ways. (1) The UNALIGNED stack:
     # the rows at their recorded frequencies, fitted at the seed -- the
     # estimate that no per-row choice can bias. (2) The drift-aligned
@@ -1337,11 +1583,10 @@ def analyze_noise_block(bundle, exps, f0_guess, fs_default):
     # gate passes, the outcome-based SUSPECT check compares the two
     # co-adds (amplitude ratio, width ratio, railed widths) as the
     # second guard.
-    fitted = [(rr, pr) for rr, pr in zip(out["_rows"], out["per_row"])
-              if "fit" in pr]
+    fitted = [(None, pr) for pr in out["per_row"] if "fit" in pr]
     if fitted:
-        stack = np.mean([rr["pnorm"] for rr, _ in fitted], axis=0)
-        f_axis = fitted[0][0]["f"]
+        stack = sum_fit / float(n_fit)
+        f_axis = row0["f"]
         unaligned = None
         try:
             u_popt, u_perr, _ssr, _n = fit_line(f_axis, stack, f0_guess,
@@ -1371,16 +1616,8 @@ def analyze_noise_block(bundle, exps, f0_guess, fs_default):
         feature_sign = None
         if unaligned is not None:
             feature_sign = 1 if ua >= 0 else -1
-            sigs = []
-            for rr, pr in fitted:
-                npe_u, _off = matched_filter_npe(rr["f"], rr["pnorm"], uw,
-                                                 uf0, edge_hz)
-                i_u = int(np.argmin(np.abs(rr["f"] - uf0)))
-                pr["npe_at_stack_line"] = float(npe_u[i_u])
-                sigs.append(pr["npe_at_stack_line"])
-            median_sig = feature_sign * float(np.median(sigs))
-        gate_fired = (median_sig is not None
-                      and median_sig < ALIGN_MIN_ROW_NSIGMA)
+            for _rr, pr in fitted:
+                pr["npe_at_stack_line"] = None      # filled in pass 2
         # the aligned co-add: CONFIDENT per-row centers only (>=3 sigma
         # amplitude of the majority sign, center error < FWHM/2); rows
         # without one get the confident rows' weighted mean shift
@@ -1404,12 +1641,48 @@ def analyze_noise_block(bundle, exps, f0_guess, fs_default):
         else:
             mean_shift = f0_guess
         out["coadd_n_rows_self_aligned"] = int(np.count_nonzero(conf))
-        df = fitted[0][0]["df"]
+        df = row0["df"]
         grid = np.arange(-COADD_HALF_HZ, COADD_HALF_HZ + df / 2, df)
         acc = np.zeros_like(grid)
-        for (rr, pr), g in zip(fitted, conf):
-            shift = pr["fit"]["center_hz"] if g else mean_shift
+        # PASS 2 (streaming): the rows are re-read and re-analysed (the
+        # per-row analysis is deterministic) for the two quantities that
+        # need every fitted row's spectrum AFTER the stack is known -- its
+        # matched-filter significance at the stack's line and its
+        # contribution to the drift-aligned co-add. Same row order, so
+        # the same sums.
+        conf_by_row = {}
+        k_fit = 0
+        for k, pr in enumerate(out["per_row"]):
+            if "fit" in pr:
+                conf_by_row[k] = conf[k_fit]
+                k_fit += 1
+        sigs = []
+        k = -1
+        for k, (x, _src) in enumerate(source):
+            if k >= len(out["per_row"]):
+                raise RuntimeError("noise block re-read yielded more rows "
+                                   "(%d+) than the first pass (%d)"
+                                   % (k + 1, len(out["per_row"])))
+            pr = out["per_row"][k]
+            if "fit" not in pr:
+                continue
+            rr = analyze_noise_row(x, fs, f0_guess, edge_hz)
+            if unaligned is not None:
+                npe_u, _off = matched_filter_npe(rr["f"], rr["pnorm"], uw,
+                                                 uf0, edge_hz)
+                i_u = int(np.argmin(np.abs(rr["f"] - uf0)))
+                pr["npe_at_stack_line"] = float(npe_u[i_u])
+                sigs.append(pr["npe_at_stack_line"])
+            shift = pr["fit"]["center_hz"] if conf_by_row[k] else mean_shift
             acc += np.interp(grid, rr["f"] - shift, rr["pnorm"])
+        if k + 1 != len(out["per_row"]):
+            raise RuntimeError("noise block re-read yielded %d rows, the "
+                               "first pass %d: the data changed under the "
+                               "report" % (k + 1, len(out["per_row"])))
+        if unaligned is not None:
+            median_sig = feature_sign * float(np.median(sigs))
+        gate_fired = (median_sig is not None
+                      and median_sig < ALIGN_MIN_ROW_NSIGMA)
         avg = acc / len(fitted)
         out["_coadd"] = {"grid": grid, "avg": avg}
         popt, perr, ssr, npts = fit_line(grid, avg, 0.0, search_hz=15.0)
@@ -1856,11 +2129,11 @@ def _block_features(res, f0_local, w_ref):
     [{window_hz, excess, width_hz, is_spin}]. DC and band edges are
     excluded; 'is_spin' tags features within 3 linewidths of the
     block's expected line position."""
-    rows = res.get("_rows") or []
-    if not rows:
+    st = res.get("_stack_all")
+    if not st:
         return []
-    f = rows[0]["f"]
-    stack = np.mean([rr["pnorm"] for rr in rows], axis=0)
+    f = st["f"]
+    stack = st["avg"]
     edge = res.get("edge_hz") or 0.45 * res.get("fs_hz", 12000.0)
     core = (np.abs(f) < edge) & (np.abs(f) > CATALOG_DC_EXCLUDE_HZ)
     if not np.any(core):
@@ -2023,23 +2296,32 @@ def subvirial_pass(bundle, exps, f0_local, w_ref, fs_default):
     if isinstance(exps, dict):
         exps = [exps]
     exp = exps[0]
-    rows, acq, _sources, _skipped = read_noise_group(bundle, exps)
-    if rows is None or rows.shape[0] == 0:
-        return None
-    fs = float(acq.get("SW_h", exp.get("sw_hz", fs_default)))
-    n = int(rows.shape[1])
-    if n < 4096:
-        return None
-    # truncate each row to the largest power of two: real console TDs
-    # often carry large prime factors, which push numpy's FFT onto the
-    # slow Bluestein path (minutes per row instead of seconds). The
-    # resolution loss is < 2x and irrelevant for a candidate list.
-    n = 1 << (n.bit_length() - 1)
-    win = np.hanning(n)
-    ps = np.zeros(n)
-    for x in rows:
+    source = NoiseRowSource(bundle, exps)
+    fs = None
+    n = None
+    win = None
+    ps = None
+    count = 0
+    for x, _s in source:            # streaming: one row at a time
+        if ps is None:
+            acq = source.acq
+            fs = float(acq.get("SW_h", exp.get("sw_hz", fs_default)))
+            n = int(x.size)
+            if n < 4096:
+                return None
+            # truncate each row to the largest power of two: real console
+            # TDs often carry large prime factors, which push numpy's FFT
+            # onto the slow Bluestein path (minutes per row instead of
+            # seconds). The resolution loss is < 2x and irrelevant for a
+            # candidate list.
+            n = 1 << (n.bit_length() - 1)
+            win = np.hanning(n)
+            ps = np.zeros(n)
         ps += np.abs(np.fft.fftshift(np.fft.fft(x[:n] * win))) ** 2
-    ps /= float(rows.shape[0])
+        count += 1
+    if ps is None:
+        return None
+    ps /= float(count)
     f = np.fft.fftshift(np.fft.fftfreq(n, 1.0 / fs))
     df = fs / n
     # coarse baseline: chunked medians, interpolated
@@ -2083,7 +2365,7 @@ def subvirial_pass(bundle, exps, f0_local, w_ref, fs_default):
         i = j + 1
     cands.sort(key=lambda c: -c["excess_nsigma"])
     return {"expno": exp["expno"], "resolution_hz": df,
-            "n_rows": int(rows.shape[0]), "sigma_norm": float(sig),
+            "n_rows": int(count), "sigma_norm": float(sig),
             "n_candidates": len(cands),
             "candidates": cands[:SUBVIRIAL_MAX_LISTED],
             "note": (
@@ -2847,15 +3129,14 @@ def axion_exclusion(meta, noise_res, refs, detection, floor_cal, ladder,
     spec = meta.get("spectrometer") or {}
     cal = meta.get("calibration") or {}
     f_mhz = spec.get("observe_freq_mhz") or spec.get("h1_freq_mhz")
-    if noise_res is None or not noise_res.get("_rows"):
+    if noise_res is None or not noise_res.get("_source"):
         out["reason"] = "no readable noise block"
         return out
     if not f_mhz:
         out["reason"] = ("meta.json declares no observe/h1 frequency: no "
                          "mass coordinate")
         return out
-    rows = noise_res["_rows"]
-    n_rows = len(rows)
+    n_rows = int(noise_res.get("n_rows") or 0)
     if n_rows < 2:
         out["reason"] = ("one noise row: no record-to-record scatter for "
                          "the statistical term")
@@ -2961,17 +3242,32 @@ def axion_exclusion(meta, noise_res, refs, detection, floor_cal, ladder,
                 if detected and detection.get("line_center_hz") is not None
                 else f0_line)
     half = max(EXCL_WINDOW_MIN_HZ, EXCL_WINDOW_FWHM_MULT * (w_noise or 0.0))
-    f = rows[0]["f"]
-    df = float(rows[0]["df"])
+    r0 = noise_res["_row0"]
+    f = r0["f"]
+    df = float(r0["df"])
     win = np.abs(f - f_center) <= half
-    exc = []
-    for rr in rows:
+    # one streaming pass over the rows (re-analysed from the row source):
+    # the window is only known here, after detection
+    exc_sum = None
+    per_row_p = []
+    base_medians = []
+    for rr in iter_analyzed_rows(noise_res):
         e = (rr["pnorm"] - 1.0) * rr["base"]
         if rr["f"].shape != f.shape or rr["f"][0] != f[0]:
             e = np.interp(f, rr["f"], e)
-        exc.append(e[win])
-    exc = np.array(exc)
-    mean_exc = exc.mean(axis=0)
+        ew = e[win]
+        if exc_sum is None:
+            exc_sum = np.array(ew, dtype=np.float64, copy=True)
+        else:
+            exc_sum += ew
+        per_row_p.append(np.sum(ew) * df)
+        base_medians.append(np.median(rr["base"][win]))
+    if len(per_row_p) != n_rows:
+        out["reason"] = ("noise block re-read yielded %d rows, the block "
+                         "analysis %d: the data changed under the report"
+                         % (len(per_row_p), n_rows))
+        return out
+    mean_exc = exc_sum / float(len(per_row_p))
     p_pos = float(np.sum(np.clip(mean_exc, 0.0, None)) * df)
     p_net = float(np.sum(mean_exc) * df)
     p_abs = float(np.sum(np.abs(mean_exc)) * df)
@@ -2980,7 +3276,7 @@ def axion_exclusion(meta, noise_res, refs, detection, floor_cal, ladder,
     win_frac = ((2.0 / math.pi) * math.atan(2.0 * half / w_noise)
                 if w_noise else 1.0)
     p_line = p_abs / win_frac
-    per_row_p = exc.sum(axis=1) * df
+    per_row_p = np.array(per_row_p)
     sigma_stat = float(np.std(per_row_p, ddof=1) / math.sqrt(n_rows))
     sigma_tot = math.sqrt(sigma_stat ** 2
                           + (ESTIMATOR_BANDWIDTH_REL * p_line) ** 2)
@@ -2988,7 +3284,7 @@ def axion_exclusion(meta, noise_res, refs, detection, floor_cal, ladder,
     p90 = p_line + t90 * sigma_tot
     floor = floor_cal.get("noise_floor_counts2perhz_at_noise_rg")
     if not floor:
-        floor = float(np.mean([np.median(rr["base"][win]) for rr in rows]))
+        floor = float(np.mean(base_medians))
     if detected and fit is not None:
         feature = "bump" if fit["amp_norm"] > 0 else "dip"
     else:
@@ -4860,6 +5156,13 @@ def qa_flags(bundle, meta, noise_res, validation_msgs):
     if not sw.get("run_mode"):
         prov_detail += (" -- run_mode undeclared: cannot verify this bundle "
                         "is not a software test; treated as live data")
+    pv = meta.get("program_version")
+    if isinstance(pv, str) and pv.startswith("<function"):
+        prov_detail += (" -- program_version is a function repr (%s): the "
+                        "TopSpin API exports a PROGRAM_VERSION function that "
+                        "overwrote the script's constant on the console "
+                        "(v0.7.3 and earlier, fixed in v0.7.4); "
+                        "software.script_version governs" % pv[:40])
     add("OK" if prov_ok else "WARN", "software provenance", prov_detail)
     # validator messages that were warnings
     for m in validation_msgs:
@@ -4922,8 +5225,8 @@ def make_figures(noise_res, refs, ladder, detection):
         ax.set_title(title)
         figs["coadd"] = fig_to_b64(fig)
 
-    if noise_res and noise_res.get("_rows"):
-        r0 = noise_res["_rows"][0]
+    if noise_res and noise_res.get("_row0"):
+        r0 = noise_res["_row0"]
         fig, ax = plt.subplots(figsize=(7.2, 3.4))
         ax.semilogy(r0["f"], r0["psd"], color=C_DATA, lw=0.5,
                     label="row 1 PSD")
@@ -6196,9 +6499,10 @@ def main(argv=None):
         # calibrated upper limit at the reference-anchored position
         # (shifted by the headline sweep step's measured offset when the
         # headline block is a field-stepped one)
-        r0 = noise_res["_rows"][0]
-        # co-add unaligned (no feature to align on)
-        stack = np.mean([rr["pnorm"] for rr in noise_res["_rows"]], axis=0)
+        r0 = noise_res["_row0"]
+        # co-add unaligned (no feature to align on): the running stack
+        # over all rows
+        stack = noise_res["_stack_all"]["avg"]
         ul, ul_details = upper_limit_at(
             r0["f"], stack, f0_detect,
             [max(0.5 * w_ref, 2.0), w_ref, 2.0 * w_ref])

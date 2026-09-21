@@ -54,6 +54,7 @@ for RUN in "legacy simulate" "legacy desktest" "ts44 desktest" \
            "ts44-stale desktest" "ts44-strict desktest" \
            "ts44-f1echo desktest" "ts44-dimlie desktest" \
            "ts44-f1route desktest" "ts44-f1mismatch desktest" \
+           "legacy-2dtemplate desktest" \
            "legacy desktest rdopt sweep autostep" \
            "ts44-strict desktest rdopt sweep autostep"; do
     set -- $RUN
@@ -163,7 +164,7 @@ echo "--- static checks ---"
 python3 "$TESTING/static_check.py"
 
 echo ""
-echo "JYTHON HARNESS: ALL PASS (simulate + desktest x 8 console flavors"
+echo "JYTHON HARNESS: ALL PASS (simulate + desktest x 9 console flavors"
 echo "                + selftest"
 echo "                + packer round-trip"
 echo "                + clock-offset recovery: realism, powered, null,"

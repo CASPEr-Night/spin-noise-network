@@ -2,7 +2,7 @@
 
 Operational script for the remote supervised pilot: we screen-share (or
 NoMachine) into the facility's TopSpin workstation while a local colleague
-sits at the console. `topspin/spin_noise_run.py` (v0.7.3) has not yet run a
+sits at the console. `topspin/spin_noise_run.py` (v0.7.4) has not yet run a
 full session on a real spectrometer. Its live contacts so far are two
 unsupervised desktests at Torino (TopSpin 4.4.0): the first (2026-09-17)
 stopped on a namespace bug fixed in v0.7.2; the second (2026-09-18, v0.7.2)
@@ -93,7 +93,7 @@ console. Contact for everything: John W. Blanchard, jwbquantum@gmail.com.
    the title bar matches what they reported; probe string (`edhead` or
    status bar); console (`ii` info / `uxnmr.info` if handy). Note all three
    in the pilot log.
-3. **SIMULATE run first (10 min).** With any ¹H dataset open:
+3. **SIMULATE run first (10 min).** With a **1D** ¹H dataset open:
    `xpy spin_noise_run simulate`. Walk the full dialog chain aloud —
    greeting shows `*** SIMULATE MODE ***`, then facility → slug → contact
    consent → sample (H₂O fraction!) → VT → duration → lock → sweep

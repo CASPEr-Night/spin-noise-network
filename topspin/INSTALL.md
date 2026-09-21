@@ -36,8 +36,10 @@ operator dialog when missing).
 
 1. Fill a 5 mm tube with water — tap, distilled, or D2O-doped, whatever
    you have. **You will record what it is; nothing is "wrong".** ~550 µL.
-2. Insert the sample and open **any existing ¹H dataset** (a PROTON demo
-   set is fine). The script only uses it as a parameter template.
+2. Insert the sample and open **an existing 1D ¹H dataset** (a PROTON demo
+   set is fine). The script only uses it as a parameter template; since
+   v0.7.4 it sets the dimensionality of every dataset it creates itself,
+   but a 1D template is the clean start.
 3. In the TopSpin command line type:
 
    ```
@@ -104,8 +106,13 @@ step-by-step checklist with pass criteria is
 
 ## Troubleshooting
 
-- **"No dataset is open"** — open any ¹H dataset first; it is the
+- **"No dataset is open"** — open a 1D ¹H dataset first; it is the
   parameter template.
+- **The gain-ladder acquisitions run far longer than a few seconds each
+  (script v0.7.3 or earlier)** — the dataset you had open was a 2D one, and
+  the script's 1D experiments inherited its row count (seen in Torino's
+  desktest bundle, 2026-09-21). Stop the run, open a 1D ¹H dataset and start
+  again. v0.7.4 switches the setup expno and the rungs to 1D itself.
 - **Pulse program not found at zg** — copy `pp/zgnoise2d` into
   `<TSHOME>/exp/stan/nmr/lists/pp/user/` by hand and rerun; the script
   will detect it.
