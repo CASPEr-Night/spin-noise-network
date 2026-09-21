@@ -121,8 +121,12 @@ AUTOSTEP = False          # True (with SWEEP): TIER-2 programmatic field
 
 # Single source of truth for the script version.  KEEP IN SYNC with the
 # repository VERSION file (testing/static_check.py enforces the match).
-SCRIPT_VERSION  = "0.7.3"
-PROGRAM_VERSION = SCRIPT_VERSION  # alias kept for meta.json 'program_version'
+SCRIPT_VERSION  = "0.7.4"
+# NOTE: no module constant named PROGRAM_VERSION -- TopSpin's TopCmds
+# exports a FUNCTION of that name and `from TopCmds import *` (below)
+# overwrote the alias, so v0.7.3 bundles carry "<function PROGRAM_VERSION
+# at 0x3>" as program_version (Torino, 2026-09-21). meta.json takes
+# SCRIPT_VERSION directly.
 # This TopSpin orchestrator still writes schema 1.2 bundles (the last
 # Bruker-only schema).  The repository schema is 2.0 (vendor-neutral:
 # vendor enum + instrument blocks, written by packer/pack_bundle.py);
@@ -717,6 +721,16 @@ def script_self_sha256():
         except NameError:
             path = None
         if path is None or not os.path.isfile(path):
+            # xpy executes the script without __file__ (Torino: script_sha256
+            # "unavailable"); the prescribed install path is the fallback.
+            path = None
+            home = find_tshome()
+            if home:
+                cand = os.path.join(home, "exp", "stan", "nmr", "py", "user",
+                                    "spin_noise_run.py")
+                if os.path.isfile(cand):
+                    path = cand
+        if path is None:
             return "unavailable"
         if IN_TOPSPIN:
             return sha256_file(path)
@@ -3511,7 +3525,7 @@ def main():
     dsname = "SPINNOISE_" + time.strftime("%Y%m%d_%H%M", time.localtime())
     meta = {
         "schema_version": SCHEMA_VERSION,
-        "program_version": PROGRAM_VERSION,
+        "program_version": SCRIPT_VERSION,
         "software": {
             "script_version": SCRIPT_VERSION,
             "schema_version": SCHEMA_VERSION,
@@ -3592,6 +3606,14 @@ def main():
     say("expno %d: setup (tune, shim, calibrate)" % EXP_SETUP)
     cd = open_expno(template, dsname, EXP_SETUP)
     setup_dir = ds_path(cd)
+    # The template is whatever dataset the operator had open -- a 2D one
+    # at Torino's first desktest (2026-09-21) -- and WR() copies its
+    # dimensionality. The setup expno, and the gain-ladder rungs seeded
+    # from it, must be 1D: before v0.7.4 a 2D template made every rung a
+    # multi-row zg. The copied raw data goes first, so the switch never
+    # concerns a file.
+    clear_raw_data(setup_dir)
+    make_1d()
     putpar("PULPROG", "zg")
     set_common_acq(o1_hz, TD_LADDER, SWH_HZ, 1, D1_REF_S)
 
@@ -3690,11 +3712,18 @@ def main():
     meta["calibration"]["p90_us"] = p90_us
     # Schema types this field number/string, never null: a legacy console
     # with unreadable PLdB1/PL1 plus a blank dialog answer must not
-    # produce a bundle that fails --selftest after a completed run.
+    # produce a bundle that fails --selftest after a completed run.  The
+    # value carries its UNIT and the parameter it came from ("-11.79 dB
+    # (PLdB 1)"): the report refuses a bare number as ambiguous between
+    # dB and watts, and the Agilent driver already writes "%g dB (tpwr)".
+    # The source tag names the parameter only when the operator kept the
+    # pre-filled reading; an overtyped value is labelled as theirs.
     if p90_db is None:
         meta["calibration"]["p90_power_db_or_w"] = "unknown"
+    elif db_par and db_now is not None and p90_db == db_now:
+        meta["calibration"]["p90_power_db_or_w"] = "%g dB (%s)" % (p90_db, db_par)
     else:
-        meta["calibration"]["p90_power_db_or_w"] = p90_db
+        meta["calibration"]["p90_power_db_or_w"] = "%g dB (operator-entered)" % p90_db
     clock_block_end(cb)
     record_experiment(meta, EXP_SETUP, "setup", t0, now_local(), 1)
 
@@ -3717,6 +3746,7 @@ def main():
     while i < len(EXP_LADDER):
         expno = EXP_LADDER[i]
         cd = open_expno(template, dsname, expno)
+        make_1d()                # inherited from the setup expno; verifies
         putpar("PULPROG", "zg")
         set_common_acq(o1_hz, TD_LADDER, SWH_HZ, 1, D1_REF_S)
         set_small_flip(p90_us, p90_db, db_par)

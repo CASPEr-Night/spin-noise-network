@@ -327,7 +327,7 @@ def GETPAR(name, axis=0):
 
 def GETACQUDIM():
     """Acquisition dimensionality of the current dataset (documented API)."""
-    if FLAVOR[0] == "legacy":
+    if FLAVOR[0].startswith("legacy"):
         raise NameError("GETACQUDIM")           # old TopSpin: no such command
     if FLAVOR[0] == "ts44-dimlie":
         LOG.append(("GETACQUDIM", u"1"))

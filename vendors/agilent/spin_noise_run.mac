@@ -206,7 +206,7 @@ if ($# < 1) then
   write('file',$ans,'  },')
   write('file',$ans,'  "calibration": {')
   write('file',$ans,'    "p90_us": %g,',$p90)
-  write('file',$ans,'    "p90_power_db_or_w": "tpwr %g dB",',tpwr)
+  write('file',$ans,'    "p90_power_db_or_w": "%g dB (tpwr)",',tpwr)
   write('file',$ans,'    "topshim_ok": false,')
   write('file',$ans,'    "rg_ladder": [')
   write('file',$ans,'      {"expno": 10, "rg": %g, "tip_deg": %g},',$ladlin1,$reftip)

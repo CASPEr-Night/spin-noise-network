@@ -59,7 +59,11 @@ import topspin_stub
 
 # Console flavors the stub models (see topspin_stub.py, FLAVOR).
 FLAVORS = ("legacy", "ts44", "ts44-stale", "ts44-strict", "ts44-f1echo",
-           "ts44-dimlie", "ts44-f1route", "ts44-f1mismatch")
+           "ts44-dimlie", "ts44-f1route", "ts44-f1mismatch",
+           "legacy-2dtemplate")
+# legacy-2dtemplate: the operator's template dataset is 2D (Torino's first
+# desktest, 2026-09-21) -- the setup expno and the ladder rungs must be
+# switched to 1D by the script, the probe to 2D; no dialogs anywhere.
 
 
 def build_world(workdir):
@@ -256,7 +260,10 @@ def main():
         confirm_answers = CONFIRM_ANSWERS_STRICT
     elif flavor in ("ts44-f1route", "ts44-f1mismatch"):
         confirm_answers = CONFIRM_ANSWERS_F1
-    topspin_stub.configure(template, TEMPLATE_PARAMS,
+    template_params = dict(TEMPLATE_PARAMS)
+    if flavor == "legacy-2dtemplate":
+        template_params["PARMODE"] = u"1"       # a 2D dataset was open
+    topspin_stub.configure(template, template_params,
                            DIALOG_ANSWERS, SELECT_ANSWERS,
                            confirm_answers, flavor=flavor)
 
@@ -522,7 +529,34 @@ def main():
                                 unverified_min=0, c2d=0, cf1=2, msg=1,
                                 notice=u"no further step expected", pm="1",
                                 acqudim=2),
+        "legacy-2dtemplate": dict(form="name", f1form="1 TD", failed=[],
+                                  verified=1, src="getpar", already_min=3,
+                                  unverified_min=0, c2d=0, cf1=0, msg=0,
+                                  notice=None, pm="1", acqudim=None),
     }[flavor]
+    # Every dataset must have the dimensionality its role needs at
+    # acquisition time, whatever the template was: the stub's parameter
+    # store is inspected per expno (PARMODE ordinal "0"/"1" or name).
+    _one_d_roles = ("setup", "rg_ladder", "rdopt_scan", "sweep_verify",
+                    "sweep_signcal")
+    _bad_dims = []
+    for _e, _role in zip(expected_expnos, expected_roles):
+        _pm = topspin_stub._PARAMS.get(os.path.join(name_dir, str(_e)),
+                                        {}).get("PARMODE")
+        _is1d = _pm in (u"0", u"1D")
+        if (_role in _one_d_roles) != _is1d:
+            _bad_dims.append("expno %d (%s): PARMODE=%r" % (_e, _role, _pm))
+    check("dimensionality: 1D roles are 1D and pseudo-2D roles are 2D at "
+          "acquisition, whatever the template was", not _bad_dims,
+          "; ".join(_bad_dims))
+    _n_pm_writes = len([1 for a, s in _log
+                        if a == "PUTPAR" and s.startswith(u"PARMODE = ")])
+    if flavor == "legacy":
+        check("PARMODE written exactly once (the probe's 2D; setup already 1D)",
+              _n_pm_writes == 1, "writes %d" % _n_pm_writes)
+    elif flavor == "legacy-2dtemplate":
+        check("PARMODE written exactly twice (setup -> 1D, probe -> 2D)",
+              _n_pm_writes == 2, "writes %d" % _n_pm_writes)
     check("param_api[%s]: PARMODE path == %r" % (flavor, _E["form"]),
           _pa.get("parmode_form") == _E["form"], repr(_pa.get("parmode_form")))
     check("param_api[%s]: F1 TD path == %r" % (flavor, _E["f1form"]),
