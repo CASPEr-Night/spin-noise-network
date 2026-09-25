@@ -9,8 +9,10 @@
 # Requires: jython (2.7.x) and python3 on PATH.
 #
 # For each mode (simulate, desktest) and console flavor (HARNESS_TS_FLAVOR:
-# legacy 2.x/3.x, or the strict TopSpin 4.4.0 parameter validation seen at
-# Torino on 2026-09-18 in three variants -- see testing/topspin_stub.py) it:
+# legacy 2.x/3.x, the strict TopSpin 4.4.0 parameter validation seen at
+# Torino on 2026-09-18 in its variants, the 2D template of Torino's first
+# desktest, and the TopSpin 3.7.0 seen at Oulu on 2026-09-25 that never
+# creates the F1 parameter file acqu2 -- see testing/topspin_stub.py) it:
 #   1. runs jython_entry.py, which execfile()'s the REAL script unmodified
 #      with topspin_stub.py registered as the TopCmds module -- so the
 #      script runs its IN_TOPSPIN=1 paths: real java.util.zip bundling,
@@ -42,12 +44,15 @@ TESTING="$REPO/testing"
 command -v jython >/dev/null || { echo "ERROR: jython not on PATH"; exit 2; }
 command -v python3 >/dev/null || { echo "ERROR: python3 not on PATH"; exit 2; }
 
-# Eleven end-to-end variants: the two plain modes on the legacy console
+# Fourteen end-to-end variants: the two plain modes on the legacy console
 # model, the desktest under seven TopSpin 4.4 fault flavors (strict F1
 # map; F1 map stale until RE(); enum name rejected -> one scripted operator
 # step; F1 readback echoing the direct TD; lying dimensionality readback;
 # F1 write routed to the direct TD; F1 readback off by one -- see
-# testing/topspin_stub.py), plus desktest with the optional rdopt + sweep
+# testing/topspin_stub.py), the desktest with a 2D template, both plain
+# modes on the Oulu TopSpin 3.7.0 model that never creates acqu2 (the
+# v0.7.4 script fails those two with stray console dialogs and lost
+# parameter writes), plus desktest with the optional rdopt + sweep
 # features on under legacy AND the strict flavor (structure/dialog/meta
 # coverage -- mock modes exercise the flow, not the physics).
 for RUN in "legacy simulate" "legacy desktest" "ts44 desktest" \
@@ -55,6 +60,7 @@ for RUN in "legacy simulate" "legacy desktest" "ts44 desktest" \
            "ts44-f1echo desktest" "ts44-dimlie desktest" \
            "ts44-f1route desktest" "ts44-f1mismatch desktest" \
            "legacy-2dtemplate desktest" \
+           "legacy-noacqu2 simulate" "legacy-noacqu2 desktest" \
            "legacy desktest rdopt sweep autostep" \
            "ts44-strict desktest rdopt sweep autostep"; do
     set -- $RUN
@@ -163,10 +169,19 @@ echo ""
 echo "--- static checks ---"
 python3 "$TESTING/static_check.py"
 
+# Report QA flags: the param_api lines (0.7.5 keys present / absent /
+# operator / mismatch) and 'rows declared vs read' from a short ser or a
+# 1D fid under a pseudo-2D meta.json -- what Oulu's console would have
+# produced live.  See test_report_qa_flags.py.
 echo ""
-echo "JYTHON HARNESS: ALL PASS (simulate + desktest x 9 console flavors"
+echo "--- report QA flags (test_report_qa_flags) ---"
+python3 "$TESTING/test_report_qa_flags.py" --out-dir "$CLOCKWORK/qaflags"
+
+echo ""
+echo "JYTHON HARNESS: ALL PASS (simulate + desktest x 10 console flavors"
 echo "                + selftest"
 echo "                + packer round-trip"
 echo "                + clock-offset recovery: realism, powered, null,"
 echo "                  DE discrimination"
-echo "                + static)"
+echo "                + static"
+echo "                + report QA flags)"

@@ -104,11 +104,16 @@ covers ~10 GB), set the shared token, and hand facilities the endpoint + token p
 ## Status and known caveats
 
 - **Not yet run live on Bruker hardware.** The script has been executed end-to-end
-  under a real Jython 2.7 interpreter with a stubbed TopSpin API modelling eight
+  under a real Jython 2.7 interpreter with a stubbed TopSpin API modelling ten
   console behaviours — simulate and desktest modes, bundle validated by the uploader
   (`testing/run_jython_harness.sh`) — and has completed DESKTEST inside TopSpin 4.4.0
   at a partner facility (Torino, 17–18 September 2026), where two console-specific
-  faults were found and fixed in v0.7.2 and v0.7.3; it has not yet acquired a full
+  faults were found and fixed in v0.7.2 and v0.7.3, and inside TopSpin 3.7.0
+  (Oulu, 25 September 2026), where a third — the console did not create the F1
+  parameter file `acqu2` and silently dropped every parameter write into the
+  2D datasets — was found and fixed in v0.7.5; Torino's first live attempt
+  (22 September 2026, v0.7.3, TopSpin 4.4.0, 1D template) met the same fault,
+  with `zg` refusing the 2D datasets, so no data was acquired; it has not yet acquired a full
   live session. The Agilent/VnmrJ path has run three real sessions (SIU Carbondale).
   Every TopSpin call is pinned to
   Bruker's *Python Programming in TopSpin* manual, with operator-dialog fallbacks

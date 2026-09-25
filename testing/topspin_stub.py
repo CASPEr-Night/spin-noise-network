@@ -64,6 +64,8 @@ BREACHES = []     # hardware-guard breaches: XCMD/ZG reached (harness: FAIL)
 ERRMSGS = []      # every ERRMSG (a crash dialog in a clean run: FAIL)
 MSGS = []         # every MSG (title, message)
 PUTPAR_FAILURES = []   # (name, value, message) per PUTPAR the stub rejected
+STRAY_DIALOGS = []     # console dialogs the API popped on its own (text as
+                       # TopSpin 3.7.0 shows it); the harness fails on any
 
 # Console flavor the stub models (HARNESS_TS_FLAVOR).  Common to ALL
 # flavors, per Bruker's documentation and public TopSpin scripts: PARMODE
@@ -100,8 +102,50 @@ PUTPAR_FAILURES = []   # (name, value, message) per PUTPAR the stub rejected
 #   "ts44-f1mismatch": GETPAR("1 TD") returns rows-1 after an accepted
 #                   write; bounded operator loop (two confirmations), then
 #                   F1 TD writes are trusted silently.
-#   In "legacy", GETACQUDIM does not exist (old TopSpin), so the
-#   GETPAR("PARMODE") ordinal path is what gets exercised there.
+#   "legacy-noacqu2": the name under which TopSpin 3.7.0 as observed at
+#                   Oulu (Avance III HD 500, 2026-09-25, v0.7.4 simulate
+#                   + desktest) was first modelled: PUTPAR("PARMODE",
+#                   "2D") accepted and read back, but NO F1 parameter
+#                   file acqu2 created (the operator's template was 1D;
+#                   Oulu's bundle has no acqu2 in any expno), the
+#                   console's own dialog once per run -- "The requested
+#                   format file is invalid: .../12/acqu2: getpar: No such
+#                   file or directory" -- and EVERY parameter write into
+#                   the dataset silently lost (the pseudo-2D blocks read
+#                   back the TD/RG/PULPROG inherited from the 1D setup
+#                   expno with putpar_failures 0).  Torino's first LIVE
+#                   run (Avance Neo 400, TopSpin 4.4.0, 2026-09-22,
+#                   v0.7.3, 1D template; evidence read 2026-09-25) showed
+#                   the SAME mechanism on 4.4.0: PARMODE 2D accepted and
+#                   in the audit trail, no acqu2, the F1 PUTPAR("1 TD")
+#                   popping that dialog (Java: Cmd.putPar -> PeParams
+#                   .setParameterValue -> ... initializeParameters ->
+#                   MfrException) with NO exception reaching Jython, the
+#                   audit trail empty after the PARMODE change while
+#                   TD/RG/PULPROG were written (lost on disk, not a stale
+#                   readback), and zg refusing each block ("inconsistent
+#                   PARMODE 2D: Parameter set acqu2 ... Unable to open
+#                   file .../11/acqu2").  Since then this is the model
+#                   for EVERY flavor (below), and legacy-noacqu2 differs
+#                   from legacy only in having GETACQUDIM (Oulu:
+#                   acqudim_readback 2).  The v0.7.4 script fails every
+#                   1D-template flavor: stray dialogs, wrong TD/RG/PULPROG
+#                   in the pseudo-2D blocks, no acqu2 in the bundle.
+#   In "legacy" and "legacy-2dtemplate", GETACQUDIM does not exist (old
+#   TopSpin), so the GETPAR("PARMODE") ordinal path is what gets
+#   exercised there.
+# F1 parameter FILES -- the observed consoles (3.7.0 Oulu, 4.4.0 Torino)
+# are the model for ALL flavors: no console creates acqu2 on a scripted
+# PARMODE write.  While a dataset says 2D and has no acqu2, a GETPAR or
+# PUTPAR with the F1 prefix (or axis=1) records a STRAY_DIALOG and
+# returns/raises nothing, and EVERY PUTPAR into that dataset (PARMODE
+# itself excepted: the transition took on both consoles) is dropped
+# without an exception.  Once acqu2 exists -- WR copied it along from a
+# dataset that had one, the script created it (its v0.7.5 fallback), or
+# the operator's own parmode made it (the 'make dataset 2D' CONFIRM side
+# effect, as TopSpin's parmode does) -- the dataset behaves as its flavor
+# says, the ts44-* F1 quirks included, and an accepted PUTPAR "1 TD"
+# keeps acqu2's TD in step the way TopSpin's putpar writes the file.
 # A rejected PUTPAR raises a Java exception, as the console does
 # (bruker.bio.root.except.MfrException), and is recorded in
 # PUTPAR_FAILURES: on the console each one is a stray error dialog,
@@ -129,7 +173,7 @@ def configure(current_dataset, template_params, dialog_answers,
               select_answers, confirm_answers=None, flavor="legacy"):
     """Install the per-run fixture and reset all logs."""
     del LOG[:], UNSCRIPTED[:], BREACHES[:], ERRMSGS[:], MSGS[:]
-    del PUTPAR_FAILURES[:]
+    del PUTPAR_FAILURES[:], STRAY_DIALOGS[:]
     _F1_FRESH.clear()
     FLAVOR[0] = flavor
     _PARAMS.clear()
@@ -203,6 +247,91 @@ def _params_for(dsdir):
     return _PARAMS[dsdir]
 
 
+def _is_2d(params):
+    return params.get("PARMODE") in (u"1", u"2D")
+
+
+def _has_acqu2(dsdir):
+    return os.path.isfile(os.path.join(dsdir, "acqu2"))
+
+
+def _existing_fnmode(acqu2_path, default=u"0"):
+    """FnMODE as an existing acqu2 states it, or default when the file or
+    the line is absent."""
+    if not os.path.isfile(acqu2_path):
+        return default
+    v = default
+    f = open(acqu2_path, "r")
+    try:
+        for ln in f.readlines():
+            if ln.startswith("##$FnMODE="):
+                v = _u(ln[len("##$FnMODE="):].strip())
+    finally:
+        f.close()
+    return v
+
+
+def _write_f1_files(dsdir, params):
+    """Write acqu2 (+ pdata/1/proc2) the way TopSpin's OWN parmode does
+    (the operator's step: a CONFIRM side effect), or bring acqu2's TD in
+    step after an accepted PUTPAR "1 TD" on a dataset that has the file
+    (TopSpin's putpar writes the file).  NEVER called for a scripted
+    PARMODE write: no console creates the file there -- TopSpin 3.7.0
+    (Oulu, 2026-09-25) and 4.4.0 (Torino, live 2026-09-22) both left the
+    dataset 2D without it.
+
+    An acqu2 that already exists keeps its FnMODE: putpar edits the one
+    parameter it was given, and parmode does not regenerate an F1 set the
+    dataset already has -- so the mode a 2D template carried survives WR,
+    the PARMODE switch and the '1 TD' write, exactly as on the console,
+    and the script has to normalise it itself (the harness asserts that
+    on legacy-2dtemplate).  A file the console creates from nothing says
+    0, as TopSpin's own defaults do."""
+    if not os.path.isdir(dsdir):
+        return
+    td1 = params.get("1 TD", u"256")
+    acqu2 = os.path.join(dsdir, "acqu2")
+    fnmode = _existing_fnmode(acqu2)
+    f = open(acqu2, "w")
+    f.write("##TITLE= Parameter file, TopSpin (harness stub)\n"
+            "##JCAMPDX= 5.0\n"
+            "##DATATYPE= Parameter Values\n"
+            "##ORIGIN= Bruker BioSpin GmbH\n"
+            "##OWNER= harness\n"
+            "##$TD= %s\n"
+            "##$FnMODE= %s\n"
+            "##$SW_h= 5000\n"
+            "##$NUC1= <1H>\n"
+            "##END=\n" % (_b(td1), _b(fnmode)))
+    f.close()
+    pdir = os.path.join(dsdir, "pdata", "1")
+    if not os.path.isdir(pdir):
+        os.makedirs(pdir)
+    if not os.path.isfile(os.path.join(pdir, "proc2")):
+        f = open(os.path.join(pdir, "proc2"), "w")
+        f.write("##TITLE= Parameter file, TopSpin (harness stub)\n"
+                "##JCAMPDX= 5.0\n##DATATYPE= Parameter Values\n"
+                "##ORIGIN= Bruker BioSpin GmbH\n##OWNER= harness\n"
+                "##$SI= 256\n##$MC2= 0\n##END=\n")
+        f.close()
+    LOG.append(("F1FILES", u"%s (TD %s)" % (_u(dsdir), _u(td1))))
+
+
+def _f1_broken(dsdir, params):
+    """A dataset that says 2D but has no acqu2 -- on EVERY flavor: TopSpin
+    3.7.0 (Oulu) and 4.4.0 (Torino) both left it so after a scripted
+    PARMODE write, and both lost every write into it."""
+    return _is_2d(params) and not _has_acqu2(dsdir)
+
+
+def _stray_dialog(dsdir, api, name):
+    text = (u"The requested format file is invalid: %s/acqu2: getpar: "
+            u"No such file or directory" % _u(dsdir))
+    STRAY_DIALOGS.append((api, _u(name), text))
+    LOG.append(("STRAY-DIALOG", u"%s %s" % (api, _u(name))))
+    _say("STRAY CONSOLE DIALOG (%s %s): %s" % (api, name, text))
+
+
 def _copy_tree(src, dst):
     if not os.path.isdir(dst):
         os.makedirs(dst)
@@ -249,14 +378,19 @@ def CONFIRM(title=None, message=""):
         t = _u(title)
         if FLAVOR[0] in ("ts44-strict", "ts44-dimlie") \
                 and u"make dataset 2D" in t:
-            _params_for(_dspath(_CUR[0]))["PARMODE"] = u"2D"
+            _dsd = _dspath(_CUR[0])
+            _params_for(_dsd)["PARMODE"] = u"2D"
             LOG.append(("OPERATOR", u"parmode -> 2D"))
+            _write_f1_files(_dsd, _params_for(_dsd))   # parmode makes them
         if FLAVOR[0] == "ts44-f1route" and u"set F1 TD" in t:
             import re as _re
             m = _re.search(r"to (\d+)\.", _u(message))
             if m:
-                _params_for(_dspath(_CUR[0]))["1 TD"] = _u(m.group(1))
+                _dsd = _dspath(_CUR[0])
+                _params_for(_dsd)["1 TD"] = _u(m.group(1))
                 LOG.append(("OPERATOR", u"1 td -> %s" % m.group(1)))
+                if _has_acqu2(_dsd):
+                    _write_f1_files(_dsd, _params_for(_dsd))
     return ans
 
 
@@ -306,6 +440,12 @@ def GETPAR(name, axis=0):
     dsdir = _dspath(_CUR[0])
     params = _params_for(dsdir)
     n = _u(name)
+    if (n.startswith(u"1 ") or axis == 1) and _f1_broken(dsdir, params):
+        # TopSpin 3.7.0 reads F1 parameters from the acqu2 FILE; with the
+        # file missing it shows its own error dialog and yields nothing.
+        _stray_dialog(dsdir, "GETPAR", n)
+        LOG.append(("GETPAR", u"%s = " % n))
+        return u""
     v = params.get(name, u"")
     if n == u"PARMODE":
         v = _PARMODE_TO_ORDINAL.get(v, v)     # consoles report the ORDINAL
@@ -327,7 +467,7 @@ def GETPAR(name, axis=0):
 
 def GETACQUDIM():
     """Acquisition dimensionality of the current dataset (documented API)."""
-    if FLAVOR[0].startswith("legacy"):
+    if FLAVOR[0] in ("legacy", "legacy-2dtemplate"):
         raise NameError("GETACQUDIM")           # old TopSpin: no such command
     if FLAVOR[0] == "ts44-dimlie":
         LOG.append(("GETACQUDIM", u"1"))
@@ -379,8 +519,25 @@ def PUTPAR(name, value):
     if _CUR[0] is None:
         raise RuntimeError("PUTPAR with no current dataset")
     dsdir = _dspath(_CUR[0])
-    _validate_putpar(name, value, dsdir)
     params = _params_for(dsdir)
+    if _u(name) != u"PARMODE" and _f1_broken(dsdir, params):
+        # Oulu 2026-09-25 (3.7.0) and Torino 2026-09-22 (4.4.0): on a 2D
+        # dataset without acqu2 every write is lost without an exception
+        # -- TD, RG, PULPROG and "1 TD" all read back the inherited values
+        # while putpar_failures stayed 0 (Torino's audit trail has no
+        # entry after the PARMODE change) -- and the F1 write is what
+        # popped the console's dialog at Torino (Cmd.putPar -> PeParams
+        # .setParameterValue -> ... initializeParametersForFamilyIfNeeded).
+        # Only the PARMODE transition itself had taken.  Checked BEFORE the
+        # flavor quirks: those describe F1 access on a dataset that HAS
+        # its file.
+        if _u(name).startswith(u"1 "):
+            _stray_dialog(dsdir, "PUTPAR", _u(name))
+        LOG.append(("PUTPAR-DROPPED", u"%s = %s" % (_u(name), _u(value))))
+        _say("PUTPAR silently LOST (%s, no acqu2) [%s = %s]"
+             % (FLAVOR[0], name, value))
+        return
+    _validate_putpar(name, value, dsdir)
     if FLAVOR[0] == "ts44-f1route" and _u(name).startswith(u"1 "):
         params[_u(name)[2:]] = _u(value)      # prefix ignored on WRITE
         LOG.append(("PUTPAR", u"%s = %s (routed to %s)"
@@ -390,6 +547,12 @@ def PUTPAR(name, value):
     if _u(name) == u"PARMODE" and dsdir in _F1_FRESH:
         del _F1_FRESH[dsdir]                    # F1 map stale until RE()
     LOG.append(("PUTPAR", u"%s = %s" % (_u(name), _u(value))))
+    # A scripted PARMODE write creates NO F1 parameter file on any console
+    # observed (3.7.0 Oulu, 4.4.0 Torino): the transition takes, the file
+    # does not appear.  Only the operator's parmode (CONFIRM side effect)
+    # writes it; putpar "1 TD" updates a file that exists.
+    if _u(name) == u"1 TD" and _has_acqu2(dsdir):
+        _write_f1_files(dsdir, params)          # putpar writes the file
 
 
 # ---------------------------------------------------------------------------

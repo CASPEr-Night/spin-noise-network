@@ -545,6 +545,18 @@ class Bundle(object):
         self.vendor = str(self.meta.get("vendor") or "bruker").lower()
         self.read_errors = {}
         self.read_log = {}
+        # Pseudo-2D expnos whose data file does not hold the rows meta.json
+        # declares (expno -> declared / read / which file): a ser that
+        # stopped early, or a 1D fid where td1_rows > 1. meta.json records
+        # what the script WROTE; the file holds what the console ACQUIRED.
+        # Oulu (TopSpin 3.7.0, 2026-09-25) and Torino (TopSpin 4.4.0, live
+        # 2026-09-22): every parameter write into a 2D dataset without
+        # acqu2 was lost silently, so a live run on such a console produces
+        # exactly this shape of bundle -- or no data file at all, when zg
+        # refuses the dataset as it did at Torino. qa_flags turns
+        # each entry into a WARN; the reader itself keeps reading the rows
+        # that are present, as before (the numbers do not change).
+        self.rows_declared_vs_read = {}
         self._procpar_cache = {}
 
     def has(self, name):
@@ -796,9 +808,7 @@ class Bundle(object):
             finally:
                 fh.close()
             if count and count < n_rows:
-                note = ("ser holds %d of the %d rows meta.json declares "
-                        "(acquisition stopped early); the rows present "
-                        "were read" % (count, n_rows))
+                note = self._rows_short_note(expno, n_rows, count, "ser")
         else:
             raw = self.read(path)
             v = np.frombuffer(raw[:row_bytes], dtype=dt).astype(np.float64)
@@ -808,6 +818,8 @@ class Bundle(object):
             row = v[0::2] + 1j * v[1::2]
             n_pts = int(row.size)
             yield row
+            if n_rows > 1 and not is_ser:
+                note = self._rows_short_note(expno, n_rows, 1, "fid")
         if not count:
             self._refuse(expno, "ser shorter than one TD=%d row" % td)
             return
@@ -818,6 +830,25 @@ class Bundle(object):
         if note:
             entry["note"] = note
         self.read_log[int(expno)] = entry
+
+    def _rows_short_note(self, expno, declared, read, data_file):
+        """Record (rows_declared_vs_read) and word the read_log note for a
+        pseudo-2D expno whose data file holds fewer rows than meta.json's
+        td1_rows: a ser that stopped early, or a plain 1D fid where a
+        pseudo-2D block was declared (a console that lost the script's
+        parameter writes acquires the inherited 1D experiment -- a 2D
+        dataset without acqu2 on TopSpin 3.7.0 at Oulu, 2026-09-25, and
+        on 4.4.0 at Torino, 2026-09-22). The rows present are read as
+        before; qa_flags raises the WARN."""
+        self.rows_declared_vs_read[int(expno)] = {
+            "declared": int(declared), "read": int(read), "file": data_file}
+        if data_file == "fid":
+            return ("a 1D fid (1 row) was found where meta.json declares %d "
+                    "rows (td1_rows): the block was not acquired as the "
+                    "pseudo-2D it declares; the one row was read" % declared)
+        return ("ser holds %d of the %d rows meta.json declares "
+                "(acquisition stopped early); the rows present "
+                "were read" % (read, declared))
 
     def _read_rows_bruker(self, expno, exp_meta):
         acq = self.acqus(expno)
@@ -867,11 +898,19 @@ class Bundle(object):
         if not rows:
             self._refuse(expno, "ser shorter than one TD=%d row" % td)
             return None, acq
+        note = None
+        if is_ser and n_rows > 1 and len(rows) < n_rows:
+            note = self._rows_short_note(expno, n_rows, len(rows), "ser")
+        elif not is_ser and n_rows > 1:
+            note = self._rows_short_note(expno, n_rows, 1, "fid")
         rows = np.array(rows)
-        self.read_log[int(expno)] = {
+        entry = {
             "format": "bruker", "dtype": str(dt),
             "n_rows": int(rows.shape[0]), "n_points_complex": int(rows.shape[1]),
             "dc_offset_subtracted": False}
+        if note:
+            entry["note"] = note
+        self.read_log[int(expno)] = entry
         return rows, acq
 
     def _agilent_fid(self, expno):
@@ -5164,6 +5203,125 @@ def qa_flags(bundle, meta, noise_res, validation_msgs):
                         "(v0.7.3 and earlier, fixed in v0.7.4); "
                         "software.script_version governs" % pv[:40])
     add("OK" if prov_ok else "WARN", "software provenance", prov_detail)
+    # TopSpin parameter dialect (software.param_api, orchestrator 0.7.3+):
+    # what the console did when the script set up its pseudo-2D datasets.
+    # Oulu (TopSpin 3.7.0, 2026-09-25) and Torino (TopSpin 4.4.0, live run
+    # 2026-09-22): PARMODE 2D was accepted but the console never created
+    # the F1 parameter file acqu2, the console popped its "format file is
+    # invalid ... acqu2" dialog (at Torino from the F1 TD write, with no
+    # exception reaching the script) and every parameter write into those
+    # datasets was silently lost -- the v0.7.4 desktest bundle's pseudo-2D
+    # blocks carried the 1D setup expno's TD/RG/PULPROG, and Torino's live
+    # zg refused the datasets outright ("inconsistent PARMODE 2D ...
+    # acqu2").  Since 0.7.5 the script creates the file itself and reads
+    # TD/RG back; both are reported here so a bundle from such a console
+    # can be judged at a glance.
+    pa = sw.get("param_api") if isinstance(sw.get("param_api"), dict) else None
+    if pa is not None and ("f1_files_created" in pa
+                           or "acq_write_mismatch" in pa):
+        f1_src = pa.get("f1_files_source") or ""
+        f1_n = int(pa.get("f1_files_created") or 0)
+        mism = int(pa.get("acq_write_mismatch") or 0)
+        rows_ok = pa.get("f1_td_verified") == 1
+        if mism > 0:
+            add("WARN", "TopSpin parameter writes",
+                "%d TD/RG write(s) did not take on this console even after a "
+                "reload and a rewrite (last: %s) -- the affected block was "
+                "acquired with the parameters the console held; check the "
+                "recorded td/rg against the role" % (
+                    mism, pa.get("last_acq_write_mismatch") or "?"))
+        else:
+            add("OK", "TopSpin parameter writes",
+                "TD and RG read back as written for every block")
+        if f1_src == "operator":
+            add("WARN", "TopSpin F1 parameter file",
+                "this console did not create acqu2 when the dataset became "
+                "2D and no parameter set to copy it from was found; the "
+                "operator's parmode was asked for (f1_files_created=%d). "
+                "Row count %s" % (f1_n, "verified by readback" if rows_ok
+                                  else "NOT verified -- check td1_rows "
+                                  "against the ser size"))
+        else:
+            # FnMODE normalisation (0.7.5): the F1 files the pseudo-2D
+            # blocks acquired with were set to 0 (undefined) by file edit
+            # -- the script's own copy and any file a dataset inherited
+            # from a 2D template or a sibling expno; the count and the
+            # first file's original value are recorded.
+            fn_edits = int(pa.get("f1_fnmode_edits") or 0)
+            fn_note = ""
+            if fn_edits:
+                fn_note = ("; FnMODE set to 0 (undefined, Bruker's rule for "
+                           "a pulse program without an mc statement) by file "
+                           "edit in %d F1 file(s), the first of which carried "
+                           "%r" % (fn_edits, pa.get("f1_fnmode_copied") or ""))
+            if f1_n or f1_src:
+                add("OK", "TopSpin F1 parameter file",
+                    "console did not create acqu2 for its first pseudo-2D "
+                    "dataset (TopSpin 3.7.0 at Oulu, 2026-09-25, and 4.4.0 "
+                    "at Torino, 2026-09-22, both do this); the script "
+                    "created it %d time(s) from %s and the later datasets "
+                    "inherited it; row count %s%s"
+                    % (f1_n, f1_src, "verified by readback" if rows_ok
+                       else "not verified", fn_note))
+            else:
+                add("OK", "TopSpin F1 parameter file",
+                    "created by the console itself (the operator's parmode) "
+                    "or inherited from a 2D template -- the script never "
+                    "needed to copy one%s" % fn_note)
+    # Rows declared vs read (0.7.5). meta.json's td1_rows is the row count
+    # the script WROTE (and, where the console allowed, read back); the
+    # data file holds what the console ACQUIRED. Oulu (TopSpin 3.7.0,
+    # 2026-09-25): every parameter write into a 2D dataset without acqu2
+    # was lost silently, so a live run there would have produced a 1D
+    # fid -- or a ser of the wrong length -- under a meta.json declaring
+    # 89 rows; Torino's live run (TopSpin 4.4.0, 2026-09-22) lost the
+    # writes the same way and zg then refused the datasets, leaving NO
+    # raw data behind td1_rows 8/89/8 (an expno without a data file is
+    # the reader's FAIL above, not a row mismatch). Nothing in the script
+    # can see that after the fact; the bundle can. Every noise/reference
+    # expno the reader accepted is compared (a refused one is already a
+    # FAIL above); an Agilent fid whose block count disagrees lands in the
+    # same family.
+    row_roles = ("reference_open", "reference_close", "noise", "noise_sweep")
+    compared = 0
+    mismatched = 0
+    for exp in meta.get("experiments", []):
+        if exp.get("role") not in row_roles:
+            continue
+        expno = exp.get("expno")
+        declared = exp.get("td1_rows")
+        entry = bundle.read_log.get(expno)
+        if declared is None or entry is None or expno in bundle.read_errors:
+            continue
+        got = entry.get("n_rows")
+        try:
+            declared = int(declared)
+        except (TypeError, ValueError):
+            continue
+        compared += 1          # only an expno actually compared counts
+        if got == declared:
+            continue
+        mismatched += 1
+        short = bundle.rows_declared_vs_read.get(expno) or {}
+        if short.get("file") == "fid":
+            what = ("a 1D fid (1 row) was found -- the block was not "
+                    "acquired as the pseudo-2D it declares (a console that "
+                    "loses parameter writes acquires the inherited 1D "
+                    "experiment, or refuses zg outright: a 2D dataset "
+                    "without acqu2 on TopSpin 3.7.0 at Oulu, 2026-09-25, "
+                    "and 4.4.0 at Torino, 2026-09-22)")
+        elif short.get("file") == "ser":
+            what = ("ser holds %d row(s) (acquisition stopped early); the "
+                    "rows present were analysed" % got)
+        else:
+            what = "%s row(s) were read" % got
+        add("WARN", "rows declared vs read",
+            "meta.json declares %d rows for expno %d (%s), %s"
+            % (declared, expno, exp.get("role"), what))
+    if compared and not mismatched:
+        add("OK", "rows declared vs read",
+            "every noise/reference expno's data file holds the rows "
+            "meta.json declares (%d expno(s) compared)" % compared)
     # validator messages that were warnings
     for m in validation_msgs:
         if m.startswith("WARN"):
@@ -5417,7 +5575,43 @@ def render_html(ctx):
         A("</table><p class='small'>The plumbing that produced this bundle "
           "(dialog chain, dataset bookkeeping, meta.json, zip, checksums) "
           "was exercised end to end; that is all this report certifies."
-          "</p></div>")
+          "</p>")
+        # The console's parameter dialect (software.param_api) belongs on
+        # the desktest page: Oulu's v0.7.4 desktest (TopSpin 3.7.0,
+        # 2026-09-25) was where a console that never creates acqu2 and
+        # silently drops parameter writes first showed (Torino's live run
+        # on 4.4.0, 2026-09-22, did the same) -- in exactly this
+        # inventory, as td 16384 / rg 1.0 / pulprog zg2d on the pseudo-2D
+        # rows.  A live run must wait until these lines read clean.
+        pa = sw.get("param_api") if isinstance(sw.get("param_api"), dict) \
+            else None
+        if pa:
+            mism = int(pa.get("acq_write_mismatch") or 0)
+            f1_src = pa.get("f1_files_source") or ""
+            cls = "small"
+            if mism > 0 or f1_src == "operator" \
+                    or pa.get("f1_td_verified") != 1:
+                cls = "warn small"
+            A("<p class='%s'>Console parameter dialect (software.param_api): "
+              "PARMODE by %s, F1 TD by %s, rows %s (%s); F1 parameter file "
+              "acqu2: %s; TD/RG readback mismatches: %s; PUTPAR rejections: "
+              "%s.</p>"
+              % (cls, esc(pa.get("parmode_form") or "never written"),
+                 esc(pa.get("f1_td_form") or "never written"),
+                 "verified" if pa.get("f1_td_verified") == 1
+                 else "NOT verified",
+                 esc(pa.get("f1_td_readback_source") or "no readback"),
+                 esc("created by the script from %s (x%s)"
+                     % (f1_src, pa.get("f1_files_created"))
+                     if f1_src else
+                     ("created by the console" if "f1_files_created" in pa
+                      else "not recorded (script before 0.7.5)")),
+                 esc("%d (last: %s)" % (mism,
+                                        pa.get("last_acq_write_mismatch"))
+                     if mism else ("0" if "acq_write_mismatch" in pa
+                                   else "not recorded (script before 0.7.5)")),
+                 esc(str(pa.get("putpar_failures", "?")))))
+        A("</div>")
         # The clock audit is timestamp plumbing, not spin physics, so it IS
         # analyzed for software-test bundles -- the harness uses exactly
         # this to validate the offset fit against a known injected offset.

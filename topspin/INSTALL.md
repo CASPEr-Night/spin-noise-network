@@ -36,22 +36,38 @@ operator dialog when missing).
 
 1. Fill a 5 mm tube with water — tap, distilled, or D2O-doped, whatever
    you have. **You will record what it is; nothing is "wrong".** ~550 µL.
-2. Insert the sample and open **an existing 1D ¹H dataset** (a PROTON demo
-   set is fine). The script only uses it as a parameter template; since
-   v0.7.4 it sets the dimensionality of every dataset it creates itself,
-   but a 1D template is the clean start.
-3. In the TopSpin command line type:
+2. Insert the sample and, in this order, **lock, shim, tune** as you
+   usually do (lock on), then **lock OFF** and **BSMS field sweep OFF**.
+   The script calls `topshim` itself, but `topshim` refuses to run while
+   the lock is off (`lock is off: please lock in prior to shimming`) and
+   this protocol keeps the lock off, so its shimming dialog will appear:
+   you shimmed already — press OK.
+3. Open **an existing 1D ¹H dataset** (a PROTON demo set is fine). The
+   script only uses it as a parameter template; since v0.7.4 it sets the
+   dimensionality of every dataset it creates itself, but a 1D template
+   is the clean start. Either template works from v0.7.5: neither
+   TopSpin 3.7.0 nor 4.4.0 creates the F1 parameter file when a script
+   switches a dataset to 2D (Oulu and Torino, September 2026), so the
+   script brings `acqu2` from your template dataset if that is 2D, else
+   from another experiment of the session, else from the console's own
+   parameter library, and `meta.json` records which
+   (`software.param_api.f1_files_source`). In the F1 file it acquires
+   with — copied or inherited — it sets `FnMODE` to *undefined*,
+   Bruker's rule for a pulse program without an `mc` statement
+   (`f1_fnmode_edits` counts the files it edited).
+4. In the TopSpin command line type:
 
    ```
    xpy spin_noise_run
    ```
 
-4. Answer the dialogs (facility, sample, duration, and two **critical**
+5. Answer the dialogs (facility, sample, duration, and two **critical**
    confirmations: lock state and **BSMS field sweep OFF** — please
-   actually check `bsmsdisp`, this one matters).
-5. Walk away. Default total time is ~45 min (30 min noise block +
+   actually check `bsmsdisp`, this one matters), and press OK at the
+   shimming dialog (step 2).
+6. Walk away. Default total time is ~45 min (30 min noise block +
    setup/references). Overnight option available.
-6. A final dialog shows the path of the finished bundle zip
+7. A final dialog shows the path of the finished bundle zip
    (`spinnoise_<slug>_<timestamp>_<hex>.zip`) and the one-line upload
    command:
 
@@ -124,11 +140,25 @@ step-by-step checklist with pass criteria is
   written from a script by name; the old script wrote a number. Script
   v0.7.3 or later writes the documented name, verifies it, and does the
   first switch while you are still at the console (at the start of the
-  setup step), so at worst you type `parmode` once. On v0.7.2, do as the
-  dialog says — `parmode`, choose 2D, OK — once; TopSpin's own error
-  pop-up (not the script's request) then recurs at the noise block and
-  at the closing reference and may need closing. See
+  setup step), so at worst you type `parmode` in TopSpin (or use the
+  `eda` toolbar button *Change data dimensionality*), select 2D, once.
+  On v0.7.2, do as the dialog says — `parmode`, choose 2D, OK — once;
+  TopSpin's own error pop-up (not the script's request) then recurs at
+  the noise block and at the closing reference and may need closing. See
   `docs/TROUBLESHOOTING.md`.
+- **TopSpin shows `The requested format file is invalid:
+  .../SPINNOISE_<date>/<expno>/acqu2: getpar: No such file or directory`
+  (script v0.7.4 or earlier; TopSpin 3.7.0 at Oulu and 4.4.0 at Torino,
+  both with a 1D template)** — the console accepted the switch to 2D but
+  did not create the F1 parameter file `acqu2`, and while it was missing
+  every parameter write into that dataset was silently lost, with no
+  error reaching the script (the pseudo-2D blocks kept the 1D template's
+  TD/RG/pulse program); on 4.4.0 `zg` then refused each block with
+  `inconsistent PARMODE 2D ... acqu2` — answer the script's *acquisition
+  check* dialog with Cancel in that case. Do not run live with v0.7.4 on
+  such a console; v0.7.5 creates the file itself and reads TD and RG
+  back after writing. See `docs/TROUBLESHOOTING.md` for what to check in
+  `meta.json`.
 - **Script window shows a Jython error dialog** — the run stopped, but
   any acquisition already started finishes on its own and all data stays
   in `SPINNOISE_<date>_<time>`. Send the error text to the maintainers.

@@ -17,7 +17,9 @@
 #      injects its API into __builtin__, then execfile()'s the REAL
 #      topspin/spin_noise_run.py with sys.argv = ["spin_noise_run", MODE]
 #      -- exactly how `xpy spin_noise_run simulate` hands the mode over;
-#   3. after the run, verifies: no unscripted dialogs, no hardware-guard
+#   3. after the run, verifies: no unscripted dialogs, no stray console
+#      dialogs or silently lost parameter writes (the stub models both,
+#      per console flavor), no hardware-guard
 #      breaches, no ERRMSG/abort, the full expno tree, meta.json (twice,
 #      with run_mode == MODE and a real sha256 self-fingerprint), the
 #      installed pulse program, a java-zip-readable bundle, and the
@@ -60,14 +62,79 @@ import topspin_stub
 # Console flavors the stub models (see topspin_stub.py, FLAVOR).
 FLAVORS = ("legacy", "ts44", "ts44-stale", "ts44-strict", "ts44-f1echo",
            "ts44-dimlie", "ts44-f1route", "ts44-f1mismatch",
-           "legacy-2dtemplate")
+           "legacy-2dtemplate", "legacy-noacqu2")
 # legacy-2dtemplate: the operator's template dataset is 2D (Torino's first
 # desktest, 2026-09-21) -- the setup expno and the ladder rungs must be
 # switched to 1D by the script, the probe to 2D; no dialogs anywhere.
+# legacy-noacqu2: the name under which TopSpin 3.7.0 as seen at Oulu
+# (2026-09-25) was first modelled -- PARMODE 2D accepted but the console
+# never creates the F1 parameter file acqu2; until it exists every
+# parameter write is silently lost and the console pops its own dialog.
+# Torino's first live run (TopSpin 4.4.0, 2026-09-22) showed the same on
+# 4.4.0, so since then EVERY flavor models it (see topspin_stub.py) and
+# legacy-noacqu2 differs from legacy only by having GETACQUDIM.  On every
+# 1D-template flavor the script must create acqu2 itself (from the
+# console's own parameter library, exp/stan/nmr/par) at the attended
+# probe, BEFORE any F1 access, and later pseudo-2D datasets inherit the
+# file via WR(); no dialog anywhere, every write verified.
 
 
-def build_world(workdir):
-    """Create the template dataset and a fake TSHOME pp tree."""
+# The F1 parameter file the fake TopSpin home's standard parameter library
+# carries (exp/stan/nmr/par/COSYGPSW/acqu2 -- a 2D set every install has).
+# Small but well-formed JCAMP-DX: the script reads TD (and logs FnMODE)
+# from the copy it makes.  Its TD is deliberately NOT a row count the
+# session uses (8 / 89 / 179), so an F1 TD that merely came along with the
+# file can never pass as a verified write.
+PAR_ACQU2 = ("##TITLE= Parameter file, TopSpin 3.7.0\n"
+             "##JCAMPDX= 5.0\n"
+             "##DATATYPE= Parameter Values\n"
+             "##ORIGIN= Bruker BioSpin GmbH\n"
+             "##OWNER= nmr\n"
+             "##$TD= 256\n"
+             "##$FnMODE= 6\n"
+             "##$SW_h= 5000\n"
+             "##$NUC1= <1H>\n"
+             "##END=\n")
+PAR_PROC2 = ("##TITLE= Parameter file, TopSpin 3.7.0\n"
+             "##JCAMPDX= 5.0\n"
+             "##DATATYPE= Parameter Values\n"
+             "##ORIGIN= Bruker BioSpin GmbH\n"
+             "##OWNER= nmr\n"
+             "##$SI= 1024\n"
+             "##$MC2= 3\n"
+             "##END=\n")
+# The operator's template acqu2 (legacy-2dtemplate): the same shape with a
+# DIFFERENT non-zero FnMODE -- 5 (States-TPPI) against the library set's
+# 6 (echo-antiecho) -- so a value the script records can be traced to the
+# file it came from.  Every pseudo-2D expno of that flavor inherits this
+# file through WR (no copy is ever needed) and the script must set it to
+# 0 (undefined) in the session's expnos, while the operator's own dataset
+# keeps its 5.
+TEMPLATE_ACQU2 = PAR_ACQU2.replace("##$FnMODE= 6\n", "##$FnMODE= 5\n")
+
+
+def _fnmode_in(path):
+    """FnMODE as an acqu2 on disk states it: None when the line is absent,
+    "missing" when there is no file, "unreadable" when it cannot be read."""
+    if not os.path.isfile(path):
+        return "missing"
+    v = None
+    try:
+        fh = open(path, "r")
+        try:
+            for ln in fh.readlines():
+                if ln.startswith("##$FnMODE="):
+                    v = ln[len("##$FnMODE="):].strip()
+        finally:
+            fh.close()
+    except CATCHABLE:
+        return "unreadable"
+    return v
+
+
+def build_world(workdir, flavor="legacy"):
+    """Create the template dataset and a fake TSHOME (pp tree + the
+    standard parameter library)."""
     datadir = os.path.join(workdir, "nmrdata")
     template_dir = os.path.join(datadir, "WATERTEST", "1")
     pdata_dir = os.path.join(template_dir, "pdata", "1")
@@ -113,11 +180,39 @@ def build_world(workdir):
     f.write("1H template for the Jython harness\n")
     f.close()
 
+    if flavor == "legacy-2dtemplate":
+        # A 2D dataset carries its F1 parameter files (Torino's template,
+        # 2026-09-21: acqu2/proc2 in every expno of that bundle).
+        f = open(os.path.join(template_dir, "acqu2"), "w")
+        f.write(TEMPLATE_ACQU2)                 # FnMODE 5: must not survive
+        f.close()                               # into the session's expnos
+        f = open(os.path.join(pdata_dir, "proc2"), "w")
+        f.write(PAR_PROC2)
+        f.close()
+
     # Fake TSHOME: find_pp_user_dir() requires .../lists/pp to exist and
-    # creates .../pp/user itself; TOPSPIN_HOME is one of its env probes.
+    # creates .../pp/user itself; TOPSPIN_HOME and XWINNMRHOME are two of
+    # its env probes (real consoles set XWINNMRHOME; both name the same
+    # directory here).  The standard parameter library exp/stan/nmr/par
+    # is part of every TopSpin install: the script's F1-file fallback
+    # copies acqu2 from a 2D set there when the console did not create
+    # it -- which no console does on a scripted PARMODE write (Oulu
+    # 3.7.0, Torino 4.4.0), so every 1D-template flavor whose switch is
+    # accepted uses it exactly once; the flavors that go through the
+    # operator's parmode, and the 2D template, must leave it UNUSED (the
+    # harness asserts f1_files_created per flavor).
     tshome = os.path.join(workdir, "tshome")
     os.makedirs(os.path.join(tshome, "exp", "stan", "nmr", "lists", "pp"))
+    pardir = os.path.join(tshome, "exp", "stan", "nmr", "par", "COSYGPSW")
+    os.makedirs(pardir)
+    f = open(os.path.join(pardir, "acqu2"), "w")
+    f.write(PAR_ACQU2)
+    f.close()
+    f = open(os.path.join(pardir, "proc2"), "w")
+    f.write(PAR_PROC2)
+    f.close()
     os.environ["TOPSPIN_HOME"] = tshome
+    os.environ["XWINNMRHOME"] = tshome
 
     return datadir, tshome
 
@@ -252,7 +347,7 @@ def main():
 
     print "harness: mode=%s features=%s flavor=%s workdir=%s" \
         % (mode, ",".join(features) or "none", flavor, workdir)
-    datadir, tshome = build_world(workdir)
+    datadir, tshome = build_world(workdir, flavor)
 
     template = [u"WATERTEST", u"1", u"1", datadir.decode("utf-8")]
     confirm_answers = CONFIRM_ANSWERS
@@ -263,6 +358,7 @@ def main():
     template_params = dict(TEMPLATE_PARAMS)
     if flavor == "legacy-2dtemplate":
         template_params["PARMODE"] = u"1"       # a 2D dataset was open
+        template_params["1 TD"] = u"256"        # ... with its F1 TD (acqu2)
     topspin_stub.configure(template, template_params,
                            DIALOG_ANSWERS, SELECT_ANSWERS,
                            confirm_answers, flavor=flavor)
@@ -308,6 +404,51 @@ def main():
 
     check("script ran to completion without an uncaught exception",
           run_error is None, run_error or "")
+
+    # _set_fnmode_undefined edits ONE value of an acqu2 -- the copy the
+    # script made or the file a dataset inherited -- and nothing else:
+    # binary in and out, every line keeping its own terminator (a Windows
+    # console's Jython text mode would otherwise turn a whole LF file into
+    # CRLF), the absent line appended before ##END=, a file that already
+    # says 0 left alone byte for byte (changed 0: no RE for it).  A pure
+    # function of the file, so it is checked on every flavor against four
+    # fixtures written and read back as bytes; it returns (was, changed).
+    _fn_edit = script_globals.get("_set_fnmode_undefined")
+    _fn_cases = (
+        ("lf", "##TITLE= t\n##$TD= 4\n##$FnMODE= 6\n##END=\n",
+         "##TITLE= t\n##$TD= 4\n##$FnMODE= 0\n##END=\n", ("6", 1)),
+        ("crlf", "##TITLE= t\r\n##$TD= 4\r\n##$FnMODE= 6\r\n##END=\r\n",
+         "##TITLE= t\r\n##$TD= 4\r\n##$FnMODE= 0\r\n##END=\r\n", ("6", 1)),
+        ("absent", "##TITLE= t\n##$TD= 4\n##END=\n",
+         "##TITLE= t\n##$TD= 4\n##$FnMODE= 0\n##END=\n", ("", 1)),
+        ("already0", "##TITLE= t\r\n##$TD= 4\r\n##$FnMODE= 0\r\n##END=\r\n",
+         "##TITLE= t\r\n##$TD= 4\r\n##$FnMODE= 0\r\n##END=\r\n", ("0", 0)),
+    )
+    _fn_bad = []
+    _fn_dir = os.path.join(workdir, "fnmode_edit_check")
+    if not os.path.isdir(_fn_dir):
+        os.makedirs(_fn_dir)
+    for _tag, _src, _want, _was_want in _fn_cases:
+        _p = os.path.join(_fn_dir, "acqu2_%s" % _tag)
+        _got = None
+        _was = None
+        try:
+            _fh = open(_p, "wb")
+            _fh.write(_src)
+            _fh.close()
+            _was = _fn_edit(_p)
+            _fh = open(_p, "rb")
+            _got = _fh.read()
+            _fh.close()
+        except SCRIPT_ESCAPES:
+            _fn_bad.append("%s: %s" % (_tag, traceback.format_exc()[-300:]))
+            continue
+        if _got != _want or _was != _was_want:
+            _fn_bad.append("%s: got %r (was %r)" % (_tag, _got, _was))
+    check("_set_copied_fnmode_undefined edits only the FnMODE value: LF "
+          "and CRLF files keep their line endings byte for byte, an absent "
+          "line is added before ##END=, the source value is returned",
+          callable(_fn_edit) and not _fn_bad, "; ".join(_fn_bad)[:600])
     # The script's CATCHABLE must catch a Python exception under BOTH
     # conceivable TopSpin shadowing mechanisms: java.lang names installed
     # into the script's globals (modelled above for the whole run) or into
@@ -458,10 +599,18 @@ def main():
                      if a == "PUTPAR" and s.startswith(u"1 TD = ")])
     _n_get_f1 = len([1 for a, s in _log
                      if a == "GETPAR" and s.startswith(u"1 TD = ")])
+    # A CONFIRM the fixture had no answer for is not in LOG (the stub
+    # records it in UNSCRIPTED and answers OK), so it is counted here as
+    # well: a flavor's "dialog x0" must mean no dialog AT ALL, not merely
+    # none the fixture scripted.
+    _unscripted_confirms = [t for a, t in topspin_stub.UNSCRIPTED
+                            if a == "CONFIRM"]
     _n_confirm_2d = len([1 for a, s in _log
-                         if a == "CONFIRM" and u"make dataset 2D" in s])
+                         if a == "CONFIRM" and u"make dataset 2D" in s]) \
+        + len([1 for t in _unscripted_confirms if u"make dataset 2D" in t])
     _n_confirm_f1 = len([1 for a, s in _log
-                         if a == "CONFIRM" and u"set F1 TD" in s])
+                         if a == "CONFIRM" and u"set F1 TD" in s]) \
+        + len([1 for t in _unscripted_confirms if u"set F1 TD" in t])
     _n_msg_setup = len([1 for t, m in topspin_stub.MSGS
                         if t is not None and u"dataset setup on this console" in t])
     _notice = [s for a, s in _log
@@ -477,6 +626,21 @@ def main():
     check("param_api: putpar_failures == rejected PUTPARs seen by the stub "
           "(%d)" % len(_rej), _pa.get("putpar_failures") == len(_rej),
           repr(_pa.get("putpar_failures")))
+    # Oulu, 2026-09-25 (TopSpin 3.7.0): the console popped its OWN error
+    # dialog once per run ("The requested format file is invalid ...
+    # /12/acqu2: getpar: No such file or directory"); the trigger is not
+    # established, and the stub models it on any F1 GETPAR/PUTPAR on a 2D
+    # dataset without acqu2 -- the candidate the script can avoid.  Like a
+    # rejected PUTPAR, each one is a dialog the operator saw and possibly
+    # a modal stop in an unattended run: none is acceptable.
+    _stray = ["%s %s" % (a, n) for a, n, t in topspin_stub.STRAY_DIALOGS]
+    check("no stray console dialogs (the stub's model of the Oulu dialog: "
+          "F1 GETPAR/PUTPAR on a 2D dataset without acqu2, TopSpin 3.7.0)",
+          not _stray, "; ".join(_stray)[:400])
+    _dropped = [s for a, s in _log if a == "PUTPAR-DROPPED"]
+    check("no parameter write was silently lost by the console (PUTPAR on "
+          "a 2D dataset without acqu2)", not _dropped,
+          "; ".join(_dropped)[:400])
     check("param_api: every rejected parameter was probed EXACTLY once "
           "(no stray dialog repeats) and failed_forms has no duplicates",
           len(_rej) == len(set([r[0] for r in _rej]))
@@ -510,8 +674,11 @@ def main():
                             c2d=1, cf1=0, msg=1,
                             notice=u"no further step expected",
                             pm="1", acqudim=2),
-        "ts44-f1echo": dict(form="name", f1form="1 TD", failed=[], verified=0,
-                            src="", already_min=3, unverified_min=0,
+        # f1echo: GETPAR echoes the direct TD, which the script distrusts;
+        # the acqu2 FILE (kept in step with the accepted write by the
+        # console, as TopSpin's putpar does) is what verifies the rows.
+        "ts44-f1echo": dict(form="name", f1form="1 TD", failed=[], verified=1,
+                            src="acqu2", already_min=3, unverified_min=0,
                             c2d=0, cf1=0, msg=0, notice=None, pm="1",
                             acqudim=2),
         "ts44-dimlie": dict(form="operator", f1form="1 TD", failed=[],
@@ -533,7 +700,71 @@ def main():
                                   verified=1, src="getpar", already_min=3,
                                   unverified_min=0, c2d=0, cf1=0, msg=0,
                                   notice=None, pm="1", acqudim=None),
+        # Oulu: GETACQUDIM exists on 3.7.0 (acqudim_readback 2 in the
+        # bundle); the F1 files come from the parameter library once, at
+        # the probe; everything else must look like the legacy console.
+        "legacy-noacqu2": dict(form="name", f1form="1 TD", failed=[],
+                               verified=1, src="getpar", already_min=3,
+                               unverified_min=0, c2d=0, cf1=0, msg=0,
+                               notice=None, pm="1", acqudim=2),
     }[flavor]
+    # F1 parameter files (v0.7.5).  No console is known to create acqu2 on
+    # a scripted PARMODE write -- TopSpin 3.7.0 (Oulu, 2026-09-25) and
+    # 4.4.0 (Torino, live run 2026-09-22) both left the dataset 2D without
+    # it and dropped every write into it -- and the stub models every
+    # flavor that way.  So every 1D-template flavor whose scripted switch
+    # is ACCEPTED copies the file from the library exactly once, at the
+    # probe (expno 11; 12/13 inherit it via WR); the two flavors whose
+    # switch needs the operator (ts44-strict rejects the enum name,
+    # ts44-dimlie's readback lies) find the file TopSpin's OWN parmode
+    # made (the 'make dataset 2D' fixture side effect) and copy nothing;
+    # legacy-2dtemplate inherits the template's file everywhere.
+    _E["f1_created"] = 1
+    _E["f1_source"] = "par:COSYGPSW"
+    if flavor in ("ts44-strict", "ts44-dimlie", "legacy-2dtemplate"):
+        _E["f1_created"] = 0
+        _E["f1_source"] = ""
+    # FnMODE normalisation: every F1 file a pseudo-2D expno acquires with
+    # must say 0 (undefined -- Bruker's rule for a pulse program without
+    # an mc statement), set by file edit, never by PUTPAR.  Which files
+    # needed the edit follows from where the file came from:
+    #   * a library copy (the accepted-switch flavors): the fixture set
+    #     carries 6 -> one edit, value "6"; 12/13 inherit the edited file;
+    #   * TopSpin's own parmode (ts44-strict, ts44-dimlie): the console's
+    #     default file says 0 -> nothing to edit, value "";
+    #   * legacy-2dtemplate: expno 11 inherits the operator's template
+    #     acqu2 (FnMODE 5) via WR and is edited at the probe; 12/13 are
+    #     WR-copied from 11 after that -> exactly one edit, value "5".
+    _E["fn_edits"] = 1
+    _E["fn_copied"] = "6"
+    if flavor in ("ts44-strict", "ts44-dimlie"):
+        _E["fn_edits"] = 0
+        _E["fn_copied"] = ""
+    elif flavor == "legacy-2dtemplate":
+        _E["fn_copied"] = "5"
+    # RE reloads (param_api reload_ok), derived per flavor -- one per
+    # PARMODE write that took, one per operator step, one per F1 file the
+    # script copied or edited (a copy is normalised before its one RE):
+    #   legacy, ts44, ts44-stale, ts44-f1echo, legacy-noacqu2: the probe's
+    #     PARMODE switch + the library copy = 2 (the rdopt/sweep features
+    #     add only datasets that WR() already gives the right dimension);
+    #   ts44-strict: the rejected write reloads nothing, the operator's
+    #     parmode dialog reloads once = 1;
+    #   ts44-dimlie: the probe's write 1 + two operator confirmations 2;
+    #     the readback is unreliable from then on, so every later
+    #     set_parmode writes and reloads -- 4 ladder rungs -> 1D, the
+    #     re-opened 11, 12 and 13 -> 2D -- 7 more = 10;
+    #   ts44-f1route: 2 + one operator '1 td' at each of 11, 12, 13 = 5;
+    #   ts44-f1mismatch: 2 + the two bounded confirmations at the probe = 4;
+    #   legacy-2dtemplate: setup -> 1D, probe -> 2D, the FnMODE edit of the
+    #     inherited acqu2 = 3.
+    # Before the Torino evidence the accepted-switch flavors reloaded once
+    # (the console 'created' the file, so nothing was copied).
+    _E["reloads"] = {"legacy": 2, "ts44": 2, "ts44-stale": 2,
+                     "ts44-f1echo": 2, "legacy-noacqu2": 2,
+                     "ts44-strict": 1, "ts44-dimlie": 10,
+                     "ts44-f1route": 5, "ts44-f1mismatch": 4,
+                     "legacy-2dtemplate": 3}[flavor]
     # Every dataset must have the dimensionality its role needs at
     # acquisition time, whatever the template was: the stub's parameter
     # store is inspected per expno (PARMODE ordinal "0"/"1" or name).
@@ -549,9 +780,88 @@ def main():
     check("dimensionality: 1D roles are 1D and pseudo-2D roles are 2D at "
           "acquisition, whatever the template was", not _bad_dims,
           "; ".join(_bad_dims))
+    # What the pseudo-2D blocks would ACQUIRE with: Oulu's v0.7.4 bundle
+    # recorded td 16384 / rg 1.0 / pulprog zg2d for the noise block (the
+    # values inherited from the 1D setup expno) although the script had
+    # written 262144 / 101 / zgnoise2d -- a live run would have recorded
+    # pulsed 1.2 s rows instead of pulse-free 19 s ones.  Every recorded
+    # experiment must carry the parameters its role was given, and every
+    # pseudo-2D expno must carry acqu2 into the bundle.
+    try:
+        _mo = _jsonmod.loads(meta_text)
+    except CATCHABLE:
+        _mo = {}
+    _exps = {}
+    for _e in (_mo.get("experiments") or []):
+        _exps[_e.get("expno")] = _e
+    _cks = _mo.get("checksums") or {}
+    _two_d_roles = ("reference_open", "noise", "reference_close",
+                    "noise_sweep")
+    _want_pp = {"setup": "zg", "rg_ladder": "zg", "rdopt_scan": "zg",
+                "sweep_verify": "zg", "sweep_signcal": "zg",
+                "reference_open": "zg2d", "reference_close": "zg2d",
+                "noise": "zgnoise2d", "noise_sweep": "zgnoise2d"}
+    # RG: set_common_acq's 1, the ladder rungs 1/8/64/rga(101 mocked),
+    # max_rg/4 = 25.25 for the references, the mocked rga for the noise
+    # blocks, RDOPT_RG = 8 for the quick 1Ds of rdopt / sweep.
+    _want_rg = {"setup": 1.0, "reference_open": 25.25,
+                "reference_close": 25.25, "noise": 101.0,
+                "noise_sweep": 101.0, "rdopt_scan": 8.0,
+                "sweep_verify": 8.0, "sweep_signcal": 8.0}
+    _ladder_rg = {10: 1.0, 14: 8.0, 15: 64.0, 16: 101.0}
+    _bad_acq = []
+    _no_acqu2 = []
+    for _e, _role in zip(expected_expnos, expected_roles):
+        _x = _exps.get(_e)
+        if _x is None:
+            _bad_acq.append("expno %d (%s): not recorded" % (_e, _role))
+            continue
+        _td_want = 16384
+        if _role in _two_d_roles:
+            _td_want = 262144
+            if ("data/%d/acqu2" % _e) not in _cks:
+                _no_acqu2.append(_e)
+        _rg_want = _want_rg.get(_role)
+        if _role == "rg_ladder":
+            _rg_want = _ladder_rg.get(_e)
+        _problems = []
+        if _x.get("td") != _td_want:
+            _problems.append("td %r != %d" % (_x.get("td"), _td_want))
+        if _x.get("pulprog") != _want_pp.get(_role):
+            _problems.append("pulprog %r != %r"
+                             % (_x.get("pulprog"), _want_pp.get(_role)))
+        try:
+            _rg_ok = abs(float(_x.get("rg")) - _rg_want) < 1e-6
+        except CATCHABLE:
+            _rg_ok = 0
+        if not _rg_ok:
+            _problems.append("rg %r != %r" % (_x.get("rg"), _rg_want))
+        if _problems:
+            _bad_acq.append("expno %d (%s): %s"
+                            % (_e, _role, ", ".join(_problems)))
+    check("recorded acquisition parameters match what each role was given "
+          "(td, rg, pulprog per expno -- Oulu's pseudo-2D blocks did not)",
+          not _bad_acq, "; ".join(_bad_acq)[:600])
+    check("bundle checksums carry data/<expno>/acqu2 for every pseudo-2D "
+          "expno (Oulu's bundle had none)", not _no_acqu2,
+          "missing for expnos %r" % _no_acqu2)
+    _rgl = (_mo.get("calibration") or {}).get("rg_ladder") or []
+    _rgl_bad = []
+    for _r in _rgl:
+        _x = _exps.get(_r.get("expno"))
+        try:
+            if abs(float(_x.get("rg")) - float(_r.get("rg"))) > 1e-6:
+                _rgl_bad.append("expno %s: ladder %r vs recorded %r"
+                                % (_r.get("expno"), _r.get("rg"),
+                                   _x.get("rg")))
+        except CATCHABLE:
+            _rgl_bad.append("expno %s: unreadable" % _r.get("expno"))
+    check("calibration.rg_ladder agrees with experiments[] RG (the mocked "
+          "rga writes RG like the real one)", bool(_rgl) and not _rgl_bad,
+          "; ".join(_rgl_bad))
     _n_pm_writes = len([1 for a, s in _log
                         if a == "PUTPAR" and s.startswith(u"PARMODE = ")])
-    if flavor == "legacy":
+    if flavor in ("legacy", "legacy-noacqu2"):
         check("PARMODE written exactly once (the probe's 2D; setup already 1D)",
               _n_pm_writes == 1, "writes %d" % _n_pm_writes)
     elif flavor == "legacy-2dtemplate":
@@ -579,6 +889,83 @@ def main():
           _pa.get("parmode_readback") == _E["pm"]
           and _pa.get("acqudim_readback") == _E["acqudim"],
           repr((_pa.get("parmode_readback"), _pa.get("acqudim_readback"))))
+    check("param_api[%s]: F1 files created by the script == %d, source %r"
+          % (flavor, _E["f1_created"], _E["f1_source"]),
+          _pa.get("f1_files_created") == _E["f1_created"]
+          and _pa.get("f1_files_source") == _E["f1_source"],
+          repr((_pa.get("f1_files_created"), _pa.get("f1_files_source"))))
+    check("param_api[%s]: f1_fnmode_edits == %d, f1_fnmode_copied == %r "
+          "(F1 files set to FnMODE 0 by file edit; the value the first of "
+          "them carried)" % (flavor, _E["fn_edits"], _E["fn_copied"]),
+          _pa.get("f1_fnmode_edits") == _E["fn_edits"]
+          and _pa.get("f1_fnmode_copied") == _E["fn_copied"],
+          repr((_pa.get("f1_fnmode_edits"), _pa.get("f1_fnmode_copied"))))
+    check("param_api[%s]: dataset reloaded (RE) exactly %d time(s) -- see "
+          "the derivation in the expectation table"
+          % (flavor, _E["reloads"]),
+          _pa.get("reload_ok") == _E["reloads"], repr(_pa.get("reload_ok")))
+    check("param_api[%s]: every verified acquisition write took "
+          "(acq_write_mismatch 0)" % flavor,
+          _pa.get("acq_write_mismatch") == 0
+          and _pa.get("last_acq_write_mismatch") == "",
+          repr((_pa.get("acq_write_mismatch"),
+                _pa.get("last_acq_write_mismatch"))))
+    # The F1 parameter file on disk, for EVERY pseudo-2D expno of the
+    # session and whatever its source (library copy, TopSpin's own
+    # parmode, a 2D template): present; parameter files only -- a status
+    # file (acqu2s / proc2s) describes acquired data and a copied one
+    # would be the library set's; FnMODE 0 (undefined, Bruker's rule for a
+    # pulse program without an mc statement), set by file edit before RE
+    # and never through PUTPAR.
+    _two_d_expnos = [e for e, r in zip(expected_expnos, expected_roles)
+                     if r not in _one_d_roles]
+    _no_f1 = [e for e in _two_d_expnos
+              if not os.path.isfile(os.path.join(name_dir, str(e),
+                                                 "acqu2"))]
+    check("acqu2 present on disk in every pseudo-2D expno %r (%s)"
+          % (_two_d_expnos, flavor), not _no_f1, "missing in %r" % _no_f1)
+    _stray_status = [e for e in _two_d_expnos
+                     if os.path.isfile(os.path.join(name_dir, str(e),
+                                                    "acqu2s"))
+                     or os.path.isfile(os.path.join(
+                         name_dir, str(e), "pdata", "1", "proc2s"))]
+    check("no status file (acqu2s / proc2s) beside acqu2 in any pseudo-2D "
+          "expno (%s)" % flavor, not _stray_status,
+          "status files in %r" % _stray_status)
+    _fn_bad = []
+    for e in _two_d_expnos:
+        _v = _fnmode_in(os.path.join(name_dir, str(e), "acqu2"))
+        if _v != "0":
+            _fn_bad.append("expno %d: FnMODE %r" % (e, _v))
+    check("acqu2 reads FnMODE 0 (undefined) in every pseudo-2D expno (%s)"
+          % flavor, not _fn_bad, "; ".join(_fn_bad))
+    _fn_putpar = [s for a, s in _log
+                  if a in ("PUTPAR", "PUTPAR-DROPPED", "PUTPAR-REJECTED")
+                  and u"FnMODE" in s]
+    check("FnMODE was never written through PUTPAR (file edit only; %s)"
+          % flavor, not _fn_putpar, "; ".join(_fn_putpar))
+    if _E["f1_created"]:
+        # Exactly one copy: the probe's expno 11 gets acqu2 from the
+        # library; 12 and 13 are WR()-copied from a dataset that has the
+        # file, so the first F1 TD write (probe) must precede WR 12.
+        _i_f1 = [k for k, (a, s) in enumerate(_log)
+                 if a == "PUTPAR" and s.startswith(u"1 TD = ")]
+        _i_wr12 = [k for k, (a, s) in enumerate(_log)
+                   if a == "WR" and s.endswith(u"/12")]
+        check("param_api[%s]: the first F1 TD write (probe, expno 11) "
+              "precedes the WR of expno 12 (12 inherits the file)" % flavor,
+              bool(_i_f1) and (not _i_wr12 or _i_f1[0] < _i_wr12[0]),
+              "first '1 TD' write at %r, WR 12 at %r"
+              % (_i_f1[:1], _i_wr12[:1]))
+    if flavor == "legacy-2dtemplate":
+        # The template's acqu2 (FnMODE 5) travels into every expno via
+        # WR; the probe's expno 11 is the one the script edits (asserted
+        # above: one edit, value "5", one RE), 12 and 13 are WR-copied from
+        # it afterwards.  The operator's own dataset is never touched.
+        _tpl_fn = _fnmode_in(os.path.join(datadir, "WATERTEST", "1",
+                                          "acqu2"))
+        check("legacy-2dtemplate: the operator's template acqu2 is untouched "
+              "(still FnMODE 5)", _tpl_fn == "5", repr(_tpl_fn))
     check("param_api[%s]: 'make dataset 2D' dialog x%d, 'set F1 TD' dialog "
           "x%d" % (flavor, _E["c2d"], _E["cf1"]),
           _n_confirm_2d == _E["c2d"] and _n_confirm_f1 == _E["cf1"],
