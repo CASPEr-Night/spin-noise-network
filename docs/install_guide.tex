@@ -58,7 +58,7 @@
 \large (Bruker / TopSpin)}
 \author{John W. Blanchard (\href{mailto:jwbquantum@gmail.com}{jwbquantum@gmail.com})
 \and Reza Ebadi \and Claude (Anthropic)}
-\date{Software v0.7.4 --- September 2026}
+\date{Software v0.7.5 --- September 2026}
 
 \begin{document}
 \maketitle
@@ -203,7 +203,16 @@ Two test modes let you exercise the whole flow before the magnet is involved.
 Both are started from the \ts{} command line with a \textbf{1D} \hnmr{} dataset
 open (a PROTON demo set is fine --- it is only a parameter template; since
 v0.7.4 the script sets the dimensionality of every dataset it creates itself,
-but a 1D template is the clean start).
+but a 1D template is the clean start). Either template works from v0.7.5:
+neither \ts{} 3.7.0 nor 4.4.0 creates the F1 parameter file when a script
+switches a dataset to 2D (Oulu and Torino, September 2026), so the script
+brings \file{acqu2} from your template dataset if that is 2D, else from
+another experiment of the session, else from the console's own parameter
+library, and \file{meta.json} records which
+(\texttt{software.param\_api.f1\_files\_source}). In the F1 file it
+acquires with --- copied or inherited --- it sets \texttt{FnMODE} to
+\emph{undefined}, Bruker's rule for a pulse program without an \texttt{mc}
+statement (\texttt{f1\_fnmode\_edits} counts the files it edited).
 
 \subsection*{5.1\quad SIMULATE --- the pure dry run}
 
@@ -248,7 +257,7 @@ it at your desk. Pass criteria, from the release's desk-test checklist:
       \textbf{1, 10, 14, 15, 16, 11, 12, 13}.
 \item \file{meta.json} is written twice (dataset directory and bundle) and
       contains a \texttt{software} block with
-      \texttt{"script\_version": "0.7.4"} (this release),
+      \texttt{"script\_version": "0.7.5"} (this release),
       \texttt{"schema\_version": "1.2"} (the orchestrator's Bruker-only
       metadata vintage, accepted under the repository's vendor-neutral v2.0
       schema), a \texttt{script\_sha256} fingerprint, and
@@ -269,13 +278,15 @@ on the flag --- just do not send it.
 \section{The real run}
 \label{sec:dialogs}
 
-One honest note before the first live run: as of v0.7.4 the script has been
+One honest note before the first live run: as of v0.7.5 the script has been
 desk-tested end to end (a real Jython interpreter against stubbed \ts{}
-APIs modelling eight console behaviours, plus the SIMULATE/DESKTEST modes
+APIs modelling ten console behaviours, plus the SIMULATE/DESKTEST modes
 above) and has completed DESKTEST on a real \ts{} 4.4.0 console (Torino,
 September 2026), where it found two console-specific faults that were fixed
-within a day --- but it has not yet run a full live session on Bruker
-hardware. We therefore treat the first live run at each facility as a
+within a day, and on a \ts{} 3.7.0 console (Oulu, September 2026), where it
+found a third (the console did not create the F1 parameter file and silently
+dropped every parameter write into the 2D datasets; fixed in v0.7.5) --- but
+it has not yet run a full live session on Bruker hardware. We therefore treat the first live run at each facility as a
 supervised pilot --- write to
 \href{mailto:jwbquantum@gmail.com}{jwbquantum@gmail.com} and we will
 screen-share through it.
@@ -284,10 +295,16 @@ screen-share through it.
 
 Insert the water tube (sample changer or manual --- the script never ejects
 or injects), set your usual VT setpoint, and let the sample equilibrate for a
-few minutes. Tune/match and shimming happen \emph{inside} the run:
-the script calls \texttt{atma} and \texttt{topshim} where your system has
-them and walks you through the manual equivalents (\texttt{wobb}, your usual
-shim routine) where it does not. Open any existing \hnmr{} dataset, then:
+few minutes. Then, in this order: \textbf{lock, shim, tune} as you usually
+do (lock on), then \textbf{lock OFF} and \textbf{BSMS field sweep OFF}, and
+only then start the script. The script still calls \texttt{atma} and
+\texttt{topshim} where your system has them, but \texttt{topshim} refuses to
+run while the lock is off (\emph{lock is off: please lock in prior to
+shimming} --- Torino, 2026-09-22) and this protocol keeps the lock off, so
+its shimming dialog will appear: you shimmed already --- press OK. Where a
+command is missing it walks you through the manual equivalent
+(\texttt{wobb}, your usual shim routine). Open any existing \hnmr{} dataset,
+then:
 \begin{lstlisting}
 xpy spin_noise_run
 \end{lstlisting}
@@ -458,8 +475,22 @@ python3 uploader/upload_bundle.py <bundle.zip> --selftest
       parameters written from a script by name; the old script wrote a
       number. Script v0.7.3 or later writes the documented name, verifies it,
       and does the first switch while you are still at the console (at the
-      start of the setup step), so at worst you type \texttt{parmode} once.
-      See \file{docs/TROUBLESHOOTING.md}.
+      start of the setup step), so at worst you type \texttt{parmode} in
+      \ts{} (or use the \texttt{eda} toolbar button \emph{Change data
+      dimensionality}), select 2D, once. See \file{docs/TROUBLESHOOTING.md}.
+\item \textbf{\ts{} shows \texttt{The requested format file is invalid:
+      .../SPINNOISE\_<date>/<expno>/acqu2: getpar: No such file or
+      directory} (script v0.7.4 or earlier; \ts{} 3.7.0 at Oulu and 4.4.0 at
+      Torino, both with a 1D template)} --- the console accepted the switch
+      to 2D but did not create the F1 parameter file \file{acqu2}, and while
+      it was missing every parameter write into that dataset was silently
+      lost, with no error reaching the script (the pseudo-2D blocks kept the
+      1D template's TD/RG/pulse program); on 4.4.0 \texttt{zg} then refused
+      each block with \texttt{inconsistent PARMODE 2D ... acqu2} --- answer
+      the script's \dialog{acquisition check} dialog with Cancel in that
+      case. Do not run live with v0.7.4 on such a console; v0.7.5 creates
+      the file itself and reads TD and RG back after writing. See
+      \file{docs/TROUBLESHOOTING.md} for what to check in \file{meta.json}.
 \item \textbf{Old \ts{} (2.x)} --- everything is written for Jython 2.2-level
       syntax. If \file{Avance.incl} is missing, delete the \texttt{\#include}
       line in \file{zgnoise2d} (it is not used).

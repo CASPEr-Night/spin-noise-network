@@ -68,7 +68,8 @@ TopSpin validates enumerated parameters written from a script by name
 rejected (first seen at Torino, 2026-09-18) and which no TopSpin version
 is documented to accept. The script's request is correct and comes
 once, at the opening reference (~15 min into the unattended stretch):
-type `parmode`, choose 2D, press OK; the later datasets inherit 2D.
+type `parmode` in TopSpin (or use the `eda` toolbar button *Change data
+dimensionality*), select 2D, press OK; the later datasets inherit 2D.
 What recurs on v0.7.2 is TopSpin's OWN error pop-up about `PARMODE`
 (and the `1 FnMODE` one below) at every pseudo-2D dataset — three of
 each per session, two of them after you have walked away — and such a
@@ -93,6 +94,90 @@ run continues correctly. v0.7.3 no longer touches FnMODE at all. If you
 want to look at the rows with `xf2` in TopSpin, set the processing
 parameter MC2 to QF — that does not affect acquisition.
 
+**TopSpin shows `The requested format file is invalid:
+.../SPINNOISE_<date>/<expno>/acqu2: getpar: No such file or directory`
+(script v0.7.4 or earlier; TopSpin 3.7.0, Avance III HD, Oulu desktest
+2026-09-25 — and TopSpin 4.4.0, Avance Neo, Torino's first live run
+2026-09-22 with v0.7.3; both with a 1D template).**
+TopSpin keeps each dimension's acquisition parameters in its own file
+(`acqus` for the direct dimension, `acqu2` for F1). This console accepted
+the script's switch of the dataset to 2D (`PARMODE`) but did **not**
+create `acqu2` — your template dataset was 1D, so there was nothing to
+inherit. A dataset that says 2D without `acqu2` is broken at TopSpin's
+parameter layer: this dialog appeared once per run, naming expno 12
+(what exactly triggers it — an F1 parameter read, the pulse-program
+change on expno 12, or displaying a 2D dataset without the file — is not
+established), and
+**every parameter write into that dataset is silently lost** — no error,
+nothing in the script's own failure count. First seen at Oulu
+(2026-09-25, v0.7.4 simulate and desktest): the bundle's `meta.json`
+showed the three pseudo-2D blocks (expnos 11, 12, 13) with `td` 16384,
+`rg` 1.0 and the noise block's `pulprog` as `zg2d` — the values inherited
+from the 1D setup expno — although the script had written 262144, the
+rga result and `zgnoise2d`; `software.param_api.f1_td_verified` was 0
+with an empty `f1_td_readback_source`, and no `acqu2` appeared in the
+`checksums`. A **live** run on this console with v0.7.4 would have
+acquired pulsed 1.2 s rows in place of the pulse-free 19 s noise rows,
+with an unknown row count, under a `meta.json` declaring 89 pulse-free
+rows (the report flags exactly that mismatch, `rows declared vs read`,
+from the data file itself). **The same on TopSpin 4.4.0** (Torino,
+Avance Neo 400, first live attempt 2026-09-22 with v0.7.3 and a 1D
+template; Torino's earlier desktests had a 2D dataset open and never met
+it): `PARMODE` 2D accepted and logged in the audit trail, no `acqu2`
+created; the F1 write `1 TD` itself popped this dialog (naming expno 11,
+the probe) while no exception reached the script (`putpar_failures` 0);
+the audit trail shows nothing written after the `PARMODE` change
+although the script wrote TD, RG and the pulse program — the writes were
+lost on disk, not merely read back stale — and `zg` refused every
+pseudo-2D block with `Cannot run single acquisition: inconsistent
+PARMODE 2D: Parameter set acqu2: ... Unable to open file .../11/acqu2`,
+leaving no `ser`. If that happens, answer the script's **acquisition
+check** dialog ("cannot see a raw-data file") with **Cancel**: the run
+cannot record anything useful and OK only carries the fault into the
+next block (Torino's bundle declares 8/89/8 rows with no raw data behind
+them). Do not run live on such a console before installing v0.7.5.
+Fixed in
+v0.7.5: right after the first 2D switch (at the attended probe, before
+tuning) the script checks for `acqu2` and, when the console did not
+create it, copies it from your template dataset if that is 2D, else from
+another expno of the session, else from the console's own standard
+parameter library (`<TSHOME>/exp/stan/nmr/par/COSYGPSW/acqu2` or the
+first 2D set found there), sets `FnMODE` to `0` (*undefined*) in the
+copy by editing the file — Bruker's rule is that *undefined* must be used
+when the pulse program has no `mc` statement, which is true of `zg2d` and
+`zgnoise2d`; the library set carried the mode of its own experiment; the
+script still never writes `FnMODE` through the parameter API, the v0.7.3
+rule — then reloads the dataset; the later pseudo-2D datasets inherit the
+file. An `acqu2` a pseudo-2D expno *inherited* instead — from your 2D
+template or from a sibling expno — gets the same edit when it says
+anything but `0` (one reload per file edited, none otherwise); your
+template dataset itself is never touched. Only the parameter files
+(`acqu2`, `proc2`) are copied, never the
+status files (`acqu2s`, `proc2s`: they describe acquired data, `zg`
+writes them). F1 parameters are never read while the file is absent,
+and the file exists from the attended probe onward, so if this dialog
+appears at all with v0.7.5 it can only be once, at the probe, right after
+the first switch — please tell us if it does. TD and RG are read back
+after every write — a write that still does not take is counted and
+named in `meta.json`. What to check in a v0.7.5 `meta.json`
+from such a console: `software.param_api.f1_files_created` = 1 and
+`f1_files_source` = `par:COSYGPSW` (or `template` / `expno:<n>`),
+`f1_fnmode_edits` = 1 (the one copy) with `f1_fnmode_copied` = the value
+the library set carried (e.g. `6`; the copy itself reads `0`) — with a
+2D template open instead, `f1_files_created` = 0 and `f1_fnmode_edits`
+= 1 counts the inherited file, `f1_fnmode_copied` its original mode —
+`f1_td_verified` = 1, `acq_write_mismatch` = 0,
+`td` = 262144 for expnos 11/12/13, expno 12's `pulprog` = `zgnoise2d`,
+and `data/11/acqu2`, `data/12/acqu2`, `data/13/acqu2` present in
+`checksums`. If `f1_files_source` reads `operator`, the script found
+nothing to copy and asked you to type `parmode` in TopSpin (or use the
+`eda` toolbar button *Change data dimensionality*) and select 2D — once,
+at the attended probe; it never asks again during the unattended part —
+send us the bundle and the TopSpin version. The terminal log prints what
+the copy reads (`the copy reads TD=... FnMODE=0 (the source set carried
+FnMODE=...)`) — please include that line in your report if `zg` complains
+about the noise block.
+
 **The RG ladder rungs take minutes instead of seconds, or the ladder
 expnos hold `ser` files (script v0.7.3 or earlier).**
 The dataset open when you typed `xpy spin_noise_run` was a 2D one. The
@@ -115,9 +200,15 @@ the report notes the collision. Fixed in v0.7.4.
 **TopSpin pops its own errors about `atma` / `topshim` / `pulsecal`.**
 Normal on consoles without an ATM unit or those licences: the script
 detects the failure and degrades to an operator dialog asking you to
-do that step by hand (wobb / your usual shim / your known P90). If
-you prefer, tune, shim, and calibrate BEFORE starting the script —
-the automatic steps are then harmless no-ops on top of a good state.
+do that step by hand (wobb / your usual shim / your known P90). One of
+them is expected on every console: `topshim` refuses to run while the
+lock is off (`getLockAndSweepStatus - lock is off: please lock in prior
+to shimming` — Torino, 2026-09-22) and this protocol keeps the lock off.
+So the intended sequence is: **lock, shim, tune** as you usually do
+(lock on), then **lock OFF and BSMS field sweep OFF**, then start the
+script — and press OK at its shimming dialog, which says so since
+v0.7.5. Tuning and P90 calibration done beforehand are likewise harmless
+no-ops on top of a good state.
 
 ---
 

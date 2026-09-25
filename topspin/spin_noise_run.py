@@ -121,7 +121,7 @@ AUTOSTEP = False          # True (with SWEEP): TIER-2 programmatic field
 
 # Single source of truth for the script version.  KEEP IN SYNC with the
 # repository VERSION file (testing/static_check.py enforces the match).
-SCRIPT_VERSION  = "0.7.4"
+SCRIPT_VERSION  = "0.7.5"
 # NOTE: no module constant named PROGRAM_VERSION -- TopSpin's TopCmds
 # exports a FUNCTION of that name and `from TopCmds import *` (below)
 # overwrote the alias, so v0.7.3 bundles carry "<function PROGRAM_VERSION
@@ -1112,6 +1112,69 @@ def open_expno(template_curd, name, expno):
 # the current dataset) is recognised and not re-written; and what the
 # console accepted or rejected is stamped into meta['software']
 # ['param_api'], so each real console teaches the next release.
+#
+# The F1 parameter FILE (Oulu, 2026-09-25, TopSpin 3.7.0, Avance III HD
+# 500, v0.7.4 simulate + desktest).  TopSpin keeps each dimension's
+# acquisition parameters in its own JCAMP file: acqu/acqus for the direct
+# dimension, acqu2/acqu2s for F1.  On that console PUTPAR("PARMODE", "2D")
+# was accepted and read back as 2D, but TopSpin did NOT create acqu2 (the
+# operator's template was 1D, so nothing to inherit).  A dataset that says
+# 2D and has no acqu2 is broken at the parameter layer: once per run the
+# console popped its own dialog --
+#     The requested format file is invalid: .../12/acqu2: getpar: No such
+#     file or directory
+# -- naming expno 12 only (WHAT triggered it is not established: an F1
+# GETPAR, the PULPROG change on expno 12, or the RE/display of a 2D
+# dataset without acqu2 are all candidates), and EVERY parameter write
+# into it was lost without an exception (the
+# pseudo-2D blocks read back TD 16384 / RG 1.0 / PULPROG zg2d, the values
+# inherited from the 1D setup expno, with putpar_failures 0).  A live run
+# would have acquired pulsed 1.2 s rows in place of the pulse-free 19 s
+# noise rows, with an unknown row count -- or nothing: the SAME happened
+# on TopSpin 4.4.0 (Torino, Avance Neo 400, first LIVE run 2026-09-22
+# with v0.7.3 and a 1D template; evidence read 2026-09-25).  There PARMODE
+# 2D was accepted and logged in the audit trail, no acqu2 appeared, the
+# F1 write PUTPAR("1 TD") itself popped that dialog (Java stack Cmd.putPar
+# -> PeParams.setParameterValue -> getParameterValue -> NMRParameter
+# .initializeParametersForFamilyIfNeeded -> MfrException) while NO
+# exception reached Jython (putpar_failures 0, failed_forms []), the
+# audit trail shows nothing written after the PARMODE change although TD
+# 262144, RG 25.25 and zgnoise2d were written (acqu on disk kept TD 16384
+# / RG 1 / zg2d: writes lost on DISK, not a stale readback), and zg
+# refused every pseudo-2D block -- "Cannot run single acquisition:
+# inconsistent PARMODE 2D: Parameter set acqu2: ... Unable to open file
+# .../11/acqu2" -- leaving a bundle that declares 8/89/8 rows with no raw
+# data behind them.  No console is known to create acqu2 on a scripted
+# PARMODE write; the harness models every flavor so (topspin_stub.py).
+# Torino's earlier desktests never met this because a 2D dataset was
+# open as the template.  Since v0.7.5 make_2d() therefore
+# makes sure acqu2 exists BEFORE anything F1 is read or written
+# (ensure_f1_files: copy it from the template, from a sibling expno, or
+# from the console's own standard parameter library exp/stan/nmr/par,
+# then RE), the F1 readback never calls GETPAR while acqu2 is absent (the
+# one candidate trigger of that dialog the script controls), and the
+# acquisition parameters that decide what is
+# recorded -- TD and RG -- are read back after writing (verify_acq_write)
+# so a silent loss is at least counted and reported instead of acquired.
+#
+# The F1 acquisition MODE in that file.  Bruker's documented rule for
+# FnMODE is: 'undefined -- This value must be used if the pulse program
+# contains no mc statement', and neither zg2d nor zgnoise2d has one.  An
+# acqu2 the script copies from a library set carries the mode of THAT
+# experiment; one the dataset inherited -- WR() copies it from the current
+# dataset, so from a 2D template (Torino's first desktest, 2026-09-21) or
+# a sibling expno -- carries whatever the template's experiment used
+# (States-TPPI, echo-antiecho...).  Both are therefore set to 0 in the
+# FILE, by a binary-safe text edit before the dataset is re-read
+# (_set_fnmode_undefined, from ensure_f1_files for the copy and from
+# ensure_f1_fnmode_undefined for an inherited file), one RE per file
+# edited and none when the file already says 0; FnMODE is never written
+# through the parameter API (TopSpin 4.4.0 rejected that -- Torino,
+# 2026-09-18 -- and the rule stands), and only files inside the session's
+# own dataset are ever edited, never the operator's template.
+# What was done lands in param_api: f1_files_created / f1_files_source /
+# f1_fnmode_edits / f1_fnmode_copied / acq_write_mismatch /
+# last_acq_write_mismatch.
 # ----------------------------------------------------------------------------
 
 PARAM_API = {
@@ -1134,7 +1197,26 @@ PARAM_API = {
     "failed_forms": [],            # "KIND:form" per rejected probe (once)
     "putpar_failures": 0,          # every PUTPAR that raised, any parameter
     "last_putpar_error": "",
+    "f1_files_created": 0,         # acqu2 (+proc2) created by the script
+                                   # because the console did not (Oulu)
+    "f1_files_source": "",         # "" | "template" | "expno:<n>" |
+                                   # "par:<SET>" | "operator"
+    "f1_fnmode_edits": 0,          # F1 parameter files (acqu2) the script
+                                   # set to FnMODE 0 (undefined) by file
+                                   # edit this session: its own copies and
+                                   # files the datasets inherited
+    "f1_fnmode_copied": "",        # the F1 acquisition mode found in the
+                                   # FIRST of those files, whatever its
+                                   # source (library set, 2D template,
+                                   # sibling expno); "" when none needed it
+    "acq_write_mismatch": 0,       # TD/RG readbacks that disagreed with
+                                   # the write even after a reload + rewrite
+    "last_acq_write_mismatch": "", # "expno <n> <name>: wrote <w> read <r>"
 }
+
+# The operator's template dataset (CURDATA() at start), set by main():
+# ensure_f1_files() looks there first for an F1 parameter file to copy.
+SESSION_TEMPLATE = [None]
 
 PARMODE_NAME = {1: "1D", 2: "2D"}          # documented enum names
 PARMODE_ORDINAL = {"0": 1, "1D": 1, "1": 2, "2D": 2}   # readback spellings
@@ -1153,7 +1235,8 @@ def _form_has_failed(kind, label):
 def param_api_needs_operator():
     """True when this console needed manual steps for dataset setup."""
     return PARAM_API["parmode_form"] == "operator" or \
-        PARAM_API["f1_td_form"] == "operator"
+        PARAM_API["f1_td_form"] == "operator" or \
+        PARAM_API["f1_files_source"] == "operator"
 
 
 def f1_td_form_rejected():
@@ -1250,23 +1333,28 @@ def set_parmode(ndim):
     return ""
 
 
-def parmode_operator_dialog(ndim):
+def parmode_operator_dialog(ndim, reason=None):
     """Fallback when the scripted PARMODE write does not work on this
     console.  Bounded: after two confirmations the operator's word is
-    taken (the report cross-checks the data anyway)."""
+    taken (the report cross-checks the data anyway).  reason, when given,
+    replaces the first sentence (ensure_f1_files: the switch itself
+    worked, the console just did not create the F1 parameter file)."""
     label = PARMODE_NAME[ndim]
     hint = ("(If TopSpin asks whether existing data files may be deleted, "
             "confirm:\nthis is a fresh copy holding nothing of value.)")
+    if reason is None:
+        reason = ("The script could not switch this dataset to %s "
+                  "automatically.\n(If TopSpin just showed its own "
+                  "error about PARMODE, that was\nthe automatic "
+                  "attempt -- expected on this console.)" % label)
     attempts = 0
     while 1:
         attempts = attempts + 1
         ans = CONFIRM("spin_noise_run: make dataset %s" % label,
-                      "The script could not switch this dataset to %s "
-                      "automatically.\n(If TopSpin just showed its own "
-                      "error about PARMODE, that was\nthe automatic "
-                      "attempt -- expected on this console.)\n\n"
-                      "Please type 'parmode' in TopSpin, select %s, "
-                      "then press OK here.\n%s" % (label, label, hint))
+                      reason + "\n\n"
+                      "Please type 'parmode' in TopSpin (or use the eda "
+                      "toolbar button\n'Change data dimensionality'), "
+                      "select %s, then press OK here.\n%s" % (label, hint))
         if ans != 1:
             abort("Dataset could not be made %s." % label)
         PARAM_API["parmode_form"] = "operator"
@@ -1313,6 +1401,22 @@ def f1_td_readback(td_direct):
     twice this session."""
     if PARAM_API["f1_readback_unreliable"]:
         return None, ""
+    d = None
+    try:
+        d = ds_path(CURDATA())
+    except CATCHABLE:
+        d = None
+    if d and not f1_files_present(d):
+        # TopSpin reads F1 parameters from the acqu2 FILE.  With the file
+        # missing there is nothing to read, and a GETPAR here is one of
+        # the candidate triggers of the dialog Oulu's console popped once
+        # per run ("The requested format file is invalid: .../12/acqu2:
+        # getpar: No such file or directory" -- TopSpin 3.7.0,
+        # 2026-09-25; the exact trigger is not established).  make_2d()
+        # creates the file before calling here; if it could not, there is
+        # nothing to read back and no dialog is worth risking: the caller
+        # trusts its write and says so.
+        return None, ""
     for name, axis in (("1 TD", None), ("TD", 1)):
         raw = None
         try:
@@ -1329,7 +1433,6 @@ def f1_td_readback(td_direct):
             return v, "getpar-axis"
     v = None
     try:
-        d = ds_path(CURDATA())
         if d:
             v = to_int(jcamp_value(os.path.join(d, "acqu2"), "TD"), None)
     except CATCHABLE:
@@ -1343,8 +1446,9 @@ def set_f1_td(rows):
     """F1 TD := rows via the documented axis-prefix form "1 TD", VERIFIED
     by readback where the console allows it.  The row count is the one
     parameter whose silent failure would waste a session (the wrong
-    number of rows is acquired and the report refuses the bundle:
-    'meta.json td1_rows != rows read'), so a rejected write, a write
+    number of rows is acquired; the report flags the declared-vs-read
+    row mismatch -- 'rows declared vs read', from the data file against
+    meta.json -- but cannot repair it), so a rejected write, a write
     routed to the wrong dimension, or a recognised mismatch goes to the
     operator -- at most twice; a console with no usable readback is
     trusted, and the bundle says so."""
@@ -1382,8 +1486,8 @@ def set_f1_td(rows):
                     return 1
                 if rb is None:
                     say("F1 TD=%d accepted; this console offers no usable "
-                        "readback, trusting it (the report cross-checks "
-                        "the row count)" % rows)
+                        "readback, trusting it (the report flags a "
+                        "declared-vs-read row mismatch)" % rows)
                     if PARAM_API["f1_td_form"] != "operator":
                         PARAM_API["f1_td_form"] = "1 TD"
                     PARAM_API["f1_td_verified"] = 0
@@ -1413,22 +1517,405 @@ def set_f1_td(rows):
         if attempts >= 2:
             say("WARNING: F1 TD still reads %s (expected %d); continuing "
                 "on the operator's confirmation, trusting F1 TD writes for "
-                "the rest of the session -- the report cross-checks the row "
-                "count" % (rb, rows))
+                "the rest of the session -- the report flags declared-vs-"
+                "read row mismatches" % (rb, rows))
             PARAM_API["f1_td_verified"] = 0
             PARAM_API["f1_readback_unreliable"] = 1
             return 1
         say("F1 TD still reads %s (expected %d) -- asking again" % (rb, rows))
 
 
+def f1_files_present(dsdir):
+    """True when the expno directory holds the F1 acquisition parameter
+    file acqu2 -- what a 2D dataset must have before any F1 parameter can
+    be read or written on TopSpin (Oulu, 2026-09-25, TopSpin 3.7.0)."""
+    if not dsdir:
+        return 0
+    return os.path.isfile(os.path.join(dsdir, "acqu2"))
+
+
+# Files that make up a dataset's F1 parameter set: acquisition (expno
+# directory) and processing (pdata/1; a parameter-library set keeps proc2
+# at its top level instead).  ONLY the parameter files are copied, never
+# the status files acqu2s / proc2s: those describe data that was acquired
+# (zg writes them itself when it runs), and a status file copied from a
+# library set would describe someone else's experiment.
+F1_ACQ_FILES = ("acqu2",)
+F1_PROC_FILES = ("proc2",)
+# 2D sets every TopSpin install ships in exp/stan/nmr/par, tried first;
+# after them any set that has acqu2 (and no acqu3: a 2D one), sorted.
+F1_PAR_PREFERRED = ("COSYGPSW", "COSYGPPPQF", "NOESYPHSW", "HSQCETGPSISP")
+
+
+def _copy_f1_files(src_dir, dst_dir):
+    """Copy the F1 parameter files (acqu2, pdata/1/proc2 -- never a status
+    file) from an expno-shaped or parameter-set-shaped directory into an
+    expno directory.  Returns the number of files copied, 0 when the
+    source has no acqu2."""
+    if not os.path.isfile(os.path.join(src_dir, "acqu2")):
+        return 0
+    n = 0
+    for fn in F1_ACQ_FILES:
+        sp = os.path.join(src_dir, fn)
+        if os.path.isfile(sp):
+            copy_file(sp, os.path.join(dst_dir, fn))
+            n = n + 1
+    dst_pdata = os.path.join(dst_dir, "pdata", "1")
+    for fn in F1_PROC_FILES:
+        sp = os.path.join(src_dir, "pdata", "1", fn)
+        if not os.path.isfile(sp):
+            sp = os.path.join(src_dir, fn)          # parameter-set layout
+        if os.path.isfile(sp):
+            if not os.path.isdir(dst_pdata):
+                os.makedirs(dst_pdata)
+            copy_file(sp, os.path.join(dst_pdata, fn))
+            n = n + 1
+    return n
+
+
+def _set_fnmode_undefined(acqu2_path):
+    """In an F1 parameter file (acqu2) the script will acquire with -- one
+    it has just copied, or one the dataset inherited -- set FnMODE to 0,
+    'undefined', by a plain text edit of the file.  Returns (was, changed):
+    the value the file carried ("" when the line was absent) and 1 when
+    the file was written, 0 when it already said 0 and was left alone
+    (the callers reload the dataset only for a file that changed).
+
+    WHY a file edit and not PUTPAR: Bruker's rule for the F1 acquisition
+    mode is that 'undefined' must be used when the pulse program has no
+    mc statement, which is true of zg2d and of zgnoise2d; a library set
+    (COSY, NOESY, HSQC) or an operator's 2D template carries the mode of
+    ITS experiment, which is what the file would otherwise hand to zg.
+    Writing FnMODE through the parameter API is what v0.7.3 forbade after
+    TopSpin 4.4.0 rejected it (Torino, 2026-09-18), and that rule stands:
+    the value is set in the file before the dataset is re-read (RE), so
+    the console never sees a write, only a parameter set that already
+    says 'undefined'.  Absent line: appended before ##END= (a 2D set
+    always has one; being explicit costs nothing) -- whether an absent
+    line is worth an edit at all is the caller's call (ensure_f1_files
+    normalises every copy it makes; ensure_f1_fnmode_undefined leaves an
+    inherited file without the line alone, see there).
+
+    The file is read and written in BINARY mode and every line keeps its
+    own terminator (Bruker writes LF): the edit must change one value and
+    nothing else, and Jython's text mode on a Windows console translates
+    '\\n' to CRLF on the way out, which would rewrite every line ending
+    of the parameter file."""
+    f = open(acqu2_path, "rb")
+    try:
+        lines = f.readlines()
+    finally:
+        f.close()
+    tag = "##$FnMODE="
+    was = ""
+    seen = 0
+    out = []
+    for line in lines:
+        if line.startswith(tag):
+            was = line[len(tag):].strip()
+            if line.endswith("\r\n"):
+                line = tag + " 0\r\n"
+            else:
+                line = tag + " 0\n"
+            seen = 1
+        out.append(line)
+    if seen and was == "0":
+        return was, 0            # already 'undefined': not a byte to write
+    if not seen:
+        eol = "\n"
+        if out and out[0].endswith("\r\n"):
+            eol = "\r\n"
+        at = len(out)
+        for i in range(len(out)):
+            if out[i].startswith("##END="):
+                at = i
+                break
+        if at == len(out) and out and not out[-1].endswith("\n"):
+            out[-1] = out[-1] + eol        # file without a final newline
+        out.insert(at, tag + " 0" + eol)
+    f = open(acqu2_path, "wb")
+    try:
+        f.write("".join(out))
+    finally:
+        f.close()
+    return was, 1
+
+
+def _record_fnmode_edit(was):
+    """Count an F1 parameter file the script set to 'undefined' (param_api
+    f1_fnmode_edits: its own copies and inherited files alike), and keep
+    the value found in the FIRST of them in f1_fnmode_copied, whatever
+    its source -- a library set, the operator's 2D template, a sibling
+    expno: the one value a reader of meta.json will want to know when
+    asking what this dataset's F1 mode would otherwise have been."""
+    PARAM_API["f1_fnmode_edits"] = PARAM_API["f1_fnmode_edits"] + 1
+    if PARAM_API["f1_fnmode_edits"] == 1:
+        PARAM_API["f1_fnmode_copied"] = was
+
+
+def _f1_source_candidates(template_curd, dsdir):
+    """Directories an F1 parameter file can be copied from, best first:
+    (i) the operator's template dataset, (ii) another expno of this
+    session's dataset, (iii) the console's own standard parameter library
+    (<TSHOME>/exp/stan/nmr/par and par/user; a few common 2D sets first).
+    Returns [(dir, label)], the label being what meta.json records."""
+    cands = []
+    tdir = None
+    try:
+        tdir = ds_path(template_curd)
+    except CATCHABLE:
+        tdir = None
+    if tdir and tdir != dsdir and f1_files_present(tdir):
+        cands.append((tdir, "template"))
+    name_dir = os.path.dirname(dsdir)
+    names = []
+    try:
+        names = os.listdir(name_dir)
+    except CATCHABLE:
+        names = []
+    expnos = []
+    for nm in names:
+        e = to_int(nm, None)
+        if e is not None and str(e) == nm:
+            expnos.append(e)
+    expnos.sort()
+    for e in expnos:
+        d = os.path.join(name_dir, str(e))
+        if d != dsdir and f1_files_present(d):
+            cands.append((d, "expno:%d" % e))
+    for home in find_tshome_candidates():
+        par = os.path.join(home, "exp", "stan", "nmr", "par")
+        for base, prefix in ((par, "par:"), (os.path.join(par, "user"),
+                                             "par:user/")):
+            if not os.path.isdir(base):
+                continue
+            sets = []
+            try:
+                sets = os.listdir(base)
+            except CATCHABLE:
+                sets = []
+            sets.sort()
+            ordered = []
+            for pref in F1_PAR_PREFERRED:
+                if pref in sets:
+                    ordered.append(pref)
+            for st in sets:
+                if st not in ordered:
+                    ordered.append(st)
+            for st in ordered:
+                d = os.path.join(base, st)
+                if os.path.isfile(os.path.join(d, "acqu2")) \
+                        and not os.path.isfile(os.path.join(d, "acqu3")):
+                    cands.append((d, prefix + st))
+    return cands
+
+
+def ensure_f1_files(template_curd):
+    """Make sure the current dataset -- just switched to (or found) 2D --
+    has its F1 acquisition parameter file, acqu2, BEFORE any F1 parameter
+    is read or written and before the block's TD/RG/PULPROG are set.
+
+    WHY: TopSpin 3.7.0 (Oulu, 2026-09-25) and TopSpin 4.4.0 (Torino, live
+    run 2026-09-22) both accepted the scripted PARMODE=2D write and did
+    not create acqu2 (the template was 1D in both cases).  Without the
+    file the console popped its own error dialog (Oulu: once per run,
+    naming expno 12, trigger not established; Torino: at the F1 TD write
+    on expno 11, with no exception reaching Jython) and every parameter
+    write into the dataset was silently lost, so the pseudo-2D blocks
+    kept the 1D setup expno's TD/RG/PULPROG -- and at Torino zg then
+    refused them outright ("inconsistent PARMODE 2D ... acqu2").
+    TopSpin's own 'parmode'
+    creates the files; from a script, the documented way is to bring the
+    files: from the operator's template if it is 2D, from a sibling expno
+    of this session (WR() copies them along), or from the console's own
+    standard parameter library, which every install ships.  Then RE, so
+    the console re-reads the dataset.  The operator's 'parmode' is the last
+    resort and is asked for ONCE per session (at the attended probe);
+    failing even that, the session continues unverified, without another
+    dialog, and the bundle says so (the report flags declared-vs-read row
+    mismatches from the data file itself, and shows the recorded RG).
+
+    The copied acqu2 carries the source set's F1 parameters; TD is set
+    right after this by set_f1_td().  FnMODE is set to 0, 'undefined', in
+    the copy by a plain text edit of the file BEFORE the dataset is
+    re-read (_set_fnmode_undefined, the same edit ensure_f1_fnmode_undefined
+    applies to an acqu2 the dataset inherited): Bruker's documented rule
+    is that 'undefined' must be used when the pulse program has no mc
+    statement, and neither zg2d nor zgnoise2d has one.  v0.7.3's rule
+    'never PUTPAR FnMODE' stands (TopSpin 4.4.0 rejected that write); the
+    console only ever sees a file that already says 'undefined'.  The
+    edit is counted in param_api f1_fnmode_edits, the value the source
+    set carried is kept in f1_fnmode_copied when this was the first file
+    normalised this session (_record_fnmode_edit), and both are printed
+    to the terminal.
+
+    Returns 1 when acqu2 is present afterwards, 0 when the console has to
+    be trusted without it."""
+    dsdir = None
+    try:
+        dsdir = ds_path(CURDATA())
+    except CATCHABLE:
+        dsdir = None
+    if not dsdir or not os.path.isdir(dsdir):
+        return 0
+    if f1_files_present(dsdir):
+        return 1
+    say("expno %s is 2D but has no F1 parameter file (acqu2): this console "
+        "did not create it -- looking for one to copy"
+        % os.path.basename(dsdir))
+    for src_dir, label in _f1_source_candidates(template_curd, dsdir):
+        n = 0
+        try:
+            n = _copy_f1_files(src_dir, dsdir)
+        except CATCHABLE:
+            n = 0
+            print "spin_noise_run: WARNING could not copy F1 files from %s" \
+                % src_dir
+        if n and f1_files_present(dsdir):
+            acqu2 = os.path.join(dsdir, "acqu2")
+            # FnMODE := undefined in the copy, by file edit, before RE --
+            # the library set's mode belongs to its own experiment.  An
+            # edit that failed is not counted: nothing was normalised.
+            was = None
+            changed = 0
+            try:
+                was, changed = _set_fnmode_undefined(acqu2)
+            except CATCHABLE:
+                was = None
+                print "spin_noise_run: WARNING could not set FnMODE in " \
+                    "the copied %s (%s)" % (acqu2, sys.exc_info()[1])
+            if was is None:
+                was = jcamp_value(acqu2, "FnMODE") or ""
+            elif changed:
+                _record_fnmode_edit(was)
+            PARAM_API["f1_files_created"] = PARAM_API["f1_files_created"] + 1
+            PARAM_API["f1_files_source"] = label
+            reload_current_dataset()
+            say("F1 parameter file created from %s (%d file(s) copied); "
+                "the copy reads TD=%s FnMODE=%s (the source set carried "
+                "FnMODE=%s; 0 = undefined, what a pulse program without an "
+                "mc statement needs) -- TD is set next"
+                % (label, n, jcamp_value(acqu2, "TD"),
+                   jcamp_value(acqu2, "FnMODE"), was or "<absent>"))
+            return 1
+    if PARAM_API["f1_files_source"] == "operator":
+        # The operator was asked once already this session (at the
+        # attended probe) and the file still did not appear.  Never ask
+        # again: every later make_2d() -- the re-opened opening reference,
+        # the noise block, the closing reference, a sweep step -- runs
+        # while nobody is at the console, and a modal dialog there is
+        # exactly what stranded overnight sessions before.
+        say("WARNING: still no acqu2 in %s and the operator was already "
+            "asked once this session; not asking again -- continuing "
+            "unverified (F1 reads are skipped, TD/RG writes are checked by "
+            "readback, the report cross-checks the bundle)" % dsdir)
+        return 0
+    say("no F1 parameter file found to copy (template, session expnos, "
+        "parameter library) -- asking the operator to run parmode")
+    # The dialog reports which PARMODE path worked; the scripted switch
+    # DID take here (only the file is missing), so the record keeps it.
+    pm_form = PARAM_API["parmode_form"]
+    parmode_operator_dialog(
+        2, "The script switched this dataset to 2D, but this TopSpin did "
+           "not create\nits F1 parameter file (acqu2), and no parameter set "
+           "to copy it from\nwas found.  TopSpin's own 'parmode' creates it.")
+    if pm_form:
+        PARAM_API["parmode_form"] = pm_form
+    PARAM_API["f1_files_source"] = "operator"
+    if f1_files_present(dsdir):
+        PARAM_API["f1_files_created"] = PARAM_API["f1_files_created"] + 1
+        say("F1 parameter file created by the operator's parmode")
+        return 1
+    say("WARNING: still no acqu2 in %s after the manual step; continuing "
+        "unverified -- F1 reads are skipped and parameter writes are "
+        "checked by readback (the report cross-checks the bundle)" % dsdir)
+    return 0
+
+
+def ensure_f1_fnmode_undefined():
+    """Make sure the F1 parameter file the current pseudo-2D dataset will
+    acquire with says FnMODE 0, 'undefined' -- for an acqu2 the dataset
+    INHERITED; a copy the script made was normalised by ensure_f1_files
+    already.  Returns 1 when the file was edited (and the dataset
+    reloaded), 0 when there was nothing to do.
+
+    WHY: a pseudo-2D expno usually gets its acqu2 for free -- WR() copies
+    the current dataset, so the file descends from the operator's
+    template when that was 2D (Torino's first desktest, 2026-09-21) or
+    from a sibling expno -- and then it carries whatever F1 mode THAT
+    experiment used (States-TPPI, echo-antiecho, QF...).  Bruker's
+    documented rule for FnMODE is that 'undefined' must be used when the
+    pulse program contains no mc statement, and neither zg2d nor
+    zgnoise2d has one; since v0.7.5 a copied library set was already set
+    to 0 while an inherited file kept its mode, so the same block could
+    acquire under either depending only on what the operator had open.
+    Same binary-safe file edit (_set_fnmode_undefined), BEFORE any F1
+    parameter is written, then RE so the console re-reads the file; the
+    mode is never written through the parameter API (TopSpin 4.4.0
+    rejected that -- Torino, 2026-09-18).  One RE per file edited, none
+    when the file already says 0 -- and none when the line is absent:
+    TopSpin reads an absent FnMODE as undefined, and a file the console
+    made is left as the console made it unless it says otherwise.  Only a
+    file inside the session's own dataset is ever edited, never the
+    operator's template: make_2d() runs only on expnos the script
+    created, and the path comparison below is the belt to that suspender.
+
+    Records param_api f1_fnmode_edits and, for the first file normalised
+    this session, f1_fnmode_copied (_record_fnmode_edit)."""
+    dsdir = None
+    try:
+        dsdir = ds_path(CURDATA())
+    except CATCHABLE:
+        dsdir = None
+    if not dsdir or not f1_files_present(dsdir):
+        return 0
+    tdir = None
+    try:
+        tdir = ds_path(SESSION_TEMPLATE[0])
+    except CATCHABLE:
+        tdir = None
+    if tdir and os.path.normpath(tdir) == os.path.normpath(dsdir):
+        return 0                 # the operator's own dataset: never edited
+    acqu2 = os.path.join(dsdir, "acqu2")
+    was = jcamp_value(acqu2, "FnMODE")
+    if was is None or was == "0":
+        return 0                 # absent, or already 'undefined'
+    changed = 0
+    try:
+        was, changed = _set_fnmode_undefined(acqu2)
+    except CATCHABLE:
+        print "spin_noise_run: WARNING could not set FnMODE in the " \
+            "inherited %s (%s)" % (acqu2, sys.exc_info()[1])
+        return 0
+    if not changed:
+        return 0
+    _record_fnmode_edit(was)
+    reload_current_dataset()
+    say("expno %s: the inherited F1 parameter file carried FnMODE=%s -- set "
+        "to 0 (undefined, what a pulse program without an mc statement "
+        "needs) by file edit, dataset reloaded"
+        % (os.path.basename(dsdir), was))
+    return 1
+
+
 def make_2d(rows):
     """Make the current dataset a pseudo-2D with F1 TD = rows, verified.
     PARMODE is written by its documented name only when the dataset is not
     already 2D (WR() copies the dimensionality of the current dataset);
-    the operator's 'parmode' is the last resort.  The F1 acquisition mode
-    is deliberately left alone -- see the section comment above."""
+    the operator's 'parmode' is the last resort.  Between the switch and
+    the row count the F1 parameter file is made to exist (a console that
+    does not create it loses every write into the dataset -- Oulu,
+    2026-09-25) and made to say FnMODE 'undefined' -- Bruker's rule for a
+    pulse program without an mc statement -- whether the script copied it
+    (ensure_f1_files) or the dataset inherited it from a 2D template or a
+    sibling expno (ensure_f1_fnmode_undefined), each by a file edit
+    followed by RE, one RE per file that changed.  The F1 acquisition
+    mode is never written through the parameter API -- see the section
+    comment above."""
     if not set_parmode(2):
         parmode_operator_dialog(2)
+    ensure_f1_files(SESSION_TEMPLATE[0])
+    ensure_f1_fnmode_undefined()
     set_f1_td(rows)
 
 
@@ -1483,6 +1970,71 @@ def set_small_flip(p90_us, p90_db, db_parname):
             "spin_noise_run: set small-flip power manually")
 
 
+# A written RG reads back quantised to the console's gain ladder: Torino's
+# Avance Neo returned 22.6 for a written 25.25 (2026-09-21).  Ladders are
+# ~1 dB (x1.12) steps on Avance III/Neo and 3 dB (x1.41) on older
+# consoles, so a readback within this factor is the same gain; outside it
+# the write was lost (Oulu read 1.0 for 25.25 and for 101).
+ACQ_WRITE_GAIN_TOL = 1.5
+
+
+def verify_acq_write(name, wanted, kind):
+    """Read an acquisition parameter back after writing it.  kind "int":
+    exact (TD); kind "gain": within one console gain step (RG).  On a
+    mismatch the dataset is reloaded (RE) and the value written once more;
+    a second mismatch is counted in PARAM_API (acq_write_mismatch,
+    last_acq_write_mismatch) and announced, never dialogued.
+
+    WHY: on TopSpin 3.7.0 with a 2D dataset lacking acqu2 every write was
+    lost without an exception (Oulu, 2026-09-25), so putpar_failures 0
+    proved nothing; TD and RG decide what gets recorded, so they are the
+    two parameters read back.  SWH is not: the console rounds it to its
+    dwell-time grid.  Returns 1 when the readback agrees."""
+    def agrees(raw):
+        if kind == "int":
+            v = to_int(raw, None)
+            return v is not None and v == to_int(wanted, None)
+        v = to_float(raw, None)
+        w = to_float(wanted, None)
+        if v is None or w is None:
+            return 0
+        if w <= 0.0 or v <= 0.0:
+            return abs(v - w) < 1e-6
+        r = v / w
+        return r > 1.0 / ACQ_WRITE_GAIN_TOL and r < ACQ_WRITE_GAIN_TOL
+    raw = getpar(name)
+    if agrees(raw):
+        return 1
+    say("%s reads back '%s' after writing %s -- reloading the dataset and "
+        "writing once more" % (name, raw, wanted))
+    reload_current_dataset()
+    putpar(name, str(wanted))
+    raw = getpar(name)
+    if agrees(raw):
+        return 1
+    expno = "?"
+    try:
+        expno = to_text(CURDATA()[1])
+    except CATCHABLE:
+        expno = "?"
+    PARAM_API["acq_write_mismatch"] = PARAM_API["acq_write_mismatch"] + 1
+    PARAM_API["last_acq_write_mismatch"] = "expno %s %s: wrote %s read %s" \
+        % (expno, name, wanted, raw)
+    say("WARNING: %s -- this console is not taking parameter writes into "
+        "this dataset (TopSpin 3.7.0 did this for a 2D dataset without "
+        "acqu2); the block will be acquired with what the console holds "
+        "and the report will flag the bundle"
+        % PARAM_API["last_acq_write_mismatch"])
+    return 0
+
+
+def set_rg(rg):
+    """RG := rg, read back within one console gain step (see
+    verify_acq_write).  Every RG write of the session goes through here."""
+    putpar("RG", str(rg))
+    return verify_acq_write("RG", rg, "gain")
+
+
 def set_common_acq(o1_hz, td, swh, ns, d1_s):
     putpar("TD", str(td))
     putpar("SWH", "%.2f" % swh)   # SWH in Hz sets SW consistently
@@ -1490,7 +2042,8 @@ def set_common_acq(o1_hz, td, swh, ns, d1_s):
     putpar("NS", str(ns))
     putpar("DS", "0")
     putpar("D 1", "%.4f" % d1_s)
-    putpar("RG", "1")
+    set_rg(1)
+    verify_acq_write("TD", td, "int")   # TD decides the row length
 
 
 def run_zg_and_wait(expno_dir, what, ocxo_s=None):
@@ -1535,6 +2088,10 @@ def run_rga():
     SIMULATE/DESKTEST return a fixed mock value (no hardware touched)."""
     if hw_skip():
         print "spin_noise_run: %s -> mocked 'rga' (RG=101)" % hw_mode_name()
+        # The real rga leaves its result IN the dataset; the mock does the
+        # same so a desktest bundle's calibration.rg_ladder and
+        # experiments[] agree (Oulu's did not: 101 vs 1.0 on expno 16).
+        set_rg(101.0)
         return 101.0
     ok, _r = safe_hw_cmd("rga", "rga (receiver gain optimization)")
     if not ok:
@@ -1839,7 +2396,7 @@ def acquire_quick_1d(meta, template, dsname, expno, role, o1_hz,
     putpar("PULPROG", "zg")
     set_common_acq(o1_hz, TD_LADDER, SWH_HZ, 1, D1_REF_S)
     set_small_flip(p90_us, p90_db, db_par)
-    putpar("RG", str(RDOPT_RG))
+    set_rg(RDOPT_RG)
     clear_raw_data(ds_path(cd))  # stale template copy must not pass as data
     t0 = now_local()
     ocxo_s = ocxo_expected_s(TD_LADDER, SWH_HZ, 1, 1, D1_REF_S, 1)
@@ -3054,7 +3611,7 @@ def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
             noise_rg = run_rga()
             if noise_rg is None:
                 noise_rg = fallback_rg
-        putpar("RG", str(noise_rg))
+        set_rg(noise_rg)
         clear_raw_data(ds_path(cd))
         t0 = now_local()
         ocxo_s = ocxo_expected_s(TD_ROW, SWH_HZ, 1, n_rows, D1_NOISE_S, 2)
@@ -3162,10 +3719,14 @@ ph31=0
 """
 
 
-def find_pp_user_dir():
-    """Locate <TSHOME>/exp/stan/nmr/lists/pp/user.  TSHOME discovery is
-    heuristic (java property, env vars); on failure the operator is asked
-    once for the path.  Returns dir path or None."""
+def find_tshome_candidates():
+    """TopSpin installation directories this script can see: the JVM's
+    XWINNMRHOME property, then the environment (XWINNMRHOME, TOPSPIN_HOME,
+    TS_HOME), each once.  Heuristic -- TopSpin documents no API for it --
+    and used for two lookups only: the user pulse-program directory
+    (find_pp_user_dir) and, since v0.7.5, the standard parameter library
+    exp/stan/nmr/par an F1 parameter file is copied from when the console
+    did not create one (ensure_f1_files; Oulu, 2026-09-25)."""
     candidates = []
     try:
         if IN_TOPSPIN:
@@ -3177,11 +3738,18 @@ def find_pp_user_dir():
     for env in ("XWINNMRHOME", "TOPSPIN_HOME", "TS_HOME"):
         try:
             p = os.environ.get(env)
-            if p:
+            if p and p not in candidates:
                 candidates.append(p)
         except CATCHABLE:
             pass
-    for c in candidates:
+    return candidates
+
+
+def find_pp_user_dir():
+    """Locate <TSHOME>/exp/stan/nmr/lists/pp/user.  TSHOME discovery is
+    heuristic (find_tshome_candidates); on failure the operator is asked
+    once for the path.  Returns dir path or None."""
+    for c in find_tshome_candidates():
         d = os.path.join(c, "exp", "stan", "nmr", "lists", "pp", "user")
         if os.path.isdir(os.path.join(c, "exp", "stan", "nmr", "lists",
                                       "pp")):
@@ -3303,6 +3871,7 @@ def main():
             os.makedirs(ds_path(template))
         except CATCHABLE:
             pass
+    SESSION_TEMPLATE[0] = template     # ensure_f1_files() copies from here
 
     # ---------------------------------------------------------------- 1
     # Operator Q&A: facility.
@@ -3663,11 +4232,19 @@ def main():
         # Shim.
         ok_shim, _r = safe_hw_cmd("topshim", "topshim")
         if not ok_shim:
+            # topshim refuses with the lock off ("getLockAndSweepStatus -
+            # lock is off: please lock in prior to shimming" -- Torino,
+            # 2026-09-22) and this protocol keeps the lock off, so this
+            # dialog is the EXPECTED path on every console: say so, or
+            # the operator wonders whether to shim again.
             xcmd_or_dialog(
                 "topshim 1d",
                 "spin_noise_run: shimming",
                 "Shim the sample by your usual method (gs / simplex / "
-                "manual).")
+                "manual).\n\nAutomatic shimming (topshim) refuses to run "
+                "while the lock is off,\nand this protocol keeps the lock "
+                "off -- if you shimmed before starting\nthe run (lock on), "
+                "just press OK.")
             meta["calibration"]["topshim_ok"] = False
         else:
             meta["calibration"]["topshim_ok"] = True
@@ -3757,7 +4334,7 @@ def main():
                 max_rg = 64.0
             rung = max_rg
         else:
-            putpar("RG", str(rung))
+            set_rg(rung)
         clear_raw_data(ds_path(cd))
         t0 = now_local()
         ocxo_s = ocxo_expected_s(TD_LADDER, SWH_HZ, 1, 1, D1_REF_S, 1)
@@ -3787,7 +4364,7 @@ def main():
     make_2d(REF_ROWS)             # already 2D: verifies F1 TD only
     set_common_acq(o1_hz, TD_ROW, SWH_HZ, 1, D1_REF_S)
     set_small_flip(p90_us, p90_db, db_par)
-    putpar("RG", str(moderate_rg))
+    set_rg(moderate_rg)
     clear_raw_data(ds_path(cd))
     t0 = now_local()
     ocxo_s = ocxo_expected_s(TD_ROW, SWH_HZ, 1, REF_ROWS, D1_REF_S, 1)
@@ -3828,7 +4405,7 @@ def main():
         noise_rg = run_rga()
         if noise_rg is None:
             noise_rg = max_rg
-        putpar("RG", str(noise_rg))
+        set_rg(noise_rg)
         clear_raw_data(ds_path(cd))
         t0 = now_local()
         # NON-modal by design: a blocking dialog here stranded overnight
@@ -3870,7 +4447,7 @@ def main():
     make_2d(REF_ROWS)
     set_common_acq(o1_hz, TD_ROW, SWH_HZ, 1, D1_REF_S)
     set_small_flip(p90_us, p90_db, db_par)
-    putpar("RG", str(moderate_rg))
+    set_rg(moderate_rg)
     clear_raw_data(ds_path(cd))
     t0 = now_local()
     ocxo_s = ocxo_expected_s(TD_ROW, SWH_HZ, 1, REF_ROWS, D1_REF_S, 1)

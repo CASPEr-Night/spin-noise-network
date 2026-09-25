@@ -23,11 +23,21 @@ This executes `topspin/spin_noise_run.py` **unmodified** end to end
 buffers, and unicode dialog strings exactly as TopSpin's embedded Jython
 delivers them). Requires `jython` (2.7.x) and `python3` on PATH.
 
-The harness runs the script under eight modelled consoles
+The harness runs the script under ten modelled consoles
 (`HARNESS_TS_FLAVOR` in `testing/run_jython_harness.sh`; a few seconds
-each, ~3 min for the whole suite including the report and clock-recovery
+each, ~4 min for the whole suite including the report and clock-recovery
 steps). All of them accept PARMODE by enum name only and read it back as
-the ordinal, as TopSpin does. `legacy` is otherwise permissive and has no
+the ordinal, as TopSpin does; NONE of them creates the F1 parameter file
+`acqu2` on a scripted `PARMODE` write, and while a dataset says 2D
+without `acqu2` every F1 read or write pops the console's own dialog
+(recorded, no exception) and every parameter write into the dataset is
+dropped — what TopSpin 3.7.0 did at Oulu (2026-09-25) and TopSpin 4.4.0
+at Torino's first live attempt (2026-09-22) is the model for every
+flavor; only the operator's own `parmode` (a fixture side effect of the
+'make dataset 2D' dialog) creates the file, as TopSpin's does, and an
+existing `acqu2` keeps its `FnMODE` across `PARMODE` and `1 TD` writes,
+as `putpar` edits only the parameter it was given. `legacy` is otherwise
+permissive and has no
 `GETACQUDIM` (old TopSpin); `ts44` reproduces Torino's TopSpin 4.4.0
 (2026-09-18: `1 FnMODE` absent from the F1 map, a rejected `PUTPAR`
 raising a Java exception); `ts44-stale` makes the F1 map unavailable
@@ -40,8 +50,26 @@ direct-dimension TD, which the script must distrust without a dialog;
 at the probe, then trusted writes); `ts44-f1route` routes the F1 TD write
 to the direct dimension (detected, undone, operator asked, recurrence
 announced); `ts44-f1mismatch` reads F1 TD back off by one (bounded loop,
-then trusted). The v0.7.2 script fails these flavors (unscripted
-`parmode` dialog), so the test can fail.
+then trusted); `legacy-2dtemplate` starts from a 2D template dataset
+(Torino's first desktest: the setup expno and the ladder rungs must be
+made 1D; its template `acqu2` carries `FnMODE` `5`, which the script
+must set to `0` in the session's pseudo-2D expnos — by file edit, one
+reload — while the template file keeps its `5`); `legacy-noacqu2` is the
+name under which Oulu's TopSpin 3.7.0 (2026-09-25) was first modelled and
+now differs from `legacy` only in having `GETACQUDIM`, as 3.7.0 does. On
+every 1D-template flavor the script must therefore create the file
+itself from the console's parameter library at the attended probe,
+before touching F1 (copying `acqu2` and `proc2` only, never a status
+file, and setting `FnMODE` to `0` — *undefined*, Bruker's rule for a
+pulse program without an `mc` statement — in the copy by file edit: the
+fixture library set carries `6`), with no dialog and every TD/RG write
+verified by readback; expnos 12 and 13 inherit the file via `WR`. The two
+flavors that need the operator's `parmode` (`ts44-strict`, `ts44-dimlie`)
+find the file that step made and copy nothing. The v0.7.2 script fails
+the `ts44*` flavors (unscripted `parmode` dialog) and the v0.7.4 script
+fails every 1D-template flavor (stray console dialogs, lost writes, no
+`acqu2` in the bundle — Torino's live run on 4.4.0 reproduced in the
+stub), so the test can fail.
 
 One command runs everything:
 

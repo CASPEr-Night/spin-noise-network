@@ -397,9 +397,71 @@ bad = find_offenders('"1 TD"', {None, "set_f1_td", "f1_td_readback",
 check("guard: F1 TD addressed only via set_f1_td / f1_td_readback "
       "(verified readback, bounded operator fallback)", not bad,
       "; ".join(bad))
-bad = find_offenders("FnMODE", set())
-check("guard: FnMODE never written or read by the script (Bruker requires "
-      "'undefined' without an mc statement)", not bad, "; ".join(bad))
+# FnMODE may be read AND written only inside the F1-file helpers -- the
+# copy path (ensure_f1_files), the inherited-file path
+# (ensure_f1_fnmode_undefined), the shared edit (_set_fnmode_undefined),
+# its recorder (_record_fnmode_edit) and make_2d, which orders them --
+# and there only as a plain text edit of the acqu2 file: a library set or
+# a 2D template carries the mode of ITS experiment, and Bruker's rule is
+# that 'undefined' (0) must be used when the pulse program has no mc
+# statement, true of zg2d and zgnoise2d.  Never through the parameter API:
+# TopSpin 4.4.0 rejected PUTPAR("1 FnMODE", ...) (Torino, 2026-09-18) and
+# v0.7.3's rule 'never PUTPAR FnMODE' stands.
+_FN_OWNERS = {"ensure_f1_files", "ensure_f1_fnmode_undefined",
+              "_set_fnmode_undefined", "_record_fnmode_edit", "make_2d"}
+bad = find_offenders("FnMODE", _FN_OWNERS)
+_fn_api = [ln for own in _FN_OWNERS for ln in function_body(own)[0]
+           if "FnMODE" in ln and not is_comment(ln)
+           and re.search(r"(putpar|PUTPAR|getpar|GETPAR)\s*\(", ln)]
+_fn_body = "\n".join(function_body("_set_fnmode_undefined")[0])
+check("guard: FnMODE read/written only inside the F1-file helpers and "
+      "make_2d, never through the parameter API (Bruker requires "
+      "'undefined' without an mc statement; v0.7.3: never PUTPAR FnMODE); "
+      "the edit is binary in and out so line endings survive a Windows "
+      "console, and reports whether it wrote anything",
+      not bad and not _fn_api and 'tag = "##$FnMODE="' in _fn_body
+      and 'tag + " 0\\n"' in _fn_body
+      and 'open(acqu2_path, "rb")' in _fn_body
+      and 'open(acqu2_path, "wb")' in _fn_body
+      and 'open(acqu2_path, "r")' not in _fn_body
+      and 'open(acqu2_path, "w")' not in _fn_body
+      and 'if seen and was == "0":' in _fn_body
+      and "return was, 0" in _fn_body and "return was, 1" in _fn_body
+      and re.search(r"\b(putpar|PUTPAR|getpar|GETPAR)\s*\(", _fn_body) is None,
+      "; ".join(bad + _fn_api))
+_ef0 = "\n".join(function_body("ensure_f1_files")[0])
+_rec = "\n".join(function_body("_record_fnmode_edit")[0])
+check("guard: ensure_f1_files sets FnMODE undefined in the copy BEFORE the "
+      "dataset is re-read (RE) and records the edit (f1_fnmode_edits; "
+      "f1_fnmode_copied keeps the first file's value)",
+      0 < _ef0.find("_set_fnmode_undefined(acqu2)")
+      < _ef0.find("_record_fnmode_edit(was)")
+      < _ef0.find("reload_current_dataset()")
+      and 'PARAM_API["f1_fnmode_edits"]' in _rec
+      and 'PARAM_API["f1_fnmode_copied"]' in _rec
+      and 'if PARAM_API["f1_fnmode_edits"] == 1:' in _rec)
+_efn = "\n".join(function_body("ensure_f1_fnmode_undefined")[0])
+check("guard: ensure_f1_fnmode_undefined edits an INHERITED acqu2 that says "
+      "anything but 0 (absent = undefined, left alone), never the "
+      "operator's template dataset, by the same file edit BEFORE one RE, "
+      "and reloads nothing when nothing changed; no dialog",
+      0 < _efn.find("SESSION_TEMPLATE[0]")
+      < _efn.find('jcamp_value(acqu2, "FnMODE")')
+      < _efn.find('if was is None or was == "0":')
+      < _efn.find("_set_fnmode_undefined(acqu2)")
+      < _efn.find("if not changed:")
+      < _efn.find("_record_fnmode_edit(was)")
+      < _efn.find("reload_current_dataset()")
+      and "CONFIRM(" not in _efn and "MSG(" not in _efn)
+# Only the parameter files travel with the copy: a status file (acqu2s /
+# proc2s) describes acquired data -- zg writes it -- and a copied one would
+# describe the library set's experiment.
+check("guard: the F1-file copy carries acqu2 and proc2 only, never the "
+      "status files acqu2s / proc2s",
+      re.search(r'^F1_ACQ_FILES\s*=\s*\("acqu2",\)', SRC, re.M) is not None
+      and re.search(r'^F1_PROC_FILES\s*=\s*\("proc2",\)', SRC, re.M) is not None
+      and "acqu2s" not in "\n".join(function_body("_copy_f1_files")[0])
+      and "proc2s" not in "\n".join(function_body("_copy_f1_files")[0]))
 bad = find_offenders("GETACQUDIM(", {"acqu_dim_readback"})
 check("guard: GETACQUDIM( only inside acqu_dim_readback (wrapped: absent "
       "on old TopSpin)", not bad, "; ".join(bad))
@@ -425,6 +487,66 @@ check("guard: make_2d/make_1d route PARMODE through set_parmode + "
       "set_parmode(2)" in _m2 and "parmode_operator_dialog(2)" in _m2
       and "set_f1_td(rows)" in _m2
       and "set_parmode(1)" in _m1 and "parmode_operator_dialog(1)" in _m1)
+# Oulu, TopSpin 3.7.0, 2026-09-25: PARMODE 2D accepted, acqu2 never
+# created; the console popped its own dialog once per run (trigger not
+# established -- an F1 GETPAR is one candidate) and every parameter write
+# into the dataset was lost silently.  make_2d must make
+# the file exist between the switch and the row count, the F1 readback
+# must never GETPAR while it is absent, and TD/RG must be read back after
+# writing (RG only through set_rg, tolerant of the console's gain ladder).
+_fr = "\n".join(function_body("f1_td_readback")[0])
+_ef = "\n".join(function_body("ensure_f1_files")[0])
+_sc = "\n".join(function_body("set_common_acq")[0])
+check("guard: make_2d calls ensure_f1_files, then ensure_f1_fnmode_undefined, "
+      "between the PARMODE switch and set_f1_td (the F1 parameter file must "
+      "exist, and say FnMODE undefined, before any F1 access)",
+      0 < _m2.find("parmode_operator_dialog(2)") < _m2.find("ensure_f1_files(")
+      < _m2.find("ensure_f1_fnmode_undefined()")
+      < _m2.find("set_f1_td(rows)"))
+check("guard: f1_td_readback skips GETPAR while acqu2 is absent (a "
+      "candidate trigger of the console dialog Oulu saw; TopSpin 3.7.0)",
+      0 < _fr.find("if d and not f1_files_present(d):")
+      < _fr.find("raw = GETPAR(name)"))
+check("guard: ensure_f1_files copies acqu2 from template / session expno / "
+      "the console's parameter library, reloads (RE), records the source, "
+      "and falls back to the operator's parmode ONCE per session (a later "
+      "make_2d runs unattended: no dialog there)",
+      "_f1_source_candidates(" in _ef and "reload_current_dataset()" in _ef
+      and 'PARAM_API["f1_files_source"]' in _ef
+      and 'PARAM_API["f1_files_created"]' in _ef
+      and "parmode_operator_dialog(" in _ef
+      and 0 < _ef.find('if PARAM_API["f1_files_source"] == "operator":')
+      < _ef.find("parmode_operator_dialog(")
+      and '"template"' in SRC and '"expno:%d"' in SRC and '"par:"' in SRC
+      and "find_tshome_candidates()" in "\n".join(
+          function_body("_f1_source_candidates")[0]))
+check("guard: find_pp_user_dir shares TSHOME discovery with the parameter-"
+      "library lookup (find_tshome_candidates)",
+      "find_tshome_candidates()" in "\n".join(function_body("find_pp_user_dir")[0])
+      and 'getProperty("XWINNMRHOME")' in "\n".join(
+          function_body("find_tshome_candidates")[0]))
+bad = find_offenders('putpar("RG"', {"set_rg"})
+check("guard: RG written only through set_rg (readback-verified within one "
+      "console gain step)", not bad, "; ".join(bad))
+check("guard: set_common_acq verifies TD by readback (verify_acq_write) and "
+      "the mocked rga writes RG like the real one",
+      'verify_acq_write("TD", td, "int")' in _sc and "set_rg(1)" in _sc
+      and "set_rg(101.0)" in "\n".join(function_body("run_rga")[0]))
+check("guard: verify_acq_write reloads and rewrites once, then counts "
+      "(acq_write_mismatch / last_acq_write_mismatch), never dialogues",
+      'PARAM_API["acq_write_mismatch"]' in "\n".join(
+          function_body("verify_acq_write")[0])
+      and 'PARAM_API["last_acq_write_mismatch"]' in "\n".join(
+          function_body("verify_acq_write")[0])
+      and "reload_current_dataset()" in "\n".join(
+          function_body("verify_acq_write")[0])
+      and "CONFIRM(" not in "\n".join(function_body("verify_acq_write")[0]))
+check("meta: schema documents the v0.7.5 param_api keys",
+      all(k in json.dumps(schema["properties"]["software"]["properties"]
+                          ["param_api"])
+          for k in ("f1_files_created", "f1_files_source",
+                    "f1_fnmode_edits", "f1_fnmode_copied",
+                    "acq_write_mismatch", "last_acq_write_mismatch")))
 check("guard: set_parmode recognises an already-2D dataset, writes the enum "
       "NAME, reloads (RE) and reads back; never re-probes a rejected form",
       "if acqu_dim_readback() == ndim:" in _sp
@@ -500,8 +622,20 @@ check("guard: the stub models the console -- PARMODE by name only "
       and '"ts44-f1echo"' in STUB_SRC and '"ts44-dimlie"' in STUB_SRC
       and '"ts44-f1route"' in STUB_SRC and '"ts44-f1mismatch"' in STUB_SRC
       and 'raise NameError("GETACQUDIM")' in STUB_SRC)
-check("guard: the harness runs all eight console flavors, the feature "
-      "variant also under the strict flavor",
+check("guard: the stub models the observed consoles (3.7.0 Oulu, 4.4.0 "
+      "Torino) on EVERY flavor -- PARMODE 2D accepted, no acqu2 from a "
+      "scripted write, the console's dialog on F1 access, every write into "
+      "the dataset dropped -- the F1 files only the operator's parmode "
+      "creates, and an existing acqu2 keeping its FnMODE",
+      '"legacy-noacqu2"' in STUB_SRC and "STRAY_DIALOGS" in STUB_SRC
+      and "The requested format file is invalid" in STUB_SRC
+      and "PUTPAR-DROPPED" in STUB_SRC and "def _write_f1_files" in STUB_SRC
+      and "return _is_2d(params) and not _has_acqu2(dsdir)" in STUB_SRC
+      and 'FLAVOR[0] == "legacy-noacqu2" and _is_2d' not in STUB_SRC
+      and "def _existing_fnmode" in STUB_SRC
+      and '_stray_dialog(dsdir, "PUTPAR", _u(name))' in STUB_SRC)
+check("guard: the harness runs all ten console flavors (the Oulu model in "
+      "both modes), the feature variant also under the strict flavor",
       all(f in SH_SRC for f in ('"legacy simulate"', '"legacy desktest"',
                                 '"ts44 desktest"', '"ts44-stale desktest"',
                                 '"ts44-strict desktest"',
@@ -509,13 +643,25 @@ check("guard: the harness runs all eight console flavors, the feature "
                                 '"ts44-dimlie desktest"',
                                 '"ts44-f1route desktest"',
                                 '"ts44-f1mismatch desktest"',
+                                '"legacy-noacqu2 simulate"',
+                                '"legacy-noacqu2 desktest"',
                                 '"ts44-strict desktest rdopt sweep autostep"'))
       and "HARNESS_TS_FLAVOR" in SH_SRC and "HARNESS_TS_FLAVOR" in ENTRY_SRC,
       "testing/run_jython_harness.sh or jython_entry.py no longer run the flavors")
-check("guard: the harness runs the 2D-template flavor and checks per-expno "
-      "dimensionality",
+check("guard: the harness fails on stray console dialogs and lost writes, "
+      "checks acqu2 in the bundle and the recorded td/rg/pulprog per role",
+      "STRAY_DIALOGS" in ENTRY_SRC and "PUTPAR-DROPPED" in ENTRY_SRC
+      and '"data/%d/acqu2" % _e' in ENTRY_SRC
+      and "recorded acquisition parameters match" in ENTRY_SRC
+      and '"legacy-noacqu2"' in ENTRY_SRC)
+check("guard: the harness runs the 2D-template flavor, checks per-expno "
+      "dimensionality, and asserts the FnMODE normalisation per flavor "
+      "(f1_fnmode_edits, FnMODE 0 on disk, the template file untouched)",
       '"legacy-2dtemplate desktest"' in SH_SRC
-      and "whatever the template was" in ENTRY_SRC)
+      and "whatever the template was" in ENTRY_SRC
+      and "f1_fnmode_edits" in ENTRY_SRC
+      and "template acqu2 is untouched" in ENTRY_SRC
+      and "TEMPLATE_ACQU2" in ENTRY_SRC)
 check("guard: the harness asserts probed-once, an actual readback, the "
       "attended operator steps and the unreliable-readback flags",
       "no stray dialog repeats" in ENTRY_SRC

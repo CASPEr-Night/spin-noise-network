@@ -2,7 +2,7 @@
 
 Operational script for the remote supervised pilot: we screen-share (or
 NoMachine) into the facility's TopSpin workstation while a local colleague
-sits at the console. `topspin/spin_noise_run.py` (v0.7.4) has not yet run a
+sits at the console. `topspin/spin_noise_run.py` (v0.7.5) has not yet run a
 full session on a real spectrometer. Its live contacts so far are two
 unsupervised desktests at Torino (TopSpin 4.4.0): the first (2026-09-17)
 stopped on a namespace bug fixed in v0.7.2; the second (2026-09-18, v0.7.2)
