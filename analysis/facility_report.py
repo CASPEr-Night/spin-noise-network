@@ -115,7 +115,10 @@ matplotlib):
      flags short sessions as inconclusive. Older bundles without the
      audit are reported as such, without penalty; blocks whose
      pulse-program text or acqus cannot be modeled with certainty fall
-     back to the script-recorded expectations, flagged per block.
+     back to the script-recorded expectations, flagged per block. The
+     text is read from data/<expno>/pulseprogram (TopSpin 2.x/3.x) or
+     pulseprogram.precomp (TopSpin 4.x Neo consoles, which store only
+     the preprocessed program -- Torino, 2026-09-25).
   9. --meta-override PATH: a JSON object deep-merged into the bundle's
      meta.json BEFORE analysis (e.g. measured coil/preamp temperatures
      the operator did not have at packing time). The bundle is checked
@@ -695,13 +698,36 @@ class Bundle(object):
         except Exception:
             return {}
 
+    # The pulse-program text an expno carries, by console generation.
+    # TopSpin 2.x/3.x store the source as data/<expno>/pulseprogram; the
+    # Avance Neo consoles (TopSpin 4.x, BladeEpu) store only the
+    # preprocessed text, data/<expno>/pulseprogram.precomp -- Torino's
+    # 2026-09-25 bundle has no 'pulseprogram' in any expno.  The precomp
+    # is cpp output: the same statements with '# <line> "<file>"' markers
+    # and the #include/#define lines resolved, so the timing parser (which
+    # skips '#' lines) reads it like the source.  Without this fallback a
+    # TopSpin 4.x bundle kept the script-recorded expectation for every
+    # block, i.e. AQ from the REQUESTED SWH (6900 Hz) while the console
+    # acquired at its rounded SW_h (6849.3 Hz at Torino): a 0.74% shortfall
+    # on every block that the offset fit read as a console-clock offset.
+    _PP_FILES = ("pulseprogram", "pulseprogram.precomp")
+
+    def pulseprogram_source(self, expno):
+        """The bundled file name holding this expno's pulse-program text
+        ('pulseprogram' or 'pulseprogram.precomp'), or None."""
+        for fn in self._PP_FILES:
+            if self.has("data/%d/%s" % (expno, fn)):
+                return fn
+        return None
+
     def pulseprogram_text(self, expno):
         """The pulse-program text TopSpin stores in the expno dir, or None."""
-        p = "data/%d/pulseprogram" % expno
-        if not self.has(p):
+        fn = self.pulseprogram_source(expno)
+        if fn is None:
             return None
         try:
-            return self.read(p).decode("utf-8", "replace")
+            return self.read("data/%d/%s" % (expno, fn)).decode(
+                "utf-8", "replace")
         except Exception:
             return None
 
@@ -3952,7 +3978,9 @@ def analyze_rg_ladder(bundle, meta, f0_guess, fs_default):
 
 # The expectation refinement derives each block's OCXO-implied duration
 # from the pulse-program text TopSpin stored in that expno (bundled by
-# the run script's copy_tree) plus the acqus parameters -- NOT from a
+# the run script's copy_tree: 'pulseprogram' on TopSpin 2.x/3.x, the
+# preprocessed 'pulseprogram.precomp' on the TopSpin 4.x Neo consoles --
+# see Bundle.pulseprogram_source) plus the acqus parameters -- NOT from a
 # name-keyed table of assumed structures: the text is the record of what
 # the pulse programmer actually executed. The parser is deliberately
 # conservative: any statement it does not recognize, any ambiguous loop
@@ -3960,6 +3988,10 @@ def analyze_rg_ladder(bundle, meta, f0_guess, fs_default):
 # expectation, flagged per block. The wall/OCXO consistency gate then
 # arbitrates empirically: a wrong timing model shows up as a wall
 # mismatch and excludes the block loudly instead of biasing the fit.
+# A consequence on TopSpin 4.x: the preprocessor expands Bruker's 'mc'
+# macro (library zg) into computed MCWRK/MCREST delays, so the zg rungs
+# stay script-recorded there (they are gate-excluded on hardware anyway),
+# while zgnoise2d and zgref2d -- no mc, nothing computed -- are modelled.
 
 _PP_LABEL = re.compile(r"^(\d+)\s+(.*)$")
 _PP_GO = re.compile(r"^go=(\d+)$")
@@ -3973,6 +4005,15 @@ _PP_UNIT_S = {"s": 1.0, "m": 1e-3, "u": 1e-6, "n": 1e-9}
 _PP_ZERO = re.compile(r"^(ze|zd|wr|if|mc|lo|to|times|exit|=|"
                       r"ph\d+(=.*)?|#\d*|td\d*|\d+|"
                       r"F\d\([A-Za-z0-9_]*\))$")
+# A quoted definition line, "name=expression".  Bruker's zg, zg2d and the
+# project's zgref2d carry "acqt0=-p1*2/3.1416": the receiver's time-origin
+# constant (where the FID's t=0 sits relative to the pulse), compile-time
+# bookkeeping with no duration.  Any OTHER definition is a computed
+# delay -- zg2d's "DELTA=d20-((d1+aq)*(ns+ds))-30m", the line that came
+# out negative at Torino (2026-09-25) because the run script never sets
+# d20 -- whose value depends on parameters this parser does not
+# evaluate, so such a block keeps its recorded expectation.
+_PP_DEFINE = re.compile(r'^"\s*([A-Za-z_]\w*)\s*=(.*)"$')
 
 
 def _jcamp_array(acq, key):
@@ -3992,15 +4033,24 @@ def pp_timing_model(pp_text, rows):
     label and the lo/mc line that jumps back to it); pre_terms execute
     once. Statements sharing a line with a delay run concurrently with
     it (the 'd1 wr #0 if #0 ze' idiom), so a line's duration is its
-    single duration token. Returns (None, None, reason) when the text
-    cannot be modeled with certainty -- unknown statement, two durations
-    on one line, no go, or a missing loop when rows > 1.
+    single duration token. A quoted "acqt0=..." definition is skipped
+    (the receiver's time-origin constant, no duration); any other quoted
+    definition is a computed delay. Returns (None, None, reason) when
+    the text cannot be modeled with certainty -- a computed delay,
+    unknown statement, two durations on one line, no go, or a missing
+    loop when rows > 1.
     """
     lines, labels = [], {}
     for raw in pp_text.splitlines():
         code = raw.split(";", 1)[0].strip()
         if not code or code.startswith("#"):    # blank / preprocessor
             continue
+        m = _PP_DEFINE.match(code)
+        if m:
+            if m.group(1) == "acqt0":
+                continue                        # no duration (see above)
+            return None, None, ("computed delay definition %s -- not "
+                                "evaluated" % code)
         m = _PP_LABEL.match(code)
         if m:
             labels[int(m.group(1))] = len(lines)
@@ -4100,7 +4150,9 @@ def refined_block_expectation(bundle, exps_by_no, block):
     pp_text = bundle.pulseprogram_text(expno)
     if pp_text is None:
         return None, {"refine_note": "no pulseprogram text in the bundle "
-                                     "for this expno"}
+                                     "for this expno (neither pulseprogram "
+                                     "nor pulseprogram.precomp)"}
+    pp_source = bundle.pulseprogram_source(expno)
     exp_meta = exps_by_no.get(block.get("expno")) or {}
     try:
         td = int(acq["TD"])
@@ -4161,7 +4213,7 @@ def refined_block_expectation(bundle, exps_by_no, block):
         return None, {"refine_note": "non-positive modeled duration"}
     info = {"de_s_per_scan": de_s, "scans": rows,
             "pulprog": str(acq.get("PULPROG", "")).strip("<> "),
-            "pp_row_terms": len(row)}
+            "pp_row_terms": len(row), "pp_source": pp_source}
     if isinstance(rec, (int, float)) and rec > 0:
         # informational only -- the wall gate is the arbiter; a large
         # value here usually means the acquisition-side formula missed

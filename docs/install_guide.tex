@@ -58,7 +58,7 @@
 \large (Bruker / TopSpin)}
 \author{John W. Blanchard (\href{mailto:jwbquantum@gmail.com}{jwbquantum@gmail.com})
 \and Reza Ebadi \and Claude (Anthropic)}
-\date{Software v0.7.5 --- September 2026}
+\date{Software v0.7.6 --- September 2026}
 
 \begin{document}
 \maketitle
@@ -87,11 +87,11 @@ co-authors on any network publication their data enter.
 \begin{enumerate}[leftmargin=1.4em]
 \item Download the latest release zip:
       \url{https://github.com/CASPEr-Night/spin-noise-network/releases/latest}
-\item Copy two files onto the spectrometer workstation:
+\item Copy three files onto the spectrometer workstation:
       \file{topspin/spin\_noise\_run.py} $\rightarrow$
-      \file{<TSHOME>/exp/stan/nmr/py/user/} and
-      \file{topspin/pp/zgnoise2d} $\rightarrow$
-      \file{<TSHOME>/exp/stan/nmr/lists/pp/user/}
+      \file{<TSHOME>/exp/stan/nmr/py/user/}, and
+      \file{topspin/pp/zgnoise2d} together with \file{topspin/pp/zgref2d}
+      $\rightarrow$ \file{<TSHOME>/exp/stan/nmr/lists/pp/user/}
 \item Fill a 5\,mm tube with ${\sim}550\,\mu$L of plain water (any water ---
       you just have to know what it is), insert it, and open any existing
       \hnmr{} dataset in \ts.
@@ -150,13 +150,19 @@ https://github.com/CASPEr-Night/spin-noise-network/releases/latest
 \end{lstlisting}
 The zip is the complete \file{spin-noise-network} distribution: the \ts{}
 acquisition kit, the uploader, the metadata schema, the protocol and policy
-documents, and testing tools. Only two files go onto the spectrometer
+documents, and testing tools. Only three files go onto the spectrometer
 workstation (next section):
 \begin{itemize}
 \item \file{topspin/spin\_noise\_run.py} --- the acquisition script (Jython,
       runs inside \ts).
 \item \file{topspin/pp/zgnoise2d} --- the no-pulse pseudo-2D pulse program
       used for the noise blocks.
+\item \file{topspin/pp/zgref2d} --- the small-flip pseudo-2D pulse program
+      used for the two reference blocks (since v0.7.6): Bruker's
+      \file{zg2d} without the pacing delay it computes from \texttt{d20},
+      which the script never sets --- on Torino's Avance Neo that delay
+      came out negative and the console refused to compile \file{zg2d}
+      (2026-09-25), so the references now have a sequence of their own.
 \end{itemize}
 Keep the rest of the unpacked folder around on whatever machine will do the
 upload: the uploader, \file{uploader/upload\_bundle.py}, expects
@@ -166,7 +172,7 @@ layout. If you move the uploader out on its own, pass
 \texttt{-{}-selftest} skips schema validation with a WARN yet still prints
 \texttt{RESULT: PASS}.
 
-\section{Install (two file copies)}
+\section{Install (three file copies)}
 
 \begin{enumerate}
 \item Copy \file{spin\_noise\_run.py} to
@@ -174,7 +180,7 @@ layout. If you move the uploader out on its own, pass
       Alternative: in \ts{} type \texttt{edpy}, use \emph{File
       $\rightarrow$ Import\ldots} and pick the file --- that lands it in the
       same place.
-\item Copy \file{pp/zgnoise2d} to
+\item Copy \file{pp/zgnoise2d} \textbf{and} \file{pp/zgref2d} to
       \file{<TSHOME>/exp/stan/nmr/lists/pp/user/}.
 \item There is no step 3. No Python packages, no licenses, no network access
       is needed on the spectrometer.
@@ -186,15 +192,15 @@ layout. If you move the uploader out on its own, pass
 If you are unsure, type \texttt{set} inside \ts{} or look at the title bar of
 the \ts{} window.
 
-The script also installs \file{zgnoise2d} automatically on first run if it
-can find your \ts{} directory, so step 2 is a belt-and-braces copy --- do it
-anyway if you can.
+The script also installs both pulse programs automatically on first run if
+it can find your \ts{} directory, so step 2 is a belt-and-braces copy --- do
+it anyway if you can.
 
 \textbf{Verify \ts{} sees the script:} type \texttt{edpy} and
 \file{spin\_noise\_run} should appear in the \emph{user} source directory
-listing. The pulse program is checked again at run time: if \texttt{zg}
-cannot find it, the script tells you and detects the file once you copy it in
-by hand (Section~\ref{sec:trouble}).
+listing. The pulse programs are checked again at run time: if \texttt{zg}
+cannot find one, the script tells you and detects the file once you copy it
+in by hand (Section~\ref{sec:trouble}).
 
 \section{Verify without touching hardware}
 \label{sec:verify}
@@ -257,7 +263,7 @@ it at your desk. Pass criteria, from the release's desk-test checklist:
       \textbf{1, 10, 14, 15, 16, 11, 12, 13}.
 \item \file{meta.json} is written twice (dataset directory and bundle) and
       contains a \texttt{software} block with
-      \texttt{"script\_version": "0.7.5"} (this release),
+      \texttt{"script\_version": "0.7.6"} (this release),
       \texttt{"schema\_version": "1.2"} (the orchestrator's Bruker-only
       metadata vintage, accepted under the repository's vendor-neutral v2.0
       schema), a \texttt{script\_sha256} fingerprint, and
@@ -278,16 +284,21 @@ on the flag --- just do not send it.
 \section{The real run}
 \label{sec:dialogs}
 
-One honest note before the first live run: as of v0.7.5 the script has been
+One honest note before the first live run: as of v0.7.6 the script has been
 desk-tested end to end (a real Jython interpreter against stubbed \ts{}
 APIs modelling ten console behaviours, plus the SIMULATE/DESKTEST modes
-above) and has completed DESKTEST on a real \ts{} 4.4.0 console (Torino,
+above), has completed DESKTEST on a real \ts{} 4.4.0 console (Torino,
 September 2026), where it found two console-specific faults that were fixed
 within a day, and on a \ts{} 3.7.0 console (Oulu, September 2026), where it
 found a third (the console did not create the F1 parameter file and silently
-dropped every parameter write into the 2D datasets; fixed in v0.7.5) --- but
-it has not yet run a full live session on Bruker hardware. We therefore treat the first live run at each facility as a
-supervised pilot --- write to
+dropped every parameter write into the 2D datasets; fixed in v0.7.5), and
+has run one live session (Torino, 2026-09-25): the pulse-free noise block
+acquired and the report resolves the water spin-noise dip on it, but both
+reference blocks were refused by the console because Bruker's \file{zg2d}
+computes a pacing delay from a parameter the script never set --- fixed in
+v0.7.6 by the project's own \file{zgref2d}. A complete live session,
+references included, is still pending. We therefore treat the first live
+run at each facility as a supervised pilot --- write to
 \href{mailto:jwbquantum@gmail.com}{jwbquantum@gmail.com} and we will
 screen-share through it.
 
@@ -316,7 +327,12 @@ xpy spin_noise_run
 \item \dialog{Your facility (1/5)} --- institution, city, country, contact
       e-mail, so the bundle is attributed correctly.
 \item \dialog{Facility slug (2/5)} --- short machine-readable ID
-      (auto-suggested), used in the bundle file name.
+      (auto-suggested), used in the bundle file name. \textbf{One slug per
+      instrument:} a site with two magnets is two network nodes (e.g.
+      \texttt{uni-oulu} and \texttt{uni-oulu400}), each run under its own
+      slug; one \file{config.json} serves both at upload time (the
+      uploader only warns when a bundle's slug differs from the configured
+      one).
 \item \dialog{Contact consent} --- whether the maintainers may contact you at
       that address. The e-mail is stored only if you answer yes.
 \item \dialog{The sample (3/5)} --- description, \htwo{} fraction (\%),
@@ -377,7 +393,8 @@ expno & role \\
 \midrule
 1 & setup: tune/match, shim, P90 calibration \\
 10, 14, 15, 16 & RG ladder: quick $1^{\circ}$ 1Ds at RG $=$ 1, 8, 64, max \\
-11 & reference (open): $1^{\circ}$ pseudo-2D, 8 rows $\times$ ${\sim}19$\,s \\
+11 & reference (open): \file{zgref2d}, $1^{\circ}$ pseudo-2D, 8 rows
+     $\times$ ${\sim}19$\,s \\
 12 & \textbf{noise}: \file{zgnoise2d}, \emph{no pulse at all}, NS$=$1/row,
      RG max stable \\
 13 & reference (close): same as 11 (drift check) \\
@@ -390,14 +407,15 @@ tips at the calibrated observe power --- no long or repeated high-power
 irradiation. The script never changes instrument configuration, never touches
 your lock or sweep settings silently (it asks you and records your answer),
 and reads and writes nothing outside the \file{SPINNOISE\_<date>\_<time>} dataset
-plus the two installed files. Complete removal, if you ever want everything
+plus the three installed files. Complete removal, if you ever want everything
 gone:
 \begin{lstlisting}
 rm -rf <DATADIR>/SPINNOISE_<yyyymmdd>_<hhmm>
 rm <TSHOME>/exp/stan/nmr/py/user/spin_noise_run.py
 rm <TSHOME>/exp/stan/nmr/lists/pp/user/zgnoise2d
+rm <TSHOME>/exp/stan/nmr/lists/pp/user/zgref2d
 \end{lstlisting}
-(Windows: delete the same three paths in Explorer. \file{<DATADIR>} is the
+(Windows: delete the same four paths in Explorer. \file{<DATADIR>} is the
 data directory of the template dataset you had open.)
 
 The final dialog prints the full path of the finished bundle, which lands
@@ -464,9 +482,25 @@ python3 uploader/upload_bundle.py <bundle.zip> --selftest
 \item \textbf{``No dataset is open''} --- open any \hnmr{} dataset first (it
       is only the parameter template).
 \item \textbf{Pulse program not found at \texttt{zg}} --- copy
-      \file{pp/zgnoise2d} into the user pulse-program directory
-      (\file{<TSHOME>/exp/stan/nmr/lists/pp/user/}) by hand and rerun ---
-      the script will detect it.
+      \file{pp/zgnoise2d} and \file{pp/zgref2d} into the user pulse-program
+      directory (\file{<TSHOME>/exp/stan/nmr/lists/pp/user/}) by hand and
+      rerun --- the script will detect them.
+\item \textbf{\ts{} shows \texttt{TCube: Cannot interpret pulse program:
+      Cannot load line: duration is negative (-21166512.000000 us) In
+      'zg2d': line 24} as the opening reference (expno 11) starts, then
+      the script asks about a missing raw-data file (script v0.7.5 or
+      earlier)} --- Bruker's library \file{zg2d}, which the older script
+      used for the two reference blocks, paces its rows with a delay
+      computed as \texttt{d20 - (d1 + aq) - 30\,ms}; the script never set
+      \texttt{d20}, so with D1 $=$ 2\,s and AQ $=$ 19.1\,s the delay was
+      $-21.17$\,s and the console refused to compile the sequence. Torino's
+      first live run (2026-09-25) lost both reference blocks this way while
+      the noise block acquired normally. Answer the script's
+      \dialog{acquisition check} with Cancel and install v0.7.6, whose
+      \file{zgref2d} computes no delay. Workaround only, on an older
+      script: type \texttt{d20 21.2} with the template dataset open before
+      starting the run (each reference row then lasts 21.2\,s). See
+      \file{docs/TROUBLESHOOTING.md}.
 \item \textbf{A \texttt{parmode} dialog appears} --- some \ts{} versions ask
       before converting a dataset to 2D. Answer yes/OK --- the dataset is
       fresh, there is nothing to lose.
@@ -493,7 +527,7 @@ python3 uploader/upload_bundle.py <bundle.zip> --selftest
       \file{docs/TROUBLESHOOTING.md} for what to check in \file{meta.json}.
 \item \textbf{Old \ts{} (2.x)} --- everything is written for Jython 2.2-level
       syntax. If \file{Avance.incl} is missing, delete the \texttt{\#include}
-      line in \file{zgnoise2d} (it is not used).
+      line in \file{zgnoise2d} and in \file{zgref2d} (neither uses it).
 \item \textbf{No ATM probe / no \texttt{rga}} --- expected and handled: the
       script asks you to tune/match with \texttt{wobb} (or set RG) manually
       and confirm in a dialog.

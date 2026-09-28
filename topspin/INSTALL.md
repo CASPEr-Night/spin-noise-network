@@ -1,20 +1,25 @@
 # TopSpin installation — spin-noise network acquisition kit
 
-Two files go onto the spectrometer workstation:
+Three files go onto the spectrometer workstation:
 
 | file | destination |
 |---|---|
 | `spin_noise_run.py` | `<TSHOME>/exp/stan/nmr/py/user/` |
 | `pp/zgnoise2d` | `<TSHOME>/exp/stan/nmr/lists/pp/user/` |
+| `pp/zgref2d` | `<TSHOME>/exp/stan/nmr/lists/pp/user/` |
 
 `<TSHOME>` is your TopSpin installation directory, e.g.
 `/opt/topspin4.1.4` (Linux), `C:\Bruker\TopSpin4.1.4` (Windows),
 `/opt/topspin3.6.5`, etc. If you are unsure, type `set` inside TopSpin
 or look at the title bar of the TopSpin window.
 
-The script also **installs `zgnoise2d` automatically** on first run if
-it can find your TopSpin directory, so step 2 below is a belt-and-braces
-copy — do it anyway if you can.
+The script also **installs both pulse programs automatically** on
+first run if it can find your TopSpin directory, so step 2 below is a
+belt-and-braces copy — do it anyway if you can. `zgnoise2d` is the
+pulse-free noise sequence; `zgref2d` (since v0.7.6) is the small-flip
+reference sequence — Bruker's `zg2d` without the delay it computes from
+`d20`, which came out negative and refused to compile on Torino's
+Avance Neo (2026-09-25). Older scripts used `zg2d` directly.
 
 Works on TopSpin **2.x, 3.x and 4.x** (the script is written for the
 embedded Jython interpreter and avoids anything version-specific; every
@@ -28,7 +33,8 @@ operator dialog when missing).
 1. Copy `spin_noise_run.py` to `<TSHOME>/exp/stan/nmr/py/user/`.
    (Alternative: in TopSpin type `edpy`, use *File → Import…* and pick
    the file — that lands it in the same place.)
-2. Copy `pp/zgnoise2d` to `<TSHOME>/exp/stan/nmr/lists/pp/user/`.
+2. Copy `pp/zgnoise2d` **and** `pp/zgref2d` to
+   `<TSHOME>/exp/stan/nmr/lists/pp/user/`.
 3. There is no step 3. No Python packages, no licenses, no network
    access is needed on the spectrometer.
 
@@ -64,7 +70,12 @@ operator dialog when missing).
 5. Answer the dialogs (facility, sample, duration, and two **critical**
    confirmations: lock state and **BSMS field sweep OFF** — please
    actually check `bsmsdisp`, this one matters), and press OK at the
-   shimming dialog (step 2).
+   shimming dialog (step 2). The **facility slug** the second dialog
+   asks for is **one per instrument**: a site with two magnets is two
+   network nodes (e.g. `uni-oulu` and `uni-oulu400`), each with its own
+   slug in its own runs. One `config.json` serves both at upload time
+   (the uploader only warns when a bundle's slug differs from the
+   configured one).
 6. Walk away. Default total time is ~45 min (30 min noise block +
    setup/references). Overnight option available.
 7. A final dialog shows the path of the finished bundle zip
@@ -87,7 +98,7 @@ Dataset `SPINNOISE_<date>_<time>` in your current data directory:
 |---|---|
 | 1 | setup: tune/match, shim, P90 calibration |
 | 10, 14, 15, 16 | RG ladder: quick 1° 1D at RG = 1, 8, 64, max (rungs 2–4 sit at 14–16 because 11–13 are reserved) |
-| 11 | reference_open: 1° pseudo-2D, 8 rows × ~19 s |
+| 11 | reference_open: `zgref2d`, 1° pseudo-2D, 8 rows × ~19 s |
 | 12 | **noise**: `zgnoise2d`, *no pulse at all*, NS=1/row, RG max stable, rows fill the chosen duration |
 | 13 | reference_close: same as 11 |
 
@@ -129,9 +140,20 @@ step-by-step checklist with pass criteria is
   the script's 1D experiments inherited its row count (seen in Torino's
   desktest bundle, 2026-09-21). Stop the run, open a 1D ¹H dataset and start
   again. v0.7.4 switches the setup expno and the rungs to 1D itself.
-- **Pulse program not found at zg** — copy `pp/zgnoise2d` into
-  `<TSHOME>/exp/stan/nmr/lists/pp/user/` by hand and rerun; the script
-  will detect it.
+- **Pulse program not found at zg** — copy `pp/zgnoise2d` and
+  `pp/zgref2d` into `<TSHOME>/exp/stan/nmr/lists/pp/user/` by hand and
+  rerun; the script will detect them.
+- **TopSpin shows `Cannot load line: duration is negative
+  (-21166512.000000 us) In 'zg2d': line 24` as the opening reference
+  (expno 11) starts (script v0.7.5 or earlier)** — Bruker's `zg2d` paces
+  its rows with `"DELTA=d20-((d1+aq)*(ns+ds))-30m"` and the script never
+  set `d20`, so the delay was −21.17 s and the console refused to
+  compile it; Torino's first live run (2026-09-25) lost both reference
+  blocks this way while the noise block acquired. Answer the script's
+  *acquisition check* with Cancel and install v0.7.6, whose `zgref2d`
+  has no such line. Workaround only, on an older script: set `d20` to
+  21.2 s in the template dataset before starting (`d20 21.2`). See
+  `docs/TROUBLESHOOTING.md`.
 - **`parmode` dialog appears** — some TopSpin versions ask before
   converting a dataset to 2D; answer yes/OK (the dataset is fresh, there
   is nothing to lose).
@@ -164,7 +186,7 @@ step-by-step checklist with pass criteria is
   in `SPINNOISE_<date>_<time>`. Send the error text to the maintainers.
 - **Old TopSpin (2.x)** — everything is written for Jython 2.2-level
   syntax; if `Avance.incl` is missing, delete the `#include` line in
-  `zgnoise2d` (it is not used).
+  `zgnoise2d` and in `zgref2d` (neither uses it).
 
 ## What we ask you NOT to do
 

@@ -89,8 +89,11 @@ Pass criteria (the wrapper enforces all of them; exit code 0 = pass):
 1. Each mode run ends with `HARNESS simulate: PASS` /
    `HARNESS desktest: PASS` — meaning, per run: no unscripted dialog, no
    hardware-guard breach (`XCMD`/`ZG` never reached), no crash `ERRMSG`,
-   no abort, the full expno tree **1, 10, 14, 15, 16, 11, 12, 13**, the
-   pulse program installed, `meta.json` written twice with
+   no abort, the full expno tree **1, 10, 14, 15, 16, 11, 12, 13**, both
+   pulse programs installed, the references recorded as `zgref2d` and
+   every clock-audit expectation equal to the per-role timing model
+   (`zgref2d`: one `d1` + 30 ms per row; `zgnoise2d`: two `d1`; `zg`:
+   one `d1`), `meta.json` written twice with
    `run_mode` equal to the mode (so the bundle can never pass as data)
    and a real `sha256:<64 hex>` script self-fingerprint, and a bundle
    zip readable back through `java.util.zip.ZipFile`.
@@ -141,9 +144,10 @@ version quirks (Tier 0) and the hardware commands (Tier 1).
 |---|---|
 | `topspin/spin_noise_run.py` | `<TSHOME>/exp/stan/nmr/py/user/` |
 | `topspin/pp/zgnoise2d` | `<TSHOME>/exp/stan/nmr/lists/pp/user/` |
+| `topspin/pp/zgref2d` | `<TSHOME>/exp/stan/nmr/lists/pp/user/` |
 
-(`edpy` → *File → Import…* also works for the script; the script offers
-to install the pulse program itself, but copy it anyway.)
+(`edpy` → *File → Import…* also works for the script; the script installs
+both pulse programs itself, but copy them anyway.)
 
 ## 3. Open a 1H demo dataset
 
@@ -203,9 +207,13 @@ java-zip bundling — and mocks **only** the hardware commands, inside
       `... mocked 'pulsecal'`, later `... mocked 'rga' (RG=101)` (twice) — and no
       manual-fallback dialog appears for any of them (the mock reports
       success, as a working command would).
-- [ ] The pulse program `zgnoise2d` is written to
-      `<TSHOME>/exp/stan/nmr/lists/pp/user/` (or the script confirms it
-      is already there).
+- [ ] The pulse programs `zgnoise2d` and `zgref2d` are written to
+      `<TSHOME>/exp/stan/nmr/lists/pp/user/` (two `pulse program
+      installed:` lines in the terminal, or the script confirms both are
+      already there). `zgref2d` (v0.7.6) replaced Bruker's `zg2d` for the
+      reference blocks after Torino's first live run, where `zg2d`'s
+      `d20`-computed pacing delay came out negative and refused to
+      compile.
 - [ ] Each acquisition step prints `DESKTEST: zg mocked (...)` — no
       "cannot see a raw-data file" dialog.
 - [ ] No Jython traceback anywhere.

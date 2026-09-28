@@ -25,19 +25,24 @@ The .py is not in TopSpin's user-python directory. It belongs in
 typically `/opt/topspin4.x.y`; on Windows, `C:\Bruker\TopSpin4.x.y`.
 Re-copy, then retype the command (no `.py` extension).
 
-**"Could not write the pulse program to: ..." during the first run.**
+**"Could not write the pulse program(s) ... to: ..." during the first
+run** (scripts before v0.7.6: "Could not write the pulse program to:").
 TopSpin was installed by IT as root/admin and `pp/user` is not
-writable. Copy `topspin/pp/zgnoise2d` there by hand with elevated
-rights, exactly as the dialog asks, then press OK.
+writable. Copy `topspin/pp/zgnoise2d` **and** `topspin/pp/zgref2d` there
+by hand with elevated rights, exactly as the dialog asks, then press OK.
+Since v0.7.6 the script installs two pulse programs: `zgnoise2d` for the
+noise block and `zgref2d` for the two reference blocks.
 
-**A TopSpin error names `zgnoise2d` right when the noise block starts,
-then the script asks about a missing raw-data file.**
+**A TopSpin error names `zgnoise2d` right when the noise block starts
+(or `zgref2d` when a reference block starts, v0.7.6 or later), then the
+script asks about a missing raw-data file.**
 The pulse program is absent or did not compile (very old TopSpin
 without `Avance.incl`: open the pp file and comment out the
-`#include` line — the sequence uses none of its macros). Press
+`#include` line — neither sequence uses any of its macros). Press
 **Cancel** at the acquisition-check dialog, fix the pp, rerun. Never
 press OK through that dialog: it would finish the session with no
-noise data in the bundle.
+noise (or no reference) data in the bundle. A message about a
+*negative duration* in `zg2d` is a different fault — see section 2.
 
 **`ValueError: invalid literal for float:` right after the optional
 probe-temperature dialog (script v0.7.1 or earlier).**
@@ -144,7 +149,8 @@ another expno of the session, else from the console's own standard
 parameter library (`<TSHOME>/exp/stan/nmr/par/COSYGPSW/acqu2` or the
 first 2D set found there), sets `FnMODE` to `0` (*undefined*) in the
 copy by editing the file — Bruker's rule is that *undefined* must be used
-when the pulse program has no `mc` statement, which is true of `zg2d` and
+when the pulse program has no `mc` statement, which is true of the
+reference program (`zg2d` then, `zgref2d` since v0.7.6) and of
 `zgnoise2d`; the library set carried the mode of its own experiment; the
 script still never writes `FnMODE` through the parameter API, the v0.7.3
 rule — then reloads the dataset; the later pseudo-2D datasets inherit the
@@ -224,6 +230,45 @@ The RG ladder and opening reference then run unattended (~15 min),
 and the noise block auto-starts after a 30 s status-line countdown.
 There is no "noise block starting" dialog (versions before 0.5.1 had
 one — it stranded overnight runs when nobody was left to click it).
+
+**TopSpin shows `TCube: Cannot interpret pulse program: Cannot load line:
+duration is negative (-21166512.000000 us) In 'zg2d': line 24` (then the
+same for `FCube2`, then `CubeManager: Cannot run experiment ... TCube: is
+not ready`) as the opening reference (expno 11) starts, and the script
+asks about a missing raw-data file (script v0.7.5 or earlier).**
+Bruker's library `zg2d` (avance-version 12/01/11), which the older
+script used for the two small-flip reference blocks (expnos 11 and 13),
+paces successive rows with a computed delay,
+`"DELTA=d20-((d1+aq)*(ns+ds))-30m"` — `d20` being, in Bruker's own
+comment, the "delay between start of different 1D spectra". The script
+never sets `D20` (it is 0 in every parameter set it starts from), so
+with D1 = 2 s and AQ = 19.137 s the delay is 0 − (2 + 19.137) − 0.03 =
+−21.167 s — the value in the message — and the console refuses to
+compile the sequence; no `ser` is written. First met at Torino (Avance
+Neo 400, TopSpin 4.4.0, 2026-09-25, the first live run of v0.7.5): the
+noise block (expno 12, `zgnoise2d`) acquired normally — 89 rows, and
+the report resolves the water spin-noise dip on it — but both reference
+blocks failed this way; the operator answered the script's acquisition
+check with OK, so the session completed and packed a valid bundle
+without reference data, and the report has no transduction constant
+and no exclusion curve. The same `zg2d` ships with every TopSpin
+2.x–4.x, so every console will do this. **Fixed in v0.7.6:** the
+references use the project's own `zgref2d` — Bruker's `zg2d` without the
+`DELTA` line and the `d20` dependence: one `d1` per row, the pulse, the
+acquisition, 30 ms before the row is written; nothing is computed, so
+nothing can come out negative — installed into `pp/user` next to
+`zgnoise2d` by the script (or copied by hand from `topspin/pp/`).
+Install v0.7.6 before a live run. **Workaround only**, for a run that
+must go ahead on an older script: give `D20` a value of at least
+`d1 + aq + 0.03 s` — 21.2 s with the default parameters (AQ is
+19.0–19.2 s depending on how the console rounds SWH) — in the template
+dataset *before* typing `xpy spin_noise_run` (`d20 21.2` in the TopSpin
+command line with the template open; every dataset the script creates
+copies it, and `zg` ignores it). Each reference row then lasts exactly
+`d20`, so the clock audit's recorded expectation for those two blocks
+(`aq + d1` per row on v0.7.5) is ~1% short at 21.2 s and ~5% short at
+22 s — the report's wall/OCXO gate drops a block off by more than 5%.
+The workaround is not a substitute for the update.
 
 **Morning screen shows a "final notes" dialog and there is no zip
 yet.** Normal and by design: the bundle is written AFTER you answer

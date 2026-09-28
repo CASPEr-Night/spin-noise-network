@@ -108,7 +108,7 @@ def build_meta(schema_version, version):
             {
                 "expno": 11,
                 "role": "reference_open",
-                "pulprog": "zg2d",
+                "pulprog": "zgref2d",
                 "td": 32768,
                 "td1_rows": 8,
                 "sw_hz": 12019.23,

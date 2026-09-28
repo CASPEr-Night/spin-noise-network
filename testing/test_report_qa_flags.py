@@ -179,7 +179,7 @@ def write_bundle(path, meta, files):
 
 def exp(expno, role, td, rows):
     return {"expno": expno, "role": role, "pulprog":
-            "zgnoise2d" if role == "noise" else "zg2d",
+            "zgnoise2d" if role == "noise" else "zgref2d",
             "td": td, "td1_rows": rows, "sw_hz": 5000.0, "o1_hz": 0.0,
             "rg": 101.0, "ns": 1, "aq_s_per_row": 0.05}
 
