@@ -21,8 +21,9 @@ spin-noise-limited records relevant to fundamental-sensitivity and dark-matter
    you'll be asked exactly what it is. **If it contains D₂O, you'll be asked the
    percentage; this matters more than anything else.**
 2. Copy `topspin/spin_noise_run.py` into your TopSpin user-python directory and
-   `topspin/pp/zgnoise2d` into your user pulse-program directory
-   (details: [topspin/INSTALL.md](topspin/INSTALL.md)). Open any ¹H dataset.
+   `topspin/pp/zgnoise2d` plus `topspin/pp/zgref2d` into your user pulse-program
+   directory (details: [topspin/INSTALL.md](topspin/INSTALL.md)). Open any ¹H
+   dataset. One facility slug per instrument: a site with two magnets is two nodes.
 3. Type `xpy spin_noise_run`, answer the dialogs (institution, sample, run length —
    default ~45 min), and walk away. The script runs setup → RG ladder → reference
    blocks → no-pulse noise blocks → closing references, tags everything, and leaves a
@@ -63,8 +64,9 @@ commands mocked — runnable on a free processing-only TopSpin install
 |---|---|
 | `topspin/spin_noise_run.py` | Jython orchestrator, runs inside TopSpin 2.x–4.x (5.0 untested — reports welcome) |
 | `topspin/pp/zgnoise2d` | no-pulse pseudo-2D pulse program for the noise blocks |
+| `topspin/pp/zgref2d` | small-flip pseudo-2D pulse program for the reference blocks (Bruker's `zg2d` without the `d20`-computed pacing delay that refused to compile at Torino, v0.7.6) |
 | `topspin/INSTALL.md` | install paths, expno map, troubleshooting |
-| `analysis/facility_report.py` | the per-facility report (`report.html` + `report.json`) from one bundle; noise rows are streamed, so memory does not grow with the block length (v0.7.4) |
+| `analysis/facility_report.py` | the per-facility report (`report.html` + `report.json`) from one bundle; noise rows are streamed, so memory does not grow with the block length (v0.7.4); the clock audit reads each block's pulse program from `pulseprogram` (TopSpin 2.x/3.x) or `pulseprogram.precomp` (TopSpin 4.x Neo consoles, v0.7.6) |
 | `packer/pack_bundle.py` | Python 3 stdlib-only standalone packer: a directory of vendor data files + `answers.json` (the operator questionnaire) → a validated bundle zip, identical in layout to the orchestrator's. Pluggable vendor readers: Bruker implemented (round-trip tested); JEOL/Magritek adapter interface defined |
 | `packer/answers.example.json` | the questionnaire template for the packer (same questions as the TopSpin dialogs) |
 | `uploader/upload_bundle.py` | Python 3 stdlib-only uploader — auto-selects single-shot vs. chunked-resumable upload by size (+ `--selftest` bundle validator; accepts schema v1.0–v2.0 bundles) |
@@ -103,18 +105,25 @@ covers ~10 GB), set the shared token, and hand facilities the endpoint + token p
 
 ## Status and known caveats
 
-- **Not yet run live on Bruker hardware.** The script has been executed end-to-end
-  under a real Jython 2.7 interpreter with a stubbed TopSpin API modelling ten
-  console behaviours — simulate and desktest modes, bundle validated by the uploader
-  (`testing/run_jython_harness.sh`) — and has completed DESKTEST inside TopSpin 4.4.0
-  at a partner facility (Torino, 17–18 September 2026), where two console-specific
-  faults were found and fixed in v0.7.2 and v0.7.3, and inside TopSpin 3.7.0
-  (Oulu, 25 September 2026), where a third — the console did not create the F1
-  parameter file `acqu2` and silently dropped every parameter write into the
-  2D datasets — was found and fixed in v0.7.5; Torino's first live attempt
-  (22 September 2026, v0.7.3, TopSpin 4.4.0, 1D template) met the same fault,
-  with `zg` refusing the 2D datasets, so no data was acquired; it has not yet acquired a full
-  live session. The Agilent/VnmrJ path has run three real sessions (SIU Carbondale).
+- **One live session on Bruker hardware so far, not yet a complete one.** The script
+  has been executed end-to-end under a real Jython 2.7 interpreter with a stubbed
+  TopSpin API modelling ten console behaviours — simulate and desktest modes, bundle
+  validated by the uploader (`testing/run_jython_harness.sh`) — and has completed
+  DESKTEST inside TopSpin 4.4.0 at a partner facility (Torino, 17–18 September 2026),
+  where two console-specific faults were found and fixed in v0.7.2 and v0.7.3, and
+  inside TopSpin 3.7.0 (Oulu, 25 September 2026), where a third — the console did not
+  create the F1 parameter file `acqu2` and silently dropped every parameter write into
+  the 2D datasets — was found and fixed in v0.7.5 (Torino's first live attempt,
+  22 September 2026, v0.7.3, met the same fault and acquired nothing). Torino's first
+  live run with v0.7.5 (25 September 2026, Avance Neo 400, TopSpin 4.4.0) acquired the
+  pulse-free noise block — 89 rows of 19 s, on which the report resolves the water
+  spin-noise dip — but both small-flip reference blocks were refused at `zg`: Bruker's
+  library `zg2d` paces its rows with a delay computed from `d20`, which the script never
+  set, so the delay came out negative (−21.17 s). Fixed in v0.7.6 by the project's own
+  reference pulse program `zgref2d` (`zg2d` without that line); a complete live session,
+  references included, is still pending. Oulu's two consoles (TopSpin 3.7.0 and 3.2)
+  have passed simulate and desktest with v0.7.5 and await v0.7.6 for their live runs.
+  The Agilent/VnmrJ path has run three real sessions (SIU Carbondale).
   Every TopSpin call is pinned to
   Bruker's *Python Programming in TopSpin* manual, with operator-dialog fallbacks
   wherever versions differ; the first run at a pilot facility should be supervised. Known soft spots (all degrade to dialogs,

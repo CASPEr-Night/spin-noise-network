@@ -2,15 +2,22 @@
 
 Operational script for the remote supervised pilot: we screen-share (or
 NoMachine) into the facility's TopSpin workstation while a local colleague
-sits at the console. `topspin/spin_noise_run.py` (v0.7.5) has not yet run a
-full session on a real spectrometer. Its live contacts so far are two
-unsupervised desktests at Torino (TopSpin 4.4.0): the first (2026-09-17)
+sits at the console. `topspin/spin_noise_run.py` (v0.7.6) has not yet run a
+complete session on a real spectrometer. Its live contacts so far: two
+unsupervised desktests at Torino (TopSpin 4.4.0) — the first (2026-09-17)
 stopped on a namespace bug fixed in v0.7.2; the second (2026-09-18, v0.7.2)
 ran to a bundle, with TopSpin's name-only validation of enumerated
-parameters forcing the manual `parmode` fallback — fixed in v0.7.3, which
-writes PARMODE by its documented name, verifies the dimensionality and the
-row count, and does the first switch while the operator is present. Tier −1
-and Tier 0 are green (`testing/tier0_desktest.md`).
+parameters forcing the manual `parmode` fallback, fixed in v0.7.3 — a live
+attempt with v0.7.3 (2026-09-22) that acquired nothing because the console
+never created the F1 parameter file (fixed in v0.7.5), and the first live
+run with v0.7.5 (Torino, 2026-09-25): the pulse-free noise block acquired
+(89 rows) and the report resolves the spin-noise dip, but both reference
+blocks were refused by the console — Bruker's `zg2d` paces its rows with a
+delay computed from `d20`, which the script never set, so it was negative.
+v0.7.6 replaces `zg2d` with the project's `zgref2d` (one `d1` per row, no
+computed delay); the two Oulu consoles (TopSpin 3.7.0 and 3.2) have passed
+simulate and desktest and wait for it. Tier −1 and Tier 0 are green
+(`testing/tier0_desktest.md`).
 
 The pilot runs the plain default session only. The optional modes that
 exist as of v0.6 (`rdopt`, `sweep`, `AUTOSTEP`) stay OFF — each has its
@@ -28,7 +35,8 @@ console. Contact for everything: John W. Blanchard, jwbquantum@gmail.com.
 
 - [ ] Install kit (one email or zip):
   - `topspin/spin_noise_run.py`
-  - `topspin/pp/zgnoise2d`
+  - `topspin/pp/zgnoise2d` and `topspin/pp/zgref2d` (both; the script
+    installs them itself where it can write `pp/user`)
   - `uploader/upload_bundle.py` + `uploader/config.example.json`
   - `schema/meta.schema.json` — preserve the repo layout: `schema/` one
     level up from the directory holding `upload_bundle.py` (the uploader
@@ -43,6 +51,7 @@ console. Contact for everything: John W. Blanchard, jwbquantum@gmail.com.
   |---|---|
   | `spin_noise_run.py` | `<TSHOME>/exp/stan/nmr/py/user/` |
   | `pp/zgnoise2d` | `<TSHOME>/exp/stan/nmr/lists/pp/user/` |
+  | `pp/zgref2d` | `<TSHOME>/exp/stan/nmr/lists/pp/user/` |
 
 - [ ] Sample request: **5 mm tube, ~550 µL plain water, with a KNOWN H₂O
       fraction** (tap or distilled is fine; if D₂O-doped, they must know the
@@ -57,6 +66,9 @@ console. Contact for everything: John W. Blanchard, jwbquantum@gmail.com.
 
 - [ ] TopSpin version and `<TSHOME>` path (script supports 2.x–4.x; note
       which quirks from §6 apply).
+- [ ] Which instrument, and its facility slug: **one slug per instrument**
+      — a site with two magnets is two network nodes (e.g. `uni-oulu` and
+      `uni-oulu400`); one `config.json` serves both at upload time.
 - [ ] Free disk space on the data partition (default run writes roughly
       200 MB: noise ser file ~1 MB/row × ~95 rows for 30 min, plus
       references, ladder, and the bundle zip — still ask for ≥10 GB free
@@ -87,7 +99,7 @@ console. Contact for everything: John W. Blanchard, jwbquantum@gmail.com.
    acquisition. Pulsing is limited to the standard pulse calibration and
    ~1° tips at the calibrated observe power — no long or repeated
    high-power irradiation. It never changes instrument configuration, and
-   reads/writes nothing outside that dataset plus the two files we
+   reads/writes nothing outside that dataset plus the three files we
    installed."
 2. **Verify environment (L drives, R watches, 5 min).** TopSpin version in
    the title bar matches what they reported; probe string (`edhead` or
@@ -134,8 +146,8 @@ console. Contact for everything: John W. Blanchard, jwbquantum@gmail.com.
    | expno | what you should see |
    |---|---|
    | 10, 14, 15, 16 | RG ladder: quick 1° 1Ds at RG = 1, 8, 64, max (rga) |
-   | 11 | reference_open: 1° pseudo-2D, 8 rows × ~19 s |
-   | 12 | noise block: `zgnoise2d`, no pulse, NS=1/row, RG fixed at max stable, rows fill the chosen duration (~95 rows for 30 min) |
+   | 11 | reference_open: `zgref2d`, 1° pseudo-2D, 8 rows × ~19 s (v0.7.5 used Bruker's `zg2d`, which the console refused at Torino) |
+   | 12 | noise block: `zgnoise2d`, no pulse, NS=1/row, RG fixed at max stable, rows fill the chosen duration (~89 rows for 30 min) |
    | 13 | reference_close: same as 11 |
 
    During the noise block R and L can chat/debrief — but keep the session
@@ -176,7 +188,7 @@ console. Contact for everything: John W. Blanchard, jwbquantum@gmail.com.
 | Tune/match | atma completes (or manual flow used); wobble curve sane | |
 | P90 | pulsecal value plausible for the probe (~7–15 µs at listed power) | |
 | RG ladder | RG values 1, 8, 64 accepted; rga returns a max RG without error | |
-| Reference (11) | FID visible on each row; water line where expected | |
+| Reference (11) | `zgref2d` compiles (no TCube *duration is negative* dialog); FID visible on each row; water line where expected | |
 | Noise block (12) | rows accumulating at ~20 s/row; RG unchanged; no re-pulse | |
 | Lock/sweep | neither re-enabled at any point (check bsmsdisp again mid-run) | |
 | Reference (13) | line position within ~Hz of expno 11 (drift check) | |
@@ -201,16 +213,17 @@ started finishes on its own and stays in `SPINNOISE_<date>`) if:
   safely let a running acquisition finish, or `stop` it).
 
 **Guarantee:** the run modifies nothing outside the `SPINNOISE_<date>`
-dataset directory plus the two installed files. Complete removal, if the
+dataset directory plus the three installed files. Complete removal, if the
 facility wants everything gone:
 
 ```
 rm -rf <DATADIR>/SPINNOISE_<yyyymmdd>
 rm <TSHOME>/exp/stan/nmr/py/user/spin_noise_run.py
 rm <TSHOME>/exp/stan/nmr/lists/pp/user/zgnoise2d
+rm <TSHOME>/exp/stan/nmr/lists/pp/user/zgref2d
 ```
 
-(Windows: delete the same three paths in Explorer.) `<DATADIR>` is the data
+(Windows: delete the same four paths in Explorer.) `<DATADIR>` is the data
 directory of the template dataset they had open. Nothing else was written.
 
 ---
@@ -267,7 +280,13 @@ directory of the template dataset they had open. Nothing else was written.
   is fresh; every missing command (`atma`, `topshim`, `pulsecal`, `rga`)
   degrades to an operator dialog rather than crashing.
 - **TopSpin 2.x pulse program:** if compilation complains about
-  `Avance.incl`, delete the `#include` line in `zgnoise2d` (unused).
+  `Avance.incl`, delete the `#include` line in `zgnoise2d` and in
+  `zgref2d` (unused in both).
+- **`Cannot load line: duration is negative ... In 'zg2d': line 24` at
+  expno 11 (script v0.7.5 or earlier):** Bruker's `zg2d` with `d20` = 0;
+  Cancel the acquisition-check dialog and install v0.7.6 (`zgref2d`).
+  Workaround on an older script only: `d20 21.2` in the template dataset
+  before starting. `docs/TROUBLESHOOTING.md` has the arithmetic.
 - **No ATM probe:** the tune/match step falls back to a dialog — L wobbles
   and tunes manually (`wobb`), then confirms in the dialog. Same for a
   missing `rga`: the script asks L to run rga / set RG manually and type

@@ -141,13 +141,32 @@ for CASE in "1e-3 --within-nsigma 3 --detect-nsigma 5 --expect-refined 3" \
         "$CLOCKWORK/report_$OFFSET/report.json" --injected "$OFFSET" "$@"
 done
 
+# TopSpin 4.x layout: the Neo consoles store only the preprocessed
+# data/<expno>/pulseprogram.precomp (Torino, 2026-09-25 -- no
+# 'pulseprogram' in any expno).  The refinement must engage on it exactly
+# as on the source text; before this fallback every block of such a
+# bundle kept the script-recorded expectation (AQ from the requested SWH,
+# not the console's rounded SW_h) and the fit read the 0.74% shortfall
+# as a clock offset.
+echo ""
+echo "--- injected offset 1e-3, TopSpin 4.x layout (pulseprogram.precomp) ---"
+PBUNDLE="$(python3 "$TESTING/make_physics_bundle.py" --feature none \
+    --clock-offset 1e-3 --pp-layout topspin4 --out-dir "$CLOCKWORK/ts4")"
+python3 "$REPO/analysis/facility_report.py" "$PBUNDLE" \
+    --out "$CLOCKWORK/report_ts4"
+python3 "$TESTING/check_clock_recovery.py" \
+    "$CLOCKWORK/report_ts4/report.json" --injected 1e-3 --within-nsigma 3 \
+    --detect-nsigma 5 --expect-refined 3
+
 # Discrimination case: a deliberately huge DE (20 ms; stock is 6.5 us)
-# on top of the fixture's structural shortfalls (the zg2d references'
-# second d1 per row, which the recorded expectations omit). The
-# headline (pulse-program-derived) fit must still recover the zero
-# injected offset, while the recorded-model comparison fit must sit
-# > 5 sigma away -- proving the refinement engaged AND did real work,
-# not merely that both fits agree when the shortfalls are negligible.
+# on top of the fixture's structural shortfalls (p1 per scan, the 30 ms
+# before zgref2d's row loop, zg's two 30m lines per pass -- all absent
+# from the recorded expectations; until v0.7.6 the zg2d stand-in's
+# second d1 per row was the dominant one). The headline
+# (pulse-program-derived) fit must still recover the zero injected
+# offset, while the recorded-model comparison fit must sit > 5 sigma
+# away -- proving the refinement engaged AND did real work, not merely
+# that both fits agree when the shortfalls are negligible.
 echo ""
 echo "--- DE discrimination (de_us = 20000, injected offset 0) ---"
 PBUNDLE="$(python3 "$TESTING/make_physics_bundle.py" --feature none \

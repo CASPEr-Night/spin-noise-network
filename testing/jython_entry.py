@@ -532,14 +532,21 @@ def main():
         check("expno %d dataset dir with acqus" % expno,
               os.path.isfile(os.path.join(d, "acqus")), d)
 
-    pp_path = os.path.join(tshome, "exp", "stan", "nmr", "lists", "pp",
-                           "user", "zgnoise2d")
-    pp_ok = False
-    if os.path.isfile(pp_path):
-        f = open(pp_path, "r")
-        pp_ok = ";zgnoise2d" in f.read()
-        f.close()
-    check("pulse program installed into fake TSHOME pp/user", pp_ok, pp_path)
+    # Both project pulse programs go into pp/user (v0.7.6: the references
+    # use zgref2d, not Bruker's zg2d, whose d20-computed pacing delay came
+    # out negative and refused to compile at Torino, 2026-09-25).
+    pp_user = os.path.join(tshome, "exp", "stan", "nmr", "lists", "pp",
+                           "user")
+    for _ppname, _ppmark in (("zgnoise2d", ";zgnoise2d"),
+                             ("zgref2d", ";zgref2d")):
+        pp_path = os.path.join(pp_user, _ppname)
+        pp_ok = False
+        if os.path.isfile(pp_path):
+            f = open(pp_path, "r")
+            pp_ok = f.read().startswith(_ppmark + "\n")
+            f.close()
+        check("pulse program %s installed into fake TSHOME pp/user" % _ppname,
+              pp_ok, pp_path)
 
     meta_ds = os.path.join(name_dir, "meta.json")
     meta_stage = os.path.join(name_dir, "bundle_stage", "meta.json")
@@ -799,7 +806,7 @@ def main():
                     "noise_sweep")
     _want_pp = {"setup": "zg", "rg_ladder": "zg", "rdopt_scan": "zg",
                 "sweep_verify": "zg", "sweep_signcal": "zg",
-                "reference_open": "zg2d", "reference_close": "zg2d",
+                "reference_open": "zgref2d", "reference_close": "zgref2d",
                 "noise": "zgnoise2d", "noise_sweep": "zgnoise2d"}
     # RG: set_common_acq's 1, the ladder rungs 1/8/64/rga(101 mocked),
     # max_rg/4 = 25.25 for the references, the mocked rga for the noise
@@ -1104,6 +1111,36 @@ def main():
           "(virtual clock, injected offset %.1e)"
           % topspin_stub.INJECTED_CLOCK_OFFSET,
           consistent, "; ".join(detail))
+    # Timing model per role (v0.7.6): the recorded OCXO expectation is what
+    # the pulse program spends per row from the parameters the script
+    # writes -- zgref2d spends one d1 and a fixed 30 ms per row (the
+    # references), zgnoise2d two d1 and nothing fixed (the noise blocks),
+    # zg one d1 (the 1D rungs / quick 1Ds; its two 30m lines are not in
+    # the acquisition-side model).  AQ = TD/(2*SWH) with TD 262144 (rows)
+    # or 16384 (1Ds) at SWH 6900 Hz; rows from experiments[].td1_rows.
+    _aq_row = 262144 / (2.0 * 6900.0)
+    _aq_1d = 16384 / (2.0 * 6900.0)
+    _bad_exp = []
+    for b in blocks:
+        _role = b.get("role")
+        _x = _exps.get(b.get("expno")) or {}
+        _rows = _x.get("td1_rows") or 0
+        if _role in ("reference_open", "reference_close"):
+            _want = _rows * (_aq_row + 2.0 + 0.03)
+        elif _role in ("noise", "noise_sweep"):
+            _want = _rows * (_aq_row + 2 * 0.05)
+        elif _role in ("rg_ladder", "rdopt_scan", "sweep_verify",
+                       "sweep_signcal"):
+            _want = _aq_1d + 2.0
+        else:
+            continue
+        _got = b.get("ocxo_expected_s")
+        if _got is None or abs(_got - _want) > 1e-6 * _want:
+            _bad_exp.append("expno %s (%s): recorded %r, model %r"
+                            % (b.get("expno"), _role, _got, _want))
+    check("clock_audit expectations follow the per-role timing model "
+          "(zgref2d: one d1 + 30 ms per row; zgnoise2d: two d1; zg: one d1)",
+          not _bad_exp, "; ".join(_bad_exp)[:600])
     # For the wrapper: the recovery check (facility_report must refit the
     # injected offset within its stated uncertainty) runs in python3.
     print "INJECTED_CLOCK_OFFSET: %.6e" % topspin_stub.INJECTED_CLOCK_OFFSET

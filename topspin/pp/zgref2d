@@ -1,0 +1,55 @@
+;zgref2d
+;spin-noise network -- pseudo-2D small-flip REFERENCE acquisition
+;
+;Bruker zg2d (avance-version 12/01/11) with its computed pacing delay
+;REMOVED.  zg2d defines
+;    "DELTA=d20-((d1+aq)*(ns+ds))-30m"
+;and spends DELTA at the top of every row so that successive 1D
+;spectra start d20 apart ("d20: delay between start of different 1D
+;spectra").  The run script never sets d20 -- it is 0 in every
+;parameter set it starts from -- so DELTA comes out negative and the
+;console refuses to compile the sequence.  Torino, Avance Neo 400,
+;TopSpin 4.4.0, 2026-09-25, the first live run:
+;    TCube: Cannot interpret pulse program: Cannot load line:
+;    duration is negative (-21166512.000000 us) In 'zg2d': line 24
+;i.e. 0 - (2 s + 19.137 s) - 30 ms.  Both reference blocks of that
+;session were lost while the noise block acquired normally.
+;
+;This sequence needs no d20 and computes nothing: one d1 per row, the
+;pulse, the acquisition, 30 ms before the row is written to disk.
+;Everything else is zg2d.  The same zg2d ships with every TopSpin
+;2.x-4.x, so this file replaces it for the references everywhere.
+;
+;Plain syntax only -- compiles on TopSpin 2.x through 4.x.
+;If <Avance.incl> is missing on a very old system, comment it out:
+;this sequence uses none of its macros.
+
+#include <Avance.incl>
+
+"acqt0=-p1*2/3.1416"
+
+;pl1: f1 channel - power level for the pulse.  The run script sets it
+;     ~39 dB below the calibrated 90-degree power while P1 stays at
+;     the calibrated 90-degree length: a ~1 degree tip.
+;p1 : f1 channel - the small-flip pulse (see pl1)
+;d1 : relaxation delay; 1-5 * T1 (the run script uses 2 s)
+;ns : 1 -- one transient per row, set by the run script.  ph1/ph31
+;     are therefore single steps: zg2d's 8-step cycle would only
+;     ever reach its first entry.
+;td1: number of rows = number of reference FIDs
+
+1 ze
+  30m
+2 d1
+  p1 ph1
+  go=2 ph31
+  30m wr #0 if #0 ze
+  lo to 2 times td1
+exit
+
+ph1=0
+ph31=0
+
+;aq per row = td/(2*swh); one row spends d1 + p1 + aq + 30m (plus the
+;receiver's DE), which is the per-row time the run script records in
+;the clock audit and the report re-derives from this text.

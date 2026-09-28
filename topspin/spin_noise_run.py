@@ -19,9 +19,10 @@
 #
 # HOW TO RUN THIS SCRIPT:
 #           Put this file in  <TSHOME>/exp/stan/nmr/py/user/
-#           and the pulse program "zgnoise2d" in
+#           and the pulse programs "zgnoise2d" and "zgref2d" in
 #           <TSHOME>/exp/stan/nmr/lists/pp/user/
-#           (the script will offer to install the pulse program for you).
+#           (the script installs both pulse programs itself when it
+#           can find that directory).
 #
 # COMPATIBILITY / STYLE NOTES (read me before editing):
 #   * Written for TopSpin's EMBEDDED JYTHON interpreter (TopSpin 2.x had
@@ -121,7 +122,7 @@ AUTOSTEP = False          # True (with SWEEP): TIER-2 programmatic field
 
 # Single source of truth for the script version.  KEEP IN SYNC with the
 # repository VERSION file (testing/static_check.py enforces the match).
-SCRIPT_VERSION  = "0.7.5"
+SCRIPT_VERSION  = "0.7.6"
 # NOTE: no module constant named PROGRAM_VERSION -- TopSpin's TopCmds
 # exports a FUNCTION of that name and `from TopCmds import *` (below)
 # overwrote the alias, so v0.7.3 bundles carry "<function PROGRAM_VERSION
@@ -135,6 +136,17 @@ SCRIPT_VERSION  = "0.7.5"
 # stays within the uploader's supported set.
 SCHEMA_VERSION  = "1.2"
 PP_NAME         = "zgnoise2d"     # pulse program used for the noise block
+PP_REF_NAME     = "zgref2d"       # pulse program of the small-flip
+# reference blocks (expnos 11 and 13): Bruker's zg2d WITHOUT its computed
+# pacing delay.  zg2d defines "DELTA=d20-((d1+aq)*(ns+ds))-30m" and
+# spends it at the top of every row; this script never sets d20 (0 in
+# every parameter set it starts from), so DELTA was -21.17 s and the
+# console refused to compile the sequence -- both reference blocks of
+# Torino's first live run were lost (Avance Neo 400, TopSpin 4.4.0,
+# 2026-09-25: "Cannot load line: duration is negative (-21166512.000000
+# us) In 'zg2d': line 24").  zgref2d is zg2d with that line gone: one
+# d1 per row, the pulse, the acquisition, 30 ms before the row is
+# written; installed next to zgnoise2d by install_pulse_program().
 
 # Experiment numbers (see PROTOCOL.md).  The RG ladder starts at 10; its
 # extra rungs live at 14/15/16 because 11/12/13 are reserved for the
@@ -155,6 +167,8 @@ TD_LADDER   = 16384         # quick 1D ladder acquisitions (~1.2 s)
 REF_ROWS    = 8             # rows in each reference pseudo-2D
 D1_NOISE_S  = 0.05          # loop delay in zgnoise2d (also precedes wr)
 D1_REF_S    = 2.0           # relaxation delay for the small-flip references
+REF_ROW_FIXED_S = 0.03      # zgref2d's fixed '30m wr' per row, before the
+                            # row is written (zgnoise2d has none: 'd1 wr')
 ROW_OVERHEAD_S = 1.0        # empirical per-row disk/housekeeping allowance
 SMALL_FLIP_EXTRA_DB = 39.08 # 20*log10(90): attenuate calibrated 90-deg
                             # power by this much -> ~1 degree tip at P1=P90
@@ -455,17 +469,27 @@ def harness_clock_advance(seconds):
         pass
 
 
-def ocxo_expected_s(td, swh, ns, rows, d1_s, d1_per_row):
+def ocxo_expected_s(td, swh, ns, rows, d1_s, d1_per_row, fixed_s_per_row):
     """OCXO-implied duration of one acquisition block, in seconds, from the
-    acquisition parameters alone: rows * ns * (AQ + d1_per_row * d1).
-    AQ = TD/(2*SWH).  zg/zg2d spend one d1 per transient; zgnoise2d spends
-    two (one before go, one before wr).  Disk/housekeeping overhead is NOT
-    included -- it is not OCXO-derived, and the offline fit's intercept
-    absorbs it."""
+    acquisition parameters alone:
+        rows * (ns * (AQ + d1_per_row * d1) + fixed_s_per_row),
+    AQ = TD/(2*SWH).  zg and zgref2d spend one d1 per transient; zgnoise2d
+    spends two (one before go, one before wr).  fixed_s_per_row is a
+    literal delay the sequence spends once per row whatever the parameters
+    say: REF_ROW_FIXED_S (30 ms, the '30m wr' line) for zgref2d, 0 for
+    zgnoise2d ('d1 wr') and for the zg rungs -- zg's two 30m lines per
+    pass are real, but its ~3 s blocks never survive the report's 5%
+    wall/OCXO gate on hardware (Torino, 2026-09-25: 5.4 s wall for 3.2 s
+    expected), so their model is left as it was.  NOT included: the pulse,
+    the receiver's DE, and zgref2d's single 30m before its row loop (once
+    per block) -- the report re-derives every block from the bundled
+    pulse-program text plus acqus where it can, and the fit's intercept
+    absorbs constant per-block terms.  Disk/housekeeping overhead is not
+    included either -- it is not OCXO-derived."""
     if not swh:
         return None
     aq = td / (2.0 * swh)
-    return rows * ns * (aq + d1_per_row * d1_s)
+    return rows * (ns * (aq + d1_per_row * d1_s) + fixed_s_per_row)
 
 
 def clock_block_begin(expno, role, expected_s):
@@ -1159,7 +1183,7 @@ def open_expno(template_curd, name, expno):
 #
 # The F1 acquisition MODE in that file.  Bruker's documented rule for
 # FnMODE is: 'undefined -- This value must be used if the pulse program
-# contains no mc statement', and neither zg2d nor zgnoise2d has one.  An
+# contains no mc statement', and neither zgref2d nor zgnoise2d has one.  An
 # acqu2 the script copies from a library set carries the mode of THAT
 # experiment; one the dataset inherited -- WR() copies it from the current
 # dataset, so from a 2D template (Torino's first desktest, 2026-09-21) or
@@ -1583,7 +1607,7 @@ def _set_fnmode_undefined(acqu2_path):
 
     WHY a file edit and not PUTPAR: Bruker's rule for the F1 acquisition
     mode is that 'undefined' must be used when the pulse program has no
-    mc statement, which is true of zg2d and of zgnoise2d; a library set
+    mc statement, which is true of zgref2d and of zgnoise2d; a library set
     (COSY, NOESY, HSQC) or an operator's 2D template carries the mode of
     ITS experiment, which is what the file would otherwise hand to zg.
     Writing FnMODE through the parameter API is what v0.7.3 forbade after
@@ -1741,7 +1765,7 @@ def ensure_f1_files(template_curd):
     re-read (_set_fnmode_undefined, the same edit ensure_f1_fnmode_undefined
     applies to an acqu2 the dataset inherited): Bruker's documented rule
     is that 'undefined' must be used when the pulse program has no mc
-    statement, and neither zg2d nor zgnoise2d has one.  v0.7.3's rule
+    statement, and neither zgref2d nor zgnoise2d has one.  v0.7.3's rule
     'never PUTPAR FnMODE' stands (TopSpin 4.4.0 rejected that write); the
     console only ever sees a file that already says 'undefined'.  The
     edit is counted in param_api f1_fnmode_edits, the value the source
@@ -1845,7 +1869,7 @@ def ensure_f1_fnmode_undefined():
     from a sibling expno -- and then it carries whatever F1 mode THAT
     experiment used (States-TPPI, echo-antiecho, QF...).  Bruker's
     documented rule for FnMODE is that 'undefined' must be used when the
-    pulse program contains no mc statement, and neither zg2d nor
+    pulse program contains no mc statement, and neither zgref2d nor
     zgnoise2d has one; since v0.7.5 a copied library set was already set
     to 0 while an inherited file kept its mode, so the same block could
     acquire under either depending only on what the operator had open.
@@ -2399,7 +2423,7 @@ def acquire_quick_1d(meta, template, dsname, expno, role, o1_hz,
     set_rg(RDOPT_RG)
     clear_raw_data(ds_path(cd))  # stale template copy must not pass as data
     t0 = now_local()
-    ocxo_s = ocxo_expected_s(TD_LADDER, SWH_HZ, 1, 1, D1_REF_S, 1)
+    ocxo_s = ocxo_expected_s(TD_LADDER, SWH_HZ, 1, 1, D1_REF_S, 1, 0.0)
     cb = clock_block_begin(expno, role, ocxo_s)
     run_zg_and_wait(ds_path(cd), role, ocxo_s)
     clock_block_end(cb)
@@ -3614,7 +3638,7 @@ def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
         set_rg(noise_rg)
         clear_raw_data(ds_path(cd))
         t0 = now_local()
-        ocxo_s = ocxo_expected_s(TD_ROW, SWH_HZ, 1, n_rows, D1_NOISE_S, 2)
+        ocxo_s = ocxo_expected_s(TD_ROW, SWH_HZ, 1, n_rows, D1_NOISE_S, 2, 0.0)
         cb = clock_block_begin(expno_n, "noise_sweep", ocxo_s)
         run_zg_and_wait(ds_path(cd), "sweep noise block %d" % (k + 1),
                         ocxo_s)
@@ -3718,6 +3742,66 @@ ph31=0
 ;td1*(aq+2*d1) fills the requested wall-clock duration.
 """
 
+# The reference pulse program.  KEEP IDENTICAL to topspin/pp/zgref2d
+# (testing/static_check.py compares the two byte for byte, as for
+# zgnoise2d above).  WHY a project-owned file: see PP_REF_NAME.
+PP_REF_TEXT = """;zgref2d
+;spin-noise network -- pseudo-2D small-flip REFERENCE acquisition
+;
+;Bruker zg2d (avance-version 12/01/11) with its computed pacing delay
+;REMOVED.  zg2d defines
+;    "DELTA=d20-((d1+aq)*(ns+ds))-30m"
+;and spends DELTA at the top of every row so that successive 1D
+;spectra start d20 apart ("d20: delay between start of different 1D
+;spectra").  The run script never sets d20 -- it is 0 in every
+;parameter set it starts from -- so DELTA comes out negative and the
+;console refuses to compile the sequence.  Torino, Avance Neo 400,
+;TopSpin 4.4.0, 2026-09-25, the first live run:
+;    TCube: Cannot interpret pulse program: Cannot load line:
+;    duration is negative (-21166512.000000 us) In 'zg2d': line 24
+;i.e. 0 - (2 s + 19.137 s) - 30 ms.  Both reference blocks of that
+;session were lost while the noise block acquired normally.
+;
+;This sequence needs no d20 and computes nothing: one d1 per row, the
+;pulse, the acquisition, 30 ms before the row is written to disk.
+;Everything else is zg2d.  The same zg2d ships with every TopSpin
+;2.x-4.x, so this file replaces it for the references everywhere.
+;
+;Plain syntax only -- compiles on TopSpin 2.x through 4.x.
+;If <Avance.incl> is missing on a very old system, comment it out:
+;this sequence uses none of its macros.
+
+#include <Avance.incl>
+
+"acqt0=-p1*2/3.1416"
+
+;pl1: f1 channel - power level for the pulse.  The run script sets it
+;     ~39 dB below the calibrated 90-degree power while P1 stays at
+;     the calibrated 90-degree length: a ~1 degree tip.
+;p1 : f1 channel - the small-flip pulse (see pl1)
+;d1 : relaxation delay; 1-5 * T1 (the run script uses 2 s)
+;ns : 1 -- one transient per row, set by the run script.  ph1/ph31
+;     are therefore single steps: zg2d's 8-step cycle would only
+;     ever reach its first entry.
+;td1: number of rows = number of reference FIDs
+
+1 ze
+  30m
+2 d1
+  p1 ph1
+  go=2 ph31
+  30m wr #0 if #0 ze
+  lo to 2 times td1
+exit
+
+ph1=0
+ph31=0
+
+;aq per row = td/(2*swh); one row spends d1 + p1 + aq + 30m (plus the
+;receiver's DE), which is the per-row time the run script records in
+;the clock audit and the report re-derives from this text.
+"""
+
 
 def find_tshome_candidates():
     """TopSpin installation directories this script can see: the JVM's
@@ -3764,7 +3848,9 @@ def find_pp_user_dir():
 
 
 def install_pulse_program():
-    """Write zgnoise2d into the user pp directory (or verify it exists)."""
+    """Write zgnoise2d AND zgref2d into the user pp directory (or verify
+    they exist).  Two files since v0.7.6: the references no longer use
+    Bruker's zg2d (see PP_REF_NAME).  Returns a short provenance string."""
     ppdir = find_pp_user_dir()
     if ppdir is None:
         res = INPUT_DIALOG(
@@ -3772,29 +3858,35 @@ def install_pulse_program():
             "The TopSpin installation directory could not be determined\n"
             "automatically.  Enter the full path of your USER pulse-program\n"
             "directory (usually <TopSpin>/exp/stan/nmr/lists/pp/user),\n"
-            "or leave blank if you have ALREADY copied 'zgnoise2d' there\n"
-            "by hand (see INSTALL.md).",
+            "or leave blank if you have ALREADY copied BOTH 'zgnoise2d'\n"
+            "and 'zgref2d' there by hand (see INSTALL.md).",
             ["pp/user path"], [""], [""], ["1"])
         if res is None:
             abort("Cancelled at pulse-program installation.")
         p = res[0].strip()
         if p == "":
-            return "operator states zgnoise2d pre-installed"
+            return "operator states zgnoise2d and zgref2d pre-installed"
         ppdir = p
-    target = os.path.join(ppdir, PP_NAME)
-    try:
-        f = open(target, "w")
-        f.write(PP_TEXT)
-        f.close()
-        say("pulse program installed: %s" % target)
-        return target
-    except CATCHABLE:
-        MSG("Could not write the pulse program to:\n  %s\n\n"
-            "Please copy the file 'zgnoise2d' from the distribution's\n"
+    written = []
+    failed = []
+    for name, text in ((PP_NAME, PP_TEXT), (PP_REF_NAME, PP_REF_TEXT)):
+        target = os.path.join(ppdir, name)
+        try:
+            f = open(target, "w")
+            f.write(text)
+            f.close()
+            say("pulse program installed: %s" % target)
+            written.append(target)
+        except CATCHABLE:
+            failed.append(name)
+    if failed:
+        MSG("Could not write the pulse program(s) %s to:\n  %s\n\n"
+            "Please copy the file(s) of that name from the distribution's\n"
             "topspin/pp/ folder into that directory by hand, then close\n"
-            "this message." % target,
+            "this message." % (", ".join(failed), ppdir),
             "spin_noise_run: manual pulse-program install")
-        return "manual install requested"
+        return "manual install requested: " + ", ".join(failed)
+    return ", ".join(written)
 
 
 # ============================================================================
@@ -3890,7 +3982,9 @@ def main():
     f2 = ask_fields(
         "spin-noise network 2/5: facility slug",
         "Short machine-readable ID for your facility.\n"
-        "Used in bundle file names -- lowercase letters, digits, hyphens.",
+        "Used in bundle file names -- lowercase letters, digits, hyphens.\n"
+        "One slug PER INSTRUMENT: a site with two magnets is two nodes\n"
+        "(e.g. uni-oulu and uni-oulu400).",
         ["Facility slug"], [slug_suggest])
     facility_slug = slugify(f2[0])
     if facility_slug == "":
@@ -4198,7 +4292,7 @@ def main():
     say("dialect probe: creating expno %d as a pseudo-2D" % EXP_REF_OPEN)
     cd_probe = open_expno(template, dsname, EXP_REF_OPEN)
     clear_raw_data(ds_path(cd_probe))
-    putpar("PULPROG", "zg2d")
+    putpar("PULPROG", PP_REF_NAME)
     make_2d(REF_ROWS)
     if param_api_needs_operator():
         if f1_td_form_rejected():
@@ -4337,7 +4431,7 @@ def main():
             set_rg(rung)
         clear_raw_data(ds_path(cd))
         t0 = now_local()
-        ocxo_s = ocxo_expected_s(TD_LADDER, SWH_HZ, 1, 1, D1_REF_S, 1)
+        ocxo_s = ocxo_expected_s(TD_LADDER, SWH_HZ, 1, 1, D1_REF_S, 1, 0.0)
         cb = clock_block_begin(expno, "rg_ladder", ocxo_s)
         run_zg_and_wait(ds_path(cd), "RG ladder rung %d (RG=%s)"
                         % (i + 1, rung), ocxo_s)
@@ -4359,15 +4453,19 @@ def main():
         moderate_rg = 1.0
     cd = reopen_expno(template, dsname, EXP_REF_OPEN)   # created + made 2D
     # at the dialect probe (section 7); WR() here would copy the 1D rung.
-    putpar("PULPROG", "zg2d")     # any standard small-flip 2D works; the
-    # rows are stored serially exactly like the noise block.
+    putpar("PULPROG", PP_REF_NAME)   # the project's zgref2d, not Bruker's
+    # zg2d: zg2d paces its rows with a delay computed from d20, which
+    # this script never sets -- negative, so the console refused to
+    # compile it (Torino, 2026-09-25).  The rows are stored serially
+    # exactly like the noise block.
     make_2d(REF_ROWS)             # already 2D: verifies F1 TD only
     set_common_acq(o1_hz, TD_ROW, SWH_HZ, 1, D1_REF_S)
     set_small_flip(p90_us, p90_db, db_par)
     set_rg(moderate_rg)
     clear_raw_data(ds_path(cd))
     t0 = now_local()
-    ocxo_s = ocxo_expected_s(TD_ROW, SWH_HZ, 1, REF_ROWS, D1_REF_S, 1)
+    ocxo_s = ocxo_expected_s(TD_ROW, SWH_HZ, 1, REF_ROWS, D1_REF_S, 1,
+                             REF_ROW_FIXED_S)
     cb = clock_block_begin(EXP_REF_OPEN, "reference_open", ocxo_s)
     run_zg_and_wait(ds_path(cd), "reference_open", ocxo_s)
     clock_block_end(cb)
@@ -4429,8 +4527,9 @@ def main():
             SLEEP(30)
         except CATCHABLE:
             pass
-        # zgnoise2d spends TWO d1 delays per row (before go, before wr).
-        ocxo_s = ocxo_expected_s(TD_ROW, SWH_HZ, 1, n_rows, D1_NOISE_S, 2)
+        # zgnoise2d spends TWO d1 delays per row (before go, before wr)
+        # and no fixed delay.
+        ocxo_s = ocxo_expected_s(TD_ROW, SWH_HZ, 1, n_rows, D1_NOISE_S, 2, 0.0)
         cb = clock_block_begin(EXP_NOISE, "noise", ocxo_s)
         run_zg_and_wait(ds_path(cd), "noise block (%d rows)" % n_rows, ocxo_s)
         clock_block_end(cb)
@@ -4443,14 +4542,15 @@ def main():
     say("expno %d: reference_close" % EXP_REF_CLOSE)
     ensure_template_dim(template, dsname, 2)   # after a sweep the current
     cd = open_expno(template, dsname, EXP_REF_CLOSE)   # dataset is a 1D
-    putpar("PULPROG", "zg2d")
+    putpar("PULPROG", PP_REF_NAME)
     make_2d(REF_ROWS)
     set_common_acq(o1_hz, TD_ROW, SWH_HZ, 1, D1_REF_S)
     set_small_flip(p90_us, p90_db, db_par)
     set_rg(moderate_rg)
     clear_raw_data(ds_path(cd))
     t0 = now_local()
-    ocxo_s = ocxo_expected_s(TD_ROW, SWH_HZ, 1, REF_ROWS, D1_REF_S, 1)
+    ocxo_s = ocxo_expected_s(TD_ROW, SWH_HZ, 1, REF_ROWS, D1_REF_S, 1,
+                             REF_ROW_FIXED_S)
     cb = clock_block_begin(EXP_REF_CLOSE, "reference_close", ocxo_s)
     run_zg_and_wait(ds_path(cd), "reference_close", ocxo_s)
     clock_block_end(cb)

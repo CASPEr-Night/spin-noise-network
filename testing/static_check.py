@@ -37,6 +37,13 @@ Python 3, and is checked, in order:
      object with script_version/schema_version/script_sha256, and the
      schema-1.2 "clock_audit" object (blocks + NTP status), with every
      audited acquisition wrapped in clock_block_begin/_end.
+  5. PULSE PROGRAMS (v0.7.6): the texts embedded in the script equal the
+     shipped topspin/pp/ files byte for byte, neither project pulse
+     program computes a delay (Bruker's zg2d does -- "DELTA=d20-..." --
+     and failed at Torino), the installer writes both files, every
+     reference block names PP_REF_NAME (zgref2d), and the timing model
+     carries zgref2d's fixed 30 ms per row explicitly; the harness, the
+     report parser and the physics fixture are pinned to the same model.
 
 Usage:  python3 testing/static_check.py     (exit 0 iff all green)
 """
@@ -404,7 +411,7 @@ check("guard: F1 TD addressed only via set_f1_td / f1_td_readback "
 # and there only as a plain text edit of the acqu2 file: a library set or
 # a 2D template carries the mode of ITS experiment, and Bruker's rule is
 # that 'undefined' (0) must be used when the pulse program has no mc
-# statement, true of zg2d and zgnoise2d.  Never through the parameter API:
+# statement, true of zgref2d and zgnoise2d.  Never through the parameter API:
 # TopSpin 4.4.0 rejected PUTPAR("1 FnMODE", ...) (Torino, 2026-09-18) and
 # v0.7.3's rule 'never PUTPAR FnMODE' stands.
 _FN_OWNERS = {"ensure_f1_files", "ensure_f1_fnmode_undefined",
@@ -715,6 +722,142 @@ check("clock audit: mocked acquisitions feed the harness clock "
       "(harness_clock_advance wired into run_zg_and_wait)",
       "harness_clock_advance(ocxo_s)"
       in "\n".join(function_body("run_zg_and_wait")[0]))
+
+
+# --------------------------------------------------------------------------
+# 5. Pulse programs (v0.7.6).  Torino, Avance Neo 400, TopSpin 4.4.0,
+#    2026-09-25, first live run: both reference blocks failed at zg because
+#    Bruker's library zg2d computes "DELTA=d20-((d1+aq)*(ns+ds))-30m" and
+#    spends it per row, while the run script never sets d20 -- "Cannot load
+#    line: duration is negative (-21166512.000000 us) In 'zg2d': line 24".
+#    The references now use the project's own zgref2d (zg2d without that
+#    line).  Pinned here: the embedded texts equal the shipped files byte
+#    for byte, neither project pulse program computes a delay (a quoted
+#    name=expression other than acqt0, which is the receiver's time-origin
+#    constant, not a delay), the installer writes both files, every
+#    reference block names PP_REF_NAME, the timing model carries zgref2d's
+#    fixed 30 ms per row explicitly, and the harness, the report's
+#    pulse-program parser and the physics fixture agree with it.
+# --------------------------------------------------------------------------
+
+PP_DIR = os.path.join(REPO, "topspin", "pp")
+REPORT_PATH = os.path.join(REPO, "analysis", "facility_report.py")
+PHYS_PATH = os.path.join(REPO, "testing", "make_physics_bundle.py")
+
+
+def embedded_pp(varname):
+    m = re.search(r'^%s = """(.*?)"""' % varname, SRC, re.M | re.S)
+    return m.group(1) if m else None
+
+
+def pp_code_lines(text):
+    """The statements of a pulse program: non-blank lines that are not
+    ';' comments, stripped."""
+    out = []
+    for ln in text.splitlines():
+        s = ln.strip()
+        if s and not s.startswith(";"):
+            out.append(s)
+    return out
+
+
+_PP_DEFINE = re.compile(r'^"\s*([A-Za-z_]\w*)\s*=')
+_PP_FILES = {}
+for var, name in (("PP_TEXT", "zgnoise2d"), ("PP_REF_TEXT", "zgref2d")):
+    with open(os.path.join(PP_DIR, name), "rb") as fh:
+        pp_bytes = fh.read()
+    _PP_FILES[name] = pp_bytes.decode("ascii", "replace")
+    emb = embedded_pp(var)
+    check("pulse program: embedded %s equals topspin/pp/%s byte for byte"
+          % (var, name),
+          emb is not None and emb.encode("utf-8") == pp_bytes,
+          "embedded %d bytes vs file %d bytes" % (len(emb or ""), len(pp_bytes)))
+    check("pulse program: topspin/pp/%s is ASCII with LF line endings and a "
+          "final newline" % name,
+          all(b < 128 for b in pp_bytes) and b"\r" not in pp_bytes
+          and pp_bytes.endswith(b"\n"))
+    code = pp_code_lines(_PP_FILES[name])
+    computed = [ln for ln in code
+                if _PP_DEFINE.match(ln) and _PP_DEFINE.match(ln).group(1) != "acqt0"]
+    check("pulse program: %s computes no delay (no quoted name=expression "
+          "other than acqt0 -- zg2d's DELTA is what failed at Torino)" % name,
+          not computed, "; ".join(computed))
+    check("pulse program: %s has no d20 / DELTA dependence and no include "
+          "beyond Avance.incl" % name,
+          re.search(r"\b(d20|DELTA)\b", "\n".join(code)) is None
+          and [ln for ln in code if ln.startswith("#")] == ["#include <Avance.incl>"])
+
+check("pulse program: zgref2d is Bruker's zg2d minus the DELTA line -- "
+      "1 ze / 30m / 2 d1 / p1 ph1 / go=2 ph31 / 30m wr #0 if #0 ze / "
+      "lo to 2 times td1 / exit, ph1=0, ph31=0, acqt0 as in zg/zg2d",
+      pp_code_lines(_PP_FILES["zgref2d"]) == [
+          "#include <Avance.incl>", '"acqt0=-p1*2/3.1416"', "1 ze", "30m",
+          "2 d1", "p1 ph1", "go=2 ph31", "30m wr #0 if #0 ze",
+          "lo to 2 times td1", "exit", "ph1=0", "ph31=0"],
+      repr(pp_code_lines(_PP_FILES["zgref2d"])))
+check("pulse program: zgnoise2d is unchanged -- 1 ze / 2 d1 / go=2 ph31 / "
+      "d1 wr #0 if #0 ze / lo to 2 times td1 / exit, ph31=0, no pulse",
+      pp_code_lines(_PP_FILES["zgnoise2d"]) == [
+          "#include <Avance.incl>", "1 ze", "2 d1", "go=2 ph31",
+          "d1 wr #0 if #0 ze", "lo to 2 times td1", "exit", "ph31=0"],
+      repr(pp_code_lines(_PP_FILES["zgnoise2d"])))
+check("pulse program: PP_REF_NAME = \"zgref2d\"; the references never name "
+      "Bruker's zg2d (probe, section 9 and section 11 all write PP_REF_NAME; "
+      "the noise blocks write PP_NAME)",
+      re.search(r'^PP_REF_NAME\s*=\s*"zgref2d"', SRC, re.M) is not None
+      and 'putpar("PULPROG", "zg2d")' not in SRC
+      and SRC.count('putpar("PULPROG", PP_REF_NAME)') == 3
+      and SRC.count('putpar("PULPROG", PP_NAME)') == 2)
+_ip = "\n".join(function_body("install_pulse_program")[0])
+check("pulse program: install_pulse_program writes BOTH files (or the "
+      "operator confirms both are in place)",
+      "((PP_NAME, PP_TEXT), (PP_REF_NAME, PP_REF_TEXT))" in _ip
+      and "zgnoise2d and zgref2d pre-installed" in _ip
+      and "BOTH 'zgnoise2d'" in _ip)
+_oe = "\n".join(function_body("ocxo_expected_s")[0])
+check("timing: ocxo_expected_s takes fixed_s_per_row; the references pass "
+      "REF_ROW_FIXED_S (0.03, zgref2d's '30m wr'), the noise blocks and the "
+      "1D rungs pass 0 -- every one of the six call sites",
+      "def ocxo_expected_s(td, swh, ns, rows, d1_s, d1_per_row, fixed_s_per_row):"
+      in SRC
+      and "return rows * (ns * (aq + d1_per_row * d1_s) + fixed_s_per_row)" in _oe
+      and re.search(r"^REF_ROW_FIXED_S\s*=\s*0\.03\b", SRC, re.M) is not None
+      and SRC.count("ocxo_expected_s(TD_ROW, SWH_HZ, 1, REF_ROWS, D1_REF_S, 1,\n"
+                    "                             REF_ROW_FIXED_S)") == 2
+      and SRC.count("ocxo_expected_s(TD_ROW, SWH_HZ, 1, n_rows, D1_NOISE_S, 2, 0.0)") == 2
+      and SRC.count("ocxo_expected_s(TD_LADDER, SWH_HZ, 1, 1, D1_REF_S, 1, 0.0)") == 2
+      and len(re.findall(r"ocxo_expected_s\(", SRC)) == 7)
+check("harness: the references are expected as zgref2d, both pulse programs "
+      "are checked in the fake TSHOME pp/user, and the recorded expectations "
+      "are checked against the per-role timing model",
+      '"reference_open": "zgref2d", "reference_close": "zgref2d"' in ENTRY_SRC
+      and '("zgnoise2d", ";zgnoise2d"),' in ENTRY_SRC
+      and '("zgref2d", ";zgref2d")):' in ENTRY_SRC
+      and "follow the per-role timing model" in ENTRY_SRC)
+with open(REPORT_PATH, "r", encoding="utf-8") as fh:
+    REPORT_SRC = fh.read()
+check("report: the pulse-program parser skips the acqt0 definition (a "
+      "time-origin constant, no duration) and refuses any other computed "
+      "delay, so zgref2d and Bruker's zg are modelable and zg2d is not",
+      'if m.group(1) == "acqt0":' in REPORT_SRC
+      and "computed delay definition" in REPORT_SRC)
+check("report: the pulse-program text is read from pulseprogram OR the "
+      "TopSpin 4.x pulseprogram.precomp (Torino's bundle has only the "
+      "latter), and the fixture can write either layout",
+      '_PP_FILES = ("pulseprogram", "pulseprogram.precomp")' in REPORT_SRC
+      and "def pulseprogram_source" in REPORT_SRC
+      and '"--pp-layout", choices=("topspin3", "topspin4")'
+      in open(PHYS_PATH, encoding="utf-8").read()
+      and "--pp-layout topspin4" in open(
+          os.path.join(REPO, "testing", "run_jython_harness.sh"),
+          encoding="utf-8").read())
+with open(PHYS_PATH, "r", encoding="utf-8") as fh:
+    PHYS_SRC = fh.read()
+check("fixture: make_physics_bundle writes the SHIPPED zgref2d/zgnoise2d "
+      "texts (read from topspin/pp/) and models one d1 + 30 ms per "
+      "reference row, never zg2d",
+      '_project_pp("zgref2d")' in PHYS_SRC and '_project_pp("zgnoise2d")' in PHYS_SRC
+      and '"zg2d"' not in PHYS_SRC and "REF_ROW_FIXED_S" in PHYS_SRC)
 
 
 # --------------------------------------------------------------------------

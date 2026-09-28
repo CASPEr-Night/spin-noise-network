@@ -35,14 +35,19 @@ With --clock-offset F the bundle also carries a schema-1.2 clock_audit
 object built on the PHYSICAL timing model: each block's recorded
 ocxo_expected_s uses the acquisition-side formula rows*(AQ + n_d1*D1)
 (mirroring spin_noise_run.py), while its wall-clock duration follows
-the pulse-program texts written into each expno (see PP_TEXTS: extra
-30m/p1/DE terms, and a second d1 per zg2d reference row) times (1 + F),
-plus a constant per-block overhead and ms-scale jitter. The report's
-pulse-program-derived fit must recover F within its stated uncertainty;
-without refinement the mis-modeled reference blocks are gate-excluded,
-so --expect-refined catches a dead refinement. --de-us sets DE (default
+the pulse-program texts written into each expno (see PP_TEXTS: the
+30m/p1/DE terms the acquisition-side formula omits) times (1 + F), plus
+a constant per-block overhead and ms-scale jitter. The report's
+pulse-program-derived fit must recover F within its stated uncertainty,
+and --expect-refined catches a dead refinement. --de-us sets DE (default
 6.5 us, the stock value; crank it, e.g. 20000, to make the per-row DE
-shortfall itself many sigma).
+shortfall itself many sigma). Until v0.7.6 the references were Bruker's
+zg2d, whose d20-computed pacing delay failed to compile on hardware
+(Torino, 2026-09-25); the fixture's stand-in for it spent a second d1
+per row that the recorded expectations omitted. The references are now
+the project's zgref2d (one d1, one 30 ms per row, both in the recorded
+expectation), so the only shortfalls left are p1 + DE per scan, the 30 ms
+before zgref2d's row loop, and zg's two 30m lines per pass.
 The default session is short (~10 min of audited time), so the report
 correctly flags the audit 'inconclusive (short session)' while
 still reporting the fitted offset; that flag is part of what this bundle
@@ -99,42 +104,39 @@ REF_DECAY_S = 3.0          # reference decay rate 1/s (line ~1 Hz + inhomog.)
 REF_FWHM_HZ = 6.0          # reference line FWHM via extra Lorentzian decay
 D1_REF_S = 2.0             # relaxation delay, references/ladder (run script)
 D1_NOISE_S = 0.05          # zgnoise2d loop delay (spent TWICE per row)
+REF_ROW_FIXED_S = 0.030    # zgref2d's '30m wr' per row (the run script's
+                           # REF_ROW_FIXED_S -- part of the RECORDED model)
+REF_PRE_S = 0.030          # zgref2d's 30m before its row loop: once per
+                           # block, not in the recorded model
 DE_US_DEFAULT = 6.5        # stock pre-acquisition delay DE, microseconds
 P1_US = 10.0               # small-flip pulse length in the pulsed sequences
+
+
+def _project_pp(name):
+    """The shipped pulse program topspin/pp/<name>, as bytes.  Read from
+    the repository so the fixture can never drift from what the run
+    script installs (static_check pins the script's embedded copies to
+    the same files)."""
+    with open(os.path.join(REPO, "topspin", "pp", name), "rb") as fh:
+        return fh.read()
+
 
 # Pulse-program texts written into each expno, mirroring what real
 # TopSpin stores in data/<expno>/pulseprogram. The report's clock-audit
 # refinement parses these texts (NOT a name-keyed table) to derive each
 # block's true OCXO duration, so the fixture's wall clocks below are
-# built from the same structures. zgnoise2d is the repo-shipped
-# sequence verbatim (2 x d1 per row); the zg2d stand-in follows its
-# documented lineage ('zg2d with the pulse line deleted') and spends
-# 2 x d1 + p1 per row; the zg stand-in carries the library sequence's
-# 30m loop/write delays.
-PP_TEXT_ZGNOISE2D = (
-    ";zgnoise2d (fixture copy of topspin/pp/zgnoise2d)\n"
-    "#include <Avance.incl>\n"
-    "1 ze\n"
-    "2 d1\n"
-    "  go=2 ph31\n"
-    "  d1 wr #0 if #0 ze\n"
-    "  lo to 2 times td1\n"
-    "exit\n"
-    "ph31=0\n").encode("ascii")
-PP_TEXT_ZG2D = (
-    ";zg2d (fixture stand-in: zgnoise2d lineage WITH the pulse line)\n"
-    "1 ze\n"
-    "2 d1\n"
-    "  p1 ph1\n"
-    "  go=2 ph31\n"
-    "  d1 wr #0 if #0 zd\n"
-    "  lo to 2 times td1\n"
-    "exit\n"
-    "ph1=0\n"
-    "ph31=0\n").encode("ascii")
+# built from the same structures. zgnoise2d and zgref2d are the shipped
+# sequences themselves (2 x d1 per row; d1 + p1 + 30m per row plus one
+# 30m before the loop -- and zgref2d's "acqt0=..." definition, which the
+# report's parser must take as zero duration); the zg stand-in carries
+# the library sequence's 30m loop/write delays and the same acqt0 line.
+PP_TEXT_ZGNOISE2D = _project_pp("zgnoise2d")
+PP_TEXT_ZGREF2D = _project_pp("zgref2d")
 PP_TEXT_ZG = (
     ";zg (fixture stand-in for the library 1D sequence, with its 30m\n"
-    ";loop and write delays)\n"
+    ";loop and write delays and its acqt0 definition)\n"
+    "#include <Avance.incl>\n"
+    "\"acqt0=-p1*2/3.1416\"\n"
     "1 ze\n"
     "2 30m\n"
     "  d1\n"
@@ -144,7 +146,7 @@ PP_TEXT_ZG = (
     "exit\n"
     "ph1=0\n"
     "ph31=0\n").encode("ascii")
-PP_TEXTS = {"zg": PP_TEXT_ZG, "zg2d": PP_TEXT_ZG2D,
+PP_TEXTS = {"zg": PP_TEXT_ZG, "zgref2d": PP_TEXT_ZGREF2D,
             "zgnoise2d": PP_TEXT_ZGNOISE2D}
 
 
@@ -245,40 +247,43 @@ def build_clock_audit(offset, rng, de_us=DE_US_DEFAULT):
 
     PHYSICAL timing model (mirrors the fixture PP_TEXTS, which the
     report's refinement parses): the RECORDED ocxo_expected_s is the
-    acquisition-side formula rows*(AQ + n_d1*D1), exactly like
-    spin_noise_run.py (ladder/refs n_d1=1, noise n_d1=2) -- while the
+    acquisition-side formula rows*(AQ + n_d1*D1 + fixed), exactly like
+    spin_noise_run.py's ocxo_expected_s (ladder n_d1=1 fixed 0; zgref2d
+    references n_d1=1 fixed 30 ms; noise n_d1=2 fixed 0) -- while the
     TRUE (wall) duration follows the pulse-program text: the zg ladder
-    additionally spends 2x30m + p1 + DE per pass, the zg2d references a
-    SECOND d1 + p1 + DE per row (their recorded expectation is ~9.5%
-    short, so a fit without refinement gate-excludes them; that is what
-    --expect-refined guards), and zgnoise2d spends DE per row. The
-    report's pulse-program-derived fit removes the shortfalls; its
-    recorded-model comparison fit keeps them."""
+    additionally spends 2x30m + p1 + DE per pass, the zgref2d references
+    p1 + DE per row plus one 30m before the row loop, and zgnoise2d DE
+    per row. With the stock DE these shortfalls are tiny; --de-us 20000
+    makes them many sigma, which is what the harness's discrimination
+    case exercises. The report's pulse-program-derived fit removes the
+    shortfalls; its recorded-model comparison fit keeps them."""
     de_s = de_us * 1e-6
     p1_s = P1_US * 1e-6
     aq_lad = TD_LADDER / 2 / SW_HZ
     aq_row = TD_ROW / 2 / SW_HZ
     lad_rec = aq_lad + D1_REF_S
     lad_true = aq_lad + D1_REF_S + p1_s + de_s + 0.060   # two 30m lines
-    ref_rec = aq_row + D1_REF_S
-    ref_true = aq_row + 2.0 * D1_REF_S + p1_s + de_s
+    ref_rec = aq_row + D1_REF_S + REF_ROW_FIXED_S
+    ref_true = aq_row + D1_REF_S + p1_s + de_s + REF_ROW_FIXED_S
     noi_rec = aq_row + 2.0 * D1_NOISE_S
     noi_true = noi_rec + de_s
-    # (expno, role, rows, rec_per_row, true_per_row); rows None = setup
-    plan = [(1, "setup", None, None, None)]
-    plan += [(e, "rg_ladder", 1, lad_rec, lad_true) for e, _rg in RG_LADDER]
-    plan += [(11, "reference_open", REF_ROWS, ref_rec, ref_true),
-             (12, "noise", N_NOISE_ROWS, noi_rec, noi_true),
-             (13, "reference_close", REF_ROWS, ref_rec, ref_true)]
+    # (expno, role, rows, rec_per_row, true_per_row, true_pre_block);
+    # rows None = setup
+    plan = [(1, "setup", None, None, None, 0.0)]
+    plan += [(e, "rg_ladder", 1, lad_rec, lad_true, 0.0)
+             for e, _rg in RG_LADDER]
+    plan += [(11, "reference_open", REF_ROWS, ref_rec, ref_true, REF_PRE_S),
+             (12, "noise", N_NOISE_ROWS, noi_rec, noi_true, 0.0),
+             (13, "reference_close", REF_ROWS, ref_rec, ref_true, REF_PRE_S)]
     t_ms = 1787000000000            # arbitrary 2026-ish epoch
     blocks = []
-    for expno, role, rows, rec_row, true_row in plan:
+    for expno, role, rows, rec_row, true_row, pre_s in plan:
         if rows is None:
             ocxo_s = None
             dur_ms = 120000         # setup: tune/shim/dialogs, wall only
         else:
             ocxo_s = rows * rec_row
-            true_s = rows * true_row
+            true_s = rows * true_row + pre_s
             dur_ms = int(round(true_s * 1000.0 * (1.0 + offset)
                                + 180.0 + rng.integers(-4, 5)))
         blocks.append({"expno": expno, "role": role,
@@ -290,6 +295,31 @@ def build_clock_audit(offset, rng, de_us=DE_US_DEFAULT):
             "ntp_status_raw": "synthetic clock-audit fixture (no NTP "
                               "daemon was queried)",
             "workstation_time_source": "synthetic"}
+
+
+def pp_file(expno, text, args):
+    """The (arcname, bytes) pair carrying expno's pulse-program text in
+    the layout of the chosen console generation.  TopSpin 2.x/3.x store
+    the source as data/<expno>/pulseprogram; the TopSpin 4.x Neo consoles
+    store only the preprocessed data/<expno>/pulseprogram.precomp (Torino,
+    2026-09-25: no 'pulseprogram' in any expno) -- cpp output, i.e. the
+    same statements with '# <line> "<file>"' markers in place of the
+    #include lines.  The report must model both."""
+    if args.pp_layout == "topspin3":
+        return ("data/%d/pulseprogram" % expno, text)
+    src = "/root/.topspin-BladeEpu/local_acqu/FIXTURE/%d/lists/pp/x" % expno
+    out = ['# 1 "%s"' % src, '# 1 "<built-in>"', '# 1 "<command-line>"',
+           '# 1 "%s"' % src]
+    n = 0
+    for ln in text.decode("ascii").splitlines():
+        n += 1
+        if ln.startswith("#include"):
+            out.append('# 1 "%s.incl" 1' % src)
+            out.append('# %d "%s" 2' % (n + 1, src))
+            continue
+        out.append(ln)
+    return ("data/%d/pulseprogram.precomp" % expno,
+            ("\n".join(out) + "\n").encode("ascii"))
 
 
 def build_bundle(args):
@@ -307,7 +337,7 @@ def build_bundle(args):
     files.append(("data/1/acqus",
                   acqus_text(TD_LADDER, SW_HZ, 1.0, pulprog="zg",
                              d1_s=D1_REF_S, de_us=args.de_us)))
-    files.append(("data/1/pulseprogram", PP_TEXTS["zg"]))
+    files.append(pp_file(1, PP_TEXTS["zg"], args))
 
     # RG ladder: amplitude exactly linear in RG
     ladder_meta = []
@@ -323,7 +353,7 @@ def build_bundle(args):
         files.append(("data/%d/acqus" % expno,
                       acqus_text(TD_LADDER, SW_HZ, rg, pulprog="zg",
                                  d1_s=D1_REF_S, de_us=args.de_us)))
-        files.append(("data/%d/pulseprogram" % expno, PP_TEXTS["zg"]))
+        files.append(pp_file(expno, PP_TEXTS["zg"], args))
         files.append(("data/%d/fid" % expno, to_bruker_int32([row])))
         ladder_meta.append({"expno": expno, "rg": rg, "tip_deg": 1.0})
 
@@ -336,9 +366,9 @@ def build_bundle(args):
                 for _ in range(REF_ROWS)]
         ref_rows[expno] = rows
         files.append(("data/%d/acqus" % expno,
-                      acqus_text(TD_ROW, SW_HZ, RG_REF, pulprog="zg2d",
+                      acqus_text(TD_ROW, SW_HZ, RG_REF, pulprog="zgref2d",
                                  d1_s=D1_REF_S, de_us=args.de_us)))
-        files.append(("data/%d/pulseprogram" % expno, PP_TEXTS["zg2d"]))
+        files.append(pp_file(expno, PP_TEXTS["zgref2d"], args))
         files.append(("data/%d/acqu2s" % expno, acqu2s_text(REF_ROWS)))
         files.append(("data/%d/ser" % expno, to_bruker_int32(rows)))
 
@@ -349,7 +379,7 @@ def build_bundle(args):
     files.append(("data/12/acqus",
                   acqus_text(TD_ROW, SW_HZ, RG_NOISE,
                              d1_s=D1_NOISE_S, de_us=args.de_us)))
-    files.append(("data/12/pulseprogram", PP_TEXTS["zgnoise2d"]))
+    files.append(pp_file(12, PP_TEXTS["zgnoise2d"], args))
     files.append(("data/12/acqu2s", acqu2s_text(N_NOISE_ROWS)))
     files.append(("data/12/ser", to_bruker_int32(noise_rows)))
 
@@ -402,9 +432,9 @@ def build_bundle(args):
             expmeta(1, "setup", "zg", TD_LADDER, 1, 1.0, TD_LADDER / 2 / SW_HZ)]
         + [expmeta(e, "rg_ladder", "zg", TD_LADDER, 1, rg,
                    TD_LADDER / 2 / SW_HZ) for e, rg in RG_LADDER]
-        + [expmeta(11, "reference_open", "zg2d", TD_ROW, REF_ROWS, RG_REF, aq_row),
+        + [expmeta(11, "reference_open", "zgref2d", TD_ROW, REF_ROWS, RG_REF, aq_row),
            expmeta(12, "noise", "zgnoise2d", TD_ROW, N_NOISE_ROWS, RG_NOISE, aq_row),
-           expmeta(13, "reference_close", "zg2d", TD_ROW, REF_ROWS, RG_REF, aq_row)],
+           expmeta(13, "reference_close", "zgref2d", TD_ROW, REF_ROWS, RG_REF, aq_row)],
         "checksums": {},
         "injection_truth": {   # extra key (schema allows additional props)
             "feature": args.feature, "amp_norm": a_inj,
@@ -465,6 +495,13 @@ def main(argv=None):
                          "expectations (the physical shortfall the report's "
                          "acqus-refined fit must remove); default %.3g"
                          % DE_US_DEFAULT)
+    ap.add_argument("--pp-layout", choices=("topspin3", "topspin4"),
+                    default="topspin3",
+                    help="where each expno's pulse-program text lives: "
+                         "data/<expno>/pulseprogram (TopSpin 2.x/3.x, "
+                         "default) or the preprocessed "
+                         "data/<expno>/pulseprogram.precomp only (TopSpin "
+                         "4.x Neo consoles, as Torino's 2026-09-25 bundle)")
     ap.add_argument("--out-dir", default=None)
     args = ap.parse_args(argv)
     if args.feature == "dip" and abs(args.amp) >= 1.0:
