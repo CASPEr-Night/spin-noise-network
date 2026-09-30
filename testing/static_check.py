@@ -42,8 +42,16 @@ Python 3, and is checked, in order:
      program computes a delay (Bruker's zg2d does -- "DELTA=d20-..." --
      and failed at Torino), the installer writes both files, every
      reference block names PP_REF_NAME (zgref2d), and the timing model
-     carries zgref2d's fixed 30 ms per row explicitly; the harness, the
-     report parser and the physics fixture are pinned to the same model.
+     is the one the harness, the report parser and the physics fixture
+     are pinned to.
+  6. DATA TRANSFER AND CONTENT (v0.7.7): both pulse programs write their
+     row during the data-transfer delay d11 ('d11 wr'), the script sets
+     and reads back D 11, the row probe walks ROW_PROBE_LADDER at expno
+     17 and decides by the LAST row's content, every pseudo-2D block is
+     content-checked after zg, the unattended blocks never dialog, the
+     mocked acquisition writes a raw-data file, the stub models the
+     refusing receiver unit (legacy-dru flavors), the schema knows the
+     row_probe role and record, and the report drops all-zero rows.
 
 Usage:  python3 testing/static_check.py     (exit 0 iff all green)
 """
@@ -712,15 +720,19 @@ check("meta: schema keeps clock_audit OPTIONAL (backward compatible)",
 
 n_begin = len(re.findall(r"clock_block_begin\(", SRC))
 n_end = len(re.findall(r"clock_block_end\(", SRC))
-# 5 call sites for each (setup, ladder loop, ref_open, noise, ref_close)
-# plus the two function definitions themselves.
+# 4 call sites for each (setup, ladder loop, acquire_quick_1d, and
+# acquire_block -- every pseudo-2D block and row-probe attempt goes
+# through it since v0.7.7) plus the two function definitions themselves.
 check("clock audit: every audited block has a begin AND an end "
       "(%d/%d call sites)" % (n_begin - 1, n_end - 1),
-      n_begin == n_end and n_begin >= 6)
+      n_begin == n_end and n_begin >= 5)
 
+_ma = "\n".join(function_body("mock_acquisition")[0])
 check("clock audit: mocked acquisitions feed the harness clock "
-      "(harness_clock_advance wired into run_zg_and_wait)",
-      "harness_clock_advance(ocxo_s)"
+      "(harness_clock_advance wired into mock_acquisition, which "
+      "run_zg_and_wait's hw_skip branch calls)",
+      "harness_clock_advance(ocxo_s)" in _ma
+      and "mock_acquisition(expno_dir, rows, ocxo_s)"
       in "\n".join(function_body("run_zg_and_wait")[0]))
 
 
@@ -787,27 +799,41 @@ for var, name in (("PP_TEXT", "zgnoise2d"), ("PP_REF_TEXT", "zgref2d")):
           re.search(r"\b(d20|DELTA)\b", "\n".join(code)) is None
           and [ln for ln in code if ln.startswith("#")] == ["#include <Avance.incl>"])
 
-check("pulse program: zgref2d is Bruker's zg2d minus the DELTA line -- "
-      "1 ze / 30m / 2 d1 / p1 ph1 / go=2 ph31 / 30m wr #0 if #0 ze / "
-      "lo to 2 times td1 / exit, ph1=0, ph31=0, acqt0 as in zg/zg2d",
+check("pulse program: zgref2d is Bruker's zg2d minus the DELTA line, its "
+      "row written during d11 (v0.7.7) -- 1 ze / 30m / 2 d1 / p1 ph1 / "
+      "go=2 ph31 / d11 wr #0 if #0 ze / lo to 2 times td1 / exit, ph1=0, "
+      "ph31=0, acqt0 as in zg/zg2d",
       pp_code_lines(_PP_FILES["zgref2d"]) == [
           "#include <Avance.incl>", '"acqt0=-p1*2/3.1416"', "1 ze", "30m",
-          "2 d1", "p1 ph1", "go=2 ph31", "30m wr #0 if #0 ze",
+          "2 d1", "p1 ph1", "go=2 ph31", "d11 wr #0 if #0 ze",
           "lo to 2 times td1", "exit", "ph1=0", "ph31=0"],
       repr(pp_code_lines(_PP_FILES["zgref2d"])))
-check("pulse program: zgnoise2d is unchanged -- 1 ze / 2 d1 / go=2 ph31 / "
-      "d1 wr #0 if #0 ze / lo to 2 times td1 / exit, ph31=0, no pulse",
+check("pulse program: zgnoise2d writes its row during d11 (v0.7.7) and "
+      "carries \"acqt0=0\" before 1 ze (Bruker's idiom for a pulse-free "
+      "acquisition -- cp, zgesgppe, cosyetgp, hmqcet -- which also silences "
+      "rga's 'acqt0 not set' warning) -- 1 ze / 2 d1 / go=2 ph31 / d11 wr "
+      "#0 if #0 ze / lo to 2 times td1 / exit, ph31=0, no pulse",
       pp_code_lines(_PP_FILES["zgnoise2d"]) == [
-          "#include <Avance.incl>", "1 ze", "2 d1", "go=2 ph31",
-          "d1 wr #0 if #0 ze", "lo to 2 times td1", "exit", "ph31=0"],
+          "#include <Avance.incl>", '"acqt0=0"', "1 ze", "2 d1", "go=2 ph31",
+          "d11 wr #0 if #0 ze", "lo to 2 times td1", "exit", "ph31=0"],
       repr(pp_code_lines(_PP_FILES["zgnoise2d"])))
+check("pulse program: both headers state the Oulu evidence honestly -- the "
+      "DRUCONTR text, first row acquired and the abort mid-second-row, "
+      "baseopt vs digital as the leading explanation, d11 as insurance, the "
+      "row probe as the safety net",
+      all("DRUCONTR" in _PP_FILES[n] and "SECOND row" in _PP_FILES[n]
+          and "baseopt" in _PP_FILES[n] and "digital" in _PP_FILES[n]
+          and "insurance" in _PP_FILES[n] and "safety net" in _PP_FILES[n]
+          and "WEAKEST" in _PP_FILES[n] for n in ("zgnoise2d", "zgref2d"))
+      and "acqt0 not set in pulse program" in _PP_FILES["zgnoise2d"])
 check("pulse program: PP_REF_NAME = \"zgref2d\"; the references never name "
-      "Bruker's zg2d (probe, section 9 and section 11 all write PP_REF_NAME; "
-      "the noise blocks write PP_NAME)",
+      "Bruker's zg2d (dialect probe, section 9 and section 11 all write "
+      "PP_REF_NAME; the row probe, the noise block and the sweep write "
+      "PP_NAME)",
       re.search(r'^PP_REF_NAME\s*=\s*"zgref2d"', SRC, re.M) is not None
       and 'putpar("PULPROG", "zg2d")' not in SRC
       and SRC.count('putpar("PULPROG", PP_REF_NAME)') == 3
-      and SRC.count('putpar("PULPROG", PP_NAME)') == 2)
+      and SRC.count('putpar("PULPROG", PP_NAME)') == 3)
 _ip = "\n".join(function_body("install_pulse_program")[0])
 check("pulse program: install_pulse_program writes BOTH files (or the "
       "operator confirms both are in place)",
@@ -815,18 +841,19 @@ check("pulse program: install_pulse_program writes BOTH files (or the "
       and "zgnoise2d and zgref2d pre-installed" in _ip
       and "BOTH 'zgnoise2d'" in _ip)
 _oe = "\n".join(function_body("ocxo_expected_s")[0])
-check("timing: ocxo_expected_s takes fixed_s_per_row; the references pass "
-      "REF_ROW_FIXED_S (0.03, zgref2d's '30m wr'), the noise blocks and the "
-      "1D rungs pass 0 -- every one of the six call sites",
+_ab = "\n".join(function_body("acquire_block")[0])
+check("timing: ocxo_expected_s takes fixed_s_per_row; every pseudo-2D block "
+      "(references, noise, sweep, row probe) goes through acquire_block, "
+      "which passes ONE d1 and the session's d11 as the fixed per-row term; "
+      "the 1D rungs pass 0; REF_ROW_FIXED_S (the 30m of v0.7.6) is gone",
       "def ocxo_expected_s(td, swh, ns, rows, d1_s, d1_per_row, fixed_s_per_row):"
       in SRC
       and "return rows * (ns * (aq + d1_per_row * d1_s) + fixed_s_per_row)" in _oe
-      and re.search(r"^REF_ROW_FIXED_S\s*=\s*0\.03\b", SRC, re.M) is not None
-      and SRC.count("ocxo_expected_s(TD_ROW, SWH_HZ, 1, REF_ROWS, D1_REF_S, 1,\n"
-                    "                             REF_ROW_FIXED_S)") == 2
-      and SRC.count("ocxo_expected_s(TD_ROW, SWH_HZ, 1, n_rows, D1_NOISE_S, 2, 0.0)") == 2
+      and "ocxo_expected_s(td, SWH_HZ, 1, rows, d1_s, 1, d11_s)" in _ab
+      and "REF_ROW_FIXED_S" not in SRC
+      and "D1_NOISE_S, 2, 0.0" not in SRC
       and SRC.count("ocxo_expected_s(TD_LADDER, SWH_HZ, 1, 1, D1_REF_S, 1, 0.0)") == 2
-      and len(re.findall(r"ocxo_expected_s\(", SRC)) == 7)
+      and len(re.findall(r"ocxo_expected_s\(", SRC)) == 4)
 check("harness: the references are expected as zgref2d, both pulse programs "
       "are checked in the fake TSHOME pp/user, and the recorded expectations "
       "are checked against the per-role timing model",
@@ -854,10 +881,247 @@ check("report: the pulse-program text is read from pulseprogram OR the "
 with open(PHYS_PATH, "r", encoding="utf-8") as fh:
     PHYS_SRC = fh.read()
 check("fixture: make_physics_bundle writes the SHIPPED zgref2d/zgnoise2d "
-      "texts (read from topspin/pp/) and models one d1 + 30 ms per "
-      "reference row, never zg2d",
+      "texts (read from topspin/pp/), models one d1 + d11 per row for both "
+      "(D11_TRANSFER_S, written into acqus D[11]), never zg2d, no 30m per row",
       '_project_pp("zgref2d")' in PHYS_SRC and '_project_pp("zgnoise2d")' in PHYS_SRC
-      and '"zg2d"' not in PHYS_SRC and "REF_ROW_FIXED_S" in PHYS_SRC)
+      and '"zg2d"' not in PHYS_SRC and "D11_TRANSFER_S" in PHYS_SRC
+      and "REF_ROW_FIXED_S" not in PHYS_SRC)
+
+
+# --------------------------------------------------------------------------
+# 6. Data transfer and data content (v0.7.7).  Oulu, University of Oulu,
+#    Avance III HD 500 (AQS DRU-E), TopSpin 3.7.0, 2026-09-30, first live
+#    run: every pseudo-2D block was refused at zg -- "Exception in DRUCONTR
+#    1: Your pulse program produces too much data for the LAN capacity.
+#    ->Experiment aborted by DRU1!" -- the 64 kB 1D rungs passed, and
+#    TopSpin left full-size ser files (first row acquired, rows 2..N zeros)
+#    that the v0.7.6 existence check took for data.  Pinned here: the d11
+#    transfer delay is set and read back with the common parameters, the
+#    row probe and the content checks decide by the LAST row's content,
+#    the unattended blocks never dialog, the mocked acquisition writes a
+#    file, and the harness / stub / schema / packer / report / docs all
+#    know the new role, record and failure mode.
+# --------------------------------------------------------------------------
+
+check("transfer: D11_TRANSFER_S = 1.0, ROW_PROBE_LADDER starts at the default "
+      "geometry (262144, 1.0), EXP_ROW_PROBE = 17, probe rows >= 2",
+      re.search(r"^D11_TRANSFER_S\s*=\s*1\.0\b", SRC, re.M) is not None
+      and re.search(r"^ROW_PROBE_LADDER\s*=\s*\[\(262144,\s*1\.0\),\s*\(262144,\s*3\.0\)",
+                    SRC, re.M) is not None
+      and re.search(r"^EXP_ROW_PROBE\s*=\s*17\b", SRC, re.M) is not None
+      and re.search(r"^ROW_PROBE_MIN_ROWS\s*=\s*2\b", SRC, re.M) is not None)
+_sc = "\n".join(function_body("set_common_acq")[0])
+check("transfer: set_common_acq writes D 11 with the other common parameters "
+      "and reads it back exactly (verify_acq_write kind float)",
+      'putpar("D 11", "%.4f" % d11_s)' in _sc
+      and 'verify_acq_write("D 11", d11_s, "float")' in _sc
+      and 'if kind == "float":' in "\n".join(function_body("verify_acq_write")[0])
+      and len(re.findall(r"set_common_acq\([^)]*\)", SRC)) >= 8
+      and re.search(r"set_common_acq\([^)]*\bD1_[A-Z_]+\)", SRC) is None)
+_sr = "\n".join(function_body("ser_row_has_data")[0])
+_bd = "\n".join(function_body("block_data_check")[0])
+_rmb = "\n".join(function_body("raw_row_min_bytes")[0])
+_ab_body = "\n".join(function_body("acquire_block")[0])
+check("content: ser_row_has_data reads a few kB at the start and middle of "
+      "the row at stride = size / n_rows, binary, every read guarded, with "
+      "the SHORT-FILE guard (a ser smaller than n_rows x TD x 4 -- x 8 for "
+      "acqus DTYPA 2 -- cannot hold its last row: 0, never 'acquired', on a "
+      "console that does not pre-allocate); block_data_check asks for row 0 "
+      "and row rows-1 with that minimum, acquire_block hands it the TD",
+      "stride = size // n_rows" in _sr and 'open(path, "rb")' in _sr
+      and "os.path.getsize(path)" in _sr and "except CATCHABLE:" in _sr
+      and 'buf.count("\\x00") != len(buf)' in _sr
+      and "size < n_rows * min_row_bytes" in _sr
+      and "stride = min_row_bytes" in _sr
+      and "if (row_index + 1) * stride > size:" in _sr
+      and 0 < _sr.find("size < n_rows * min_row_bytes") < _sr.find('open(path, "rb")')
+      and "mrb = raw_row_min_bytes(expno_dir, td)" in _bd
+      and "ser_row_has_data(path, 0, rows, mrb)" in _bd
+      and "ser_row_has_data(path, rows - 1, rows, mrb)" in _bd
+      and '_acqus_scalar(expno_dir, "DTYPA", 0)) == 2' in _rmb
+      and "return td * bps" in _rmb
+      and "block_data_check(expno_dir, rows, td)" in _ab_body)
+_rz = "\n".join(function_body("run_zg_and_wait")[0])
+check("content: run_zg_and_wait decides on the FILE only (raw_data_file), "
+      "dialogs only when attended, says WARNING otherwise, and its docstring "
+      "names the full-size ser of zeros a refused zg leaves on TopSpin 3.x",
+      "raw_data_file(expno_dir) is None" in _rz
+      and 0 < _rz.find("if attended:") < _rz.find("CONFIRM(")
+      and _rz.count("CONFIRM(") == 1
+      and 'say("WARNING: no raw-data file' in _rz
+      and "full-size ser of zeros" in _rz
+      and "os.path.exists" not in _rz)
+_rp = "\n".join(function_body("run_row_probe")[0])
+_an = "\n".join(function_body("acquire_noise_block")[0])
+check("probe: run_row_probe walks ROW_PROBE_LADDER at EXP_ROW_PROBE with "
+      "PP_NAME, decides by acquire_block's LAST row (last == 1), records "
+      "attempts, keeps one clock block, WARNs (no dialog) when none passes "
+      "and falls back to the first setting",
+      "for e in ROW_PROBE_LADDER" in _rp and "open_expno(template, dsname, EXP_ROW_PROBE)" in _rp
+      and 'putpar("PULPROG", PP_NAME)' in _rp and "if last == 1:" in _rp
+      and "CLOCK_BLOCKS.remove(last_cb)" in _rp
+      and 'ROW_PROBE["attempts"].append(' in _rp
+      and 'say("WARNING: row probe' in _rp and "td, d11 = ROW_PROBE_LADDER[0]" in _rp
+      and "CONFIRM(" not in _rp and "MSG(" not in _rp
+      and 'meta["calibration"]["row_probe"] = ROW_PROBE' in _rp)
+check("probe: the row probe runs after the RG ladder and before the opening "
+      "reference; its (td_row, d11_s) reaches reference_open, the noise "
+      "block, reference_close and the sweep; the probe expno is bundled",
+      0 < SRC.find("td_row, d11_s = run_row_probe(meta, template, dsname, o1_hz)")
+      < SRC.find('say("expno %d: reference_open')
+      and SRC.find("RG ladder (4 quick 1D acquisitions)")
+      < SRC.find("td_row, d11_s = run_row_probe(")
+      and SRC.count("set_common_acq(o1_hz, td_row, SWH_HZ, 1, D1_REF_S, d11_s)") == 2
+      and "set_common_acq(o1_hz, td_row, SWH_HZ, 1, D1_NOISE_S, d11_s)" in SRC
+      and "set_common_acq(o1_step, td_row, SWH_HZ, 1, D1_NOISE_S, d11_s)" in SRC
+      and "noise_secs, max_rg, bf1, AUTOSTEP, td_row, d11_s)" in SRC
+      and "+ [EXP_ROW_PROBE, EXP_REF_OPEN] + noise_expnos" in SRC)
+check("content: every pseudo-2D block is content-checked after zg "
+      "(note_block_data for reference_open, reference_close, the probe and "
+      "acquire_noise_block); the noise blocks retry ONCE with the next ladder "
+      "setting, rows recomputed, then WARN; unattended blocks pass attended=0",
+      'note_block_data(EXP_REF_OPEN, "reference_open"' in SRC
+      and 'note_block_data(EXP_REF_CLOSE, "reference_close"' in SRC
+      and 'note_block_data(EXP_ROW_PROBE, "row_probe"' in _rp
+      and "next_ladder_setting(td, d11_s)" in _an
+      and "rows = noise_rows_for(noise_secs, td, d11_s)" in _an
+      and _an.count("acquire_block(") == 2
+      and "D1_NOISE_S, d11_s, 0)" in _an
+      and "CONFIRM(" not in _an and "MSG(" not in _an
+      and "td_row, ref_rows, D1_REF_S, d11_s, 0)" in SRC
+      and "td_row, ref_rows, D1_REF_S, d11_s, 1)" in SRC
+      and SRC.count("acquire_noise_block(") == 3
+      and 'PARAM_API["blocks_without_data"].append(expno)'
+      in "\n".join(function_body("note_block_data")[0]))
+check("content: block durations are kept whatever the row -- noise rows from "
+      "noise_rows_for(secs, td, d11), reference rows from ref_rows_for "
+      "(REF_BLOCK_SECS = 170), probe rows from probe_rows_for",
+      re.search(r"^REF_BLOCK_SECS\s*=\s*170\.0\b", SRC, re.M) is not None
+      and "REF_BLOCK_SECS / (aq_row_s(td) + D1_REF_S + d11_s)"
+      in "\n".join(function_body("ref_rows_for")[0])
+      and "aq_row_s(td) + D1_NOISE_S + d11_s + ROW_OVERHEAD_S"
+      in "\n".join(function_body("noise_row_secs")[0])
+      and "ref_rows = ref_rows_for(td_row, d11_s)" in SRC
+      and "n_rows = noise_rows_for(noise_secs, td_row, d11_s)" in SRC
+      and "n_rows = noise_rows_for(per_secs, td_row, d11_s)" in SRC)
+check("mock: mock_acquisition offers the HARNESS_MOCK_ACQ seam (NameError-"
+      "guarded) and otherwise advances the clock and writes a raw-data file "
+      "of rows x TD int32 (Java IntStream, Python fallback), never fatal",
+      "HARNESS_MOCK_ACQ(expno_dir, td, rows, d11, ocxo_s)" in _ma
+      and "except NameError:" in _ma and "mock_write_raw_data(expno_dir, td, rows)" in _ma
+      and "rnd.ints(long(td), -2000000, 2000000).toArray()"
+      in "\n".join(function_body("_mock_write_java")[0])
+      and "_mock_write_python(path, td, rows)"
+      in "\n".join(function_body("mock_write_raw_data")[0])
+      and "except CATCHABLE:" in "\n".join(function_body("mock_write_raw_data")[0]))
+check("meta: schema knows the row_probe role (experiments and clock_audit), "
+      "calibration.row_probe and param_api.blocks_without_data",
+      "row_probe" in schema["properties"]["experiments"]["items"]["properties"]["role"]["enum"]
+      and "row_probe" in schema["properties"]["clock_audit"]["properties"]["blocks"]["items"]["properties"]["role"]["enum"]
+      and "row_probe" in schema["properties"]["calibration"]["properties"]
+      and "blocks_without_data" in schema["properties"]["software"]["properties"]["param_api"]["description"])
+# 6. Acquisition mode (v0.7.7).  Oulu, 2026-09-30: every expno ran DIGMOD
+#    baseopt / DSPFIRM rectangle from the operator's parameter set and the
+#    DRU aborted every 262144-point pseudo-2D row after the first; Torino's
+#    digital / sharp rows acquired.  Pinned: the script writes DIGMOD
+#    digital then DSPFIRM sharp by enum NAME on every dataset it acquires
+#    with (set_digital_mode, first thing in set_common_acq), accepts the
+#    ordinal or the name on readback, never insists (failed_forms via
+#    _form_failed, digmod_mismatch counted, no dialog), records the
+#    outcome in param_api, the schema documents the keys, the stub models
+#    the enum (ordinal readback, ts44-strict rejection, the documented
+#    DSPFIRM/DIGMOD coupling) and the harness checks every dataset's mode.
+_sdm = "\n".join(function_body("set_digital_mode")[0])
+_sca = "\n".join(function_body("set_common_acq")[0])
+check("acquisition mode: DIGMOD digital / DSPFIRM sharp written by enum name "
+      "(putpar), DIGMOD first, read back accepting ordinal or name, never "
+      "insisted on (failed_forms, digmod_mismatch), called first in "
+      "set_common_acq -- the one code path every acquired dataset takes",
+      'DIGMOD_NAME  = "digital"' in SRC and 'DSPFIRM_NAME = "sharp"' in SRC
+      and 'DIGMOD_DIGITAL_READBACKS = ("1", "digital")' in SRC
+      and 'DSPFIRM_SHARP_READBACKS  = ("0", "sharp")' in SRC
+      and 'putpar("DIGMOD", DIGMOD_NAME)' in _sdm
+      and 'putpar("DSPFIRM", DSPFIRM_NAME)' in _sdm
+      and _sdm.index('putpar("DIGMOD"') < _sdm.index('putpar("DSPFIRM"')
+      and '_form_failed("DIGMOD", "name")' in _sdm
+      and '_form_failed("DSPFIRM", "name")' in _sdm
+      and '_form_has_failed("DIGMOD", "name")' in _sdm
+      and 'PARAM_API["digmod_mismatch"] = PARAM_API["digmod_mismatch"] + 1' in _sdm
+      and 'PARAM_API["digmod_readback"] = dm' in _sdm
+      and 'PARAM_API["dspfirm_readback"] = df' in _sdm
+      and "CONFIRM(" not in _sdm and "SELECT(" not in _sdm
+      and _sca.index("set_digital_mode()") < _sca.index('putpar("TD"')
+      and SRC.count("    set_digital_mode()\n") == 1)
+check("acquisition mode: the WHY is in the file -- Oulu's DIGMOD 3 / DSPFIRM 4 "
+      "against Torino's 1 / 0, Bruker's '16 times more data points' and the "
+      "DRU memory statement, DE's return to its plain value, the coupling of "
+      "DSPFIRM and DIGMOD",
+      "16 times more data points" in SRC and "DIGMOD 3" in SRC
+      and "memory on the DRU" in SRC and "DE returns to its plain value" in SRC
+      and "rectangle selects DIGMOD baseopt" in SRC)
+check("meta: PARAM_API carries digmod_form / digmod_readback / dspfirm_readback "
+      "/ digmod_mismatch and the schema documents them",
+      all(('"%s":' % k) in SRC for k in ("digmod_form", "digmod_readback",
+                                         "dspfirm_readback", "digmod_mismatch"))
+      and all(k in schema["properties"]["software"]["properties"]["param_api"]["description"]
+              for k in ("digmod_form", "digmod_readback", "dspfirm_readback",
+                        "digmod_mismatch")))
+check("stub: models DIGMOD / DSPFIRM as enums (name written, ordinal read "
+      "back, ts44-strict rejects the names, the documented coupling) and the "
+      "harness template carries Oulu's baseopt / rectangle and checks every "
+      "dataset's mode",
+      "_DIGMOD_TO_ORDINAL" in STUB_SRC and "_DSPFIRM_TO_ORDINAL" in STUB_SRC
+      and "def _couple_acq_mode" in STUB_SRC
+      and 'n in (u"DIGMOD", u"DSPFIRM")' in STUB_SRC
+      and '"DIGMOD": u"baseopt"' in ENTRY_SRC
+      and '"DSPFIRM": u"rectangle"' in ENTRY_SRC
+      and "acquisition mode[" in ENTRY_SRC
+      and '"DIGMOD:name", "PARMODE:name"' in ENTRY_SRC)
+check("report: the software-test report runs the raw-data content check "
+      "(report.json raw_data_check: the shared refusal / rows / all-zeros "
+      "flags) and the harness reads it for the legacy-dru-refused bundle",
+      "def software_test_raw_data_check" in REPORT_SRC
+      and 'report["raw_data_check"] = software_test_raw_data_check(bundle, meta)'
+      in REPORT_SRC
+      and "def _raw_data_refusal_flags" in REPORT_SRC
+      and "def _raw_data_rows_flags" in REPORT_SRC
+      and "def _row_probe_flags" in REPORT_SRC
+      and REPORT_SRC.count("    _raw_data_rows_flags(bundle, meta, add)\n") == 2
+      and 'rep.get("raw_data_check")' in SH_SRC)
+check("stub: models the refusing receiver unit -- flavors legacy-dru and "
+      "legacy-dru-refused, HARNESS_MOCK_ACQ, the DRUCONTR text, first row "
+      "acquired and the rest zeros",
+      '"legacy-dru"' in STUB_SRC and '"legacy-dru-refused"' in STUB_SRC
+      and "def HARNESS_MOCK_ACQ" in STUB_SRC and "DRUCONTR" in STUB_SRC
+      and "DRU_LAN_BPS" in STUB_SRC and "setLength" in STUB_SRC)
+check("harness: runs both DRU flavors, expects expno 17 / role row_probe, "
+      "checks calibration.row_probe, the row geometry per block and the "
+      "data files' content",
+      '"legacy-dru desktest"' in SH_SRC and '"legacy-dru-refused desktest"' in SH_SRC
+      and '"row_probe"' in ENTRY_SRC and "row_probe" in ENTRY_SRC
+      and "blocks_without_data" in ENTRY_SRC and "DRU-REFUSED" in ENTRY_SRC)
+check("report: rows that are all zeros are dropped and counted (n_rows_zero), "
+      "a block without a data row is refused, and qa_flags raises the "
+      "'raw data all zeros' FAIL; the row probe is compared like the other "
+      "pseudo-2D roles",
+      "n_rows_zero" in REPORT_SRC and "raw data all zeros" in REPORT_SRC
+      and '"row_probe")' in REPORT_SRC)
+check("packer: accepts the row_probe role and passes calibration.row_probe "
+      "(and rd_optimize) through",
+      '"row_probe"' in PACKER_SRC and "row_probe" in PACKER_SRC
+      and "rd_optimize" in PACKER_SRC)
+with open(os.path.join(REPO, "docs", "TROUBLESHOOTING.md"), encoding="utf-8") as fh:
+    _TS = fh.read()
+_INST = open(os.path.join(REPO, "topspin", "INSTALL.md"), encoding="utf-8").read()
+check("docs: TROUBLESHOOTING has the DRUCONTR entry (evidence stated: first "
+      "row acquired, abort mid-second-row, baseopt vs digital leading, d11 "
+      "insurance, probe safety net, the operator's manual check on expno 12 "
+      "of SPINNOISE_20260930_1201) and the rga 'acqt0 not set' entry; "
+      "INSTALL.md maps expno 17 and names DIGMOD",
+      "DRUCONTR" in _TS and "acqt0 not set" in _TS and "baseopt" in _TS
+      and "SPINNOISE_20260930_1201" in _TS and "digmod" in _TS
+      and "insurance" in _TS and "safety net" in _TS
+      and "| 17 |" in _INST and "DIGMOD" in _INST)
 
 
 # --------------------------------------------------------------------------

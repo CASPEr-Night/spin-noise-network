@@ -44,10 +44,13 @@ and --expect-refined catches a dead refinement. --de-us sets DE (default
 shortfall itself many sigma). Until v0.7.6 the references were Bruker's
 zg2d, whose d20-computed pacing delay failed to compile on hardware
 (Torino, 2026-09-25); the fixture's stand-in for it spent a second d1
-per row that the recorded expectations omitted. The references are now
-the project's zgref2d (one d1, one 30 ms per row, both in the recorded
-expectation), so the only shortfalls left are p1 + DE per scan, the 30 ms
-before zgref2d's row loop, and zg's two 30m lines per pass.
+per row that the recorded expectations omitted. The references are the
+project's zgref2d and, since v0.7.7, both project sequences write their
+row during the data-transfer delay d11 (1 s; Oulu's receiver unit refused
+1 MB rows written in 30-50 ms, 2026-09-30): one d1 and one d11 per row,
+both in the recorded expectation and in acqus (D[1], D[11]), so the only
+shortfalls left are p1 + DE per scan, the 30 ms before zgref2d's row
+loop, and zg's two 30m lines per pass.
 The default session is short (~10 min of audited time), so the report
 correctly flags the audit 'inconclusive (short session)' while
 still reporting the fitted offset; that flag is part of what this bundle
@@ -103,9 +106,11 @@ REF_A0 = 2.0e6             # injected reference amplitude, counts
 REF_DECAY_S = 3.0          # reference decay rate 1/s (line ~1 Hz + inhomog.)
 REF_FWHM_HZ = 6.0          # reference line FWHM via extra Lorentzian decay
 D1_REF_S = 2.0             # relaxation delay, references/ladder (run script)
-D1_NOISE_S = 0.05          # zgnoise2d loop delay (spent TWICE per row)
-REF_ROW_FIXED_S = 0.030    # zgref2d's '30m wr' per row (the run script's
-                           # REF_ROW_FIXED_S -- part of the RECORDED model)
+D1_NOISE_S = 0.05          # zgnoise2d loop delay (once per row, before go)
+D11_TRANSFER_S = 1.0       # the data-transfer delay of the 'd11 wr' line in
+                           # zgnoise2d AND zgref2d (the run script's
+                           # D11_TRANSFER_S; written to acqus D[11] and part
+                           # of the RECORDED model)
 REF_PRE_S = 0.030          # zgref2d's 30m before its row loop: once per
                            # block, not in the recorded model
 DE_US_DEFAULT = 6.5        # stock pre-acquisition delay DE, microseconds
@@ -126,10 +131,11 @@ def _project_pp(name):
 # refinement parses these texts (NOT a name-keyed table) to derive each
 # block's true OCXO duration, so the fixture's wall clocks below are
 # built from the same structures. zgnoise2d and zgref2d are the shipped
-# sequences themselves (2 x d1 per row; d1 + p1 + 30m per row plus one
+# sequences themselves (d1 + d11 per row; d1 + p1 + d11 per row plus one
 # 30m before the loop -- and zgref2d's "acqt0=..." definition, which the
-# report's parser must take as zero duration); the zg stand-in carries
-# the library sequence's 30m loop/write delays and the same acqt0 line.
+# report's parser must take as zero duration; the parser resolves d11
+# from acqus D[11] like any dN); the zg stand-in carries the library
+# sequence's 30m loop/write delays and the same acqt0 line.
 PP_TEXT_ZGNOISE2D = _project_pp("zgnoise2d")
 PP_TEXT_ZGREF2D = _project_pp("zgref2d")
 PP_TEXT_ZG = (
@@ -155,13 +161,18 @@ def info(msg):
 
 
 def acqus_text(td, sw, rg, o1=0.0, pulprog="zgnoise2d", grpdly=GRPDLY,
-               d1_s=D1_NOISE_S, de_us=DE_US_DEFAULT, p1_us=P1_US):
+               d1_s=D1_NOISE_S, de_us=DE_US_DEFAULT, p1_us=P1_US,
+               d11_s=D11_TRANSFER_S):
     # D and P arrays formatted like real Bruker acqus: "(0..63)" header,
-    # values on continuation lines (element 1 carries D1/P1; rest zero).
+    # values on continuation lines (element 1 carries D1/P1, element 11
+    # the data-transfer delay D11 the run script writes; rest zero).
     # FRQLO3 is a DBL_MAX sentinel: real consoles write these for unset
     # doubles, and parse_jcamp must survive them (regression coverage
     # for the OverflowError found in review against the 2020 dataset).
-    d_line = "0 %.6g " % d1_s + " ".join(["0"] * 62)
+    d_vals = ["0"] * 64
+    d_vals[1] = "%.6g" % d1_s
+    d_vals[11] = "%.6g" % d11_s
+    d_line = " ".join(d_vals)
     p_line = "0 %.6g " % p1_us + " ".join(["0"] * 62)
     return (
         "##TITLE= Parameter file, synthetic injection bundle\n"
@@ -247,25 +258,26 @@ def build_clock_audit(offset, rng, de_us=DE_US_DEFAULT):
 
     PHYSICAL timing model (mirrors the fixture PP_TEXTS, which the
     report's refinement parses): the RECORDED ocxo_expected_s is the
-    acquisition-side formula rows*(AQ + n_d1*D1 + fixed), exactly like
-    spin_noise_run.py's ocxo_expected_s (ladder n_d1=1 fixed 0; zgref2d
-    references n_d1=1 fixed 30 ms; noise n_d1=2 fixed 0) -- while the
-    TRUE (wall) duration follows the pulse-program text: the zg ladder
-    additionally spends 2x30m + p1 + DE per pass, the zgref2d references
-    p1 + DE per row plus one 30m before the row loop, and zgnoise2d DE
-    per row. With the stock DE these shortfalls are tiny; --de-us 20000
-    makes them many sigma, which is what the harness's discrimination
-    case exercises. The report's pulse-program-derived fit removes the
-    shortfalls; its recorded-model comparison fit keeps them."""
+    acquisition-side formula rows*(AQ + D1 + fixed), exactly like
+    spin_noise_run.py's ocxo_expected_s through acquire_block (ladder:
+    one d1, fixed 0; zgref2d references and zgnoise2d noise: one d1 and
+    the transfer delay d11 as the fixed term) -- while the TRUE (wall)
+    duration follows the pulse-program text: the zg ladder additionally
+    spends 2x30m + p1 + DE per pass, the zgref2d references p1 + DE per
+    row plus one 30m before the row loop, and zgnoise2d DE per row. With
+    the stock DE these shortfalls are tiny; --de-us 20000 makes them many
+    sigma, which is what the harness's discrimination case exercises. The
+    report's pulse-program-derived fit removes the shortfalls; its
+    recorded-model comparison fit keeps them."""
     de_s = de_us * 1e-6
     p1_s = P1_US * 1e-6
     aq_lad = TD_LADDER / 2 / SW_HZ
     aq_row = TD_ROW / 2 / SW_HZ
     lad_rec = aq_lad + D1_REF_S
     lad_true = aq_lad + D1_REF_S + p1_s + de_s + 0.060   # two 30m lines
-    ref_rec = aq_row + D1_REF_S + REF_ROW_FIXED_S
-    ref_true = aq_row + D1_REF_S + p1_s + de_s + REF_ROW_FIXED_S
-    noi_rec = aq_row + 2.0 * D1_NOISE_S
+    ref_rec = aq_row + D1_REF_S + D11_TRANSFER_S
+    ref_true = aq_row + D1_REF_S + p1_s + de_s + D11_TRANSFER_S
+    noi_rec = aq_row + D1_NOISE_S + D11_TRANSFER_S
     noi_true = noi_rec + de_s
     # (expno, role, rows, rec_per_row, true_per_row, true_pre_block);
     # rows None = setup

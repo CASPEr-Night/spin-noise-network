@@ -44,7 +44,7 @@ TESTING="$REPO/testing"
 command -v jython >/dev/null || { echo "ERROR: jython not on PATH"; exit 2; }
 command -v python3 >/dev/null || { echo "ERROR: python3 not on PATH"; exit 2; }
 
-# Fourteen end-to-end variants: the two plain modes on the legacy console
+# Sixteen end-to-end variants: the two plain modes on the legacy console
 # model, the desktest under seven TopSpin 4.4 fault flavors (strict F1
 # map; F1 map stale until RE(); enum name rejected -> one scripted operator
 # step; F1 readback echoing the direct TD; lying dimensionality readback;
@@ -52,15 +52,21 @@ command -v python3 >/dev/null || { echo "ERROR: python3 not on PATH"; exit 2; }
 # testing/topspin_stub.py), the desktest with a 2D template, both plain
 # modes on the Oulu TopSpin 3.7.0 model that never creates acqu2 (the
 # v0.7.4 script fails those two with stray console dialogs and lost
-# parameter writes), plus desktest with the optional rdopt + sweep
-# features on under legacy AND the strict flavor (structure/dialog/meta
-# coverage -- mock modes exercise the flow, not the physics).
+# parameter writes), the desktest on that console with a receiver unit
+# that refuses 1 MB rows shipped in 1 s (legacy-dru: the v0.7.7 row probe
+# must walk to its second setting) and with one that refuses every
+# pseudo-2D row (legacy-dru-refused: WARNINGs, a retried noise block and
+# a bundle, no dialog -- the v0.7.6 script took Oulu's full-size ser of
+# zeros for data), plus desktest with the optional rdopt + sweep features
+# on under legacy AND the strict flavor (structure/dialog/meta coverage --
+# mock modes exercise the flow, not the physics).
 for RUN in "legacy simulate" "legacy desktest" "ts44 desktest" \
            "ts44-stale desktest" "ts44-strict desktest" \
            "ts44-f1echo desktest" "ts44-dimlie desktest" \
            "ts44-f1route desktest" "ts44-f1mismatch desktest" \
            "legacy-2dtemplate desktest" \
            "legacy-noacqu2 simulate" "legacy-noacqu2 desktest" \
+           "legacy-dru desktest" "legacy-dru-refused desktest" \
            "legacy desktest rdopt sweep autostep" \
            "ts44-strict desktest rdopt sweep autostep"; do
     set -- $RUN
@@ -98,8 +104,51 @@ for RUN in "legacy simulate" "legacy desktest" "ts44 desktest" \
     echo "--- facility report + clock-offset recovery ($MODE bundle) ---"
     python3 "$REPO/analysis/facility_report.py" "$BUNDLE" \
         --out "$WORK/report"
-    python3 "$TESTING/check_clock_recovery.py" "$WORK/report/report.json" \
-        --injected "$INJECTED" --within-nsigma 1 --require-conclusive
+    if [ "$FLAVOR" = "legacy-dru-refused" ]; then
+        # Every pseudo-2D block of this flavor was refused: the ser files
+        # hold one row of data and zeros, the wall times are one row plus
+        # the abort, so the report's wall/OCXO gate drops them and the
+        # ~3 s rungs are overhead-dominated -- no usable block, no fit.
+        # What IS asserted here: the report completes on the Oulu-shaped
+        # bundle and its raw-data CONTENT check (report.json
+        # raw_data_check -- a software-test report has no science block
+        # by design) names every refused block, expnos 17, 11, 12 and 13,
+        # as a FAIL: 'raw data all zeros' when the file holds one data
+        # row and zeros (what the stub leaves, as Oulu's DRU did) or the
+        # EXCLUDED 'raw data expno N (role)' when it holds only zeros --
+        # and one WARN 'rows declared vs read' per block of the first
+        # kind.  The v0.7.6 report analysed 88 zero rows as data, and the
+        # software-test report carried no QA at all.
+        python3 - "$WORK/report/report.json" <<'PYEOF_QA'
+import json, re, sys
+rep = json.load(open(sys.argv[1]))
+qa = (rep.get("raw_data_check") or {}).get("qa_flags") or []
+zeros = [f for f in qa if f["check"] == "raw data all zeros"]
+excluded = [f for f in qa if re.match(r"raw data expno \d+ \(", f["check"])]
+rows = [f for f in qa if f["check"] == "rows declared vs read"
+        and f["level"] == "WARN"]
+named = sorted(set(
+    [int(f["detail"].split("expno ")[1].split(" ")[0]) for f in zeros]
+    + [int(f["check"].split("expno ")[1].split(" ")[0]) for f in excluded]))
+ok = (rep.get("report_type") == "software-test"
+      and rep.get("science") is None
+      and named == [11, 12, 13, 17]
+      and all(f["level"] == "FAIL" for f in zeros + excluded)
+      and len(rows) == len(zeros))
+print("%s : legacy-dru-refused report names the four refused blocks as "
+      "FAILs in raw_data_check (raw data all zeros %s, EXCLUDED %s, rows "
+      "declared vs read WARN x%d; science None)"
+      % ("PASS" if ok else "FAIL",
+         sorted(set(int(f["detail"].split("expno ")[1].split(" ")[0])
+                    for f in zeros)),
+         sorted(set(int(f["check"].split("expno ")[1].split(" ")[0])
+                    for f in excluded)), len(rows)))
+sys.exit(0 if ok else 1)
+PYEOF_QA
+    else
+        python3 "$TESTING/check_clock_recovery.py" "$WORK/report/report.json" \
+            --injected "$INJECTED" --within-nsigma 1 --require-conclusive
+    fi
 
     # Packer round-trip on the desktest bundle (the real-Jython product):
     # unpack its expno tree, re-pack with packer/pack_bundle.py's Bruker
@@ -113,6 +162,12 @@ for RUN in "legacy simulate" "legacy desktest" "ts44 desktest" \
         echo "--- packer round-trip (desktest bundle) ---"
         python3 "$TESTING/test_pack_roundtrip.py" "$BUNDLE"
     fi
+    # Since v0.7.7 the mocked acquisitions leave raw-data files of the
+    # blocks' real size (a 60-min noise block is ~170 MB of int32, plus
+    # its copy in the staging tree and the bundle), so a run's data tree
+    # is removed once its checks have passed; the logs and the report
+    # stay in $WORK.
+    rm -rf "$WORK/nmrdata"
 done
 
 # Powered clock-recovery matrix: synthetic physics bundles with (a) an
@@ -197,7 +252,7 @@ echo "--- report QA flags (test_report_qa_flags) ---"
 python3 "$TESTING/test_report_qa_flags.py" --out-dir "$CLOCKWORK/qaflags"
 
 echo ""
-echo "JYTHON HARNESS: ALL PASS (simulate + desktest x 10 console flavors"
+echo "JYTHON HARNESS: ALL PASS (simulate + desktest x 12 console flavors"
 echo "                + selftest"
 echo "                + packer round-trip"
 echo "                + clock-offset recovery: realism, powered, null,"

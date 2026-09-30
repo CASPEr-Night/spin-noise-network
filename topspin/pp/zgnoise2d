@@ -6,13 +6,51 @@
 ;NO rf pulse statement anywhere in this sequence (and none hidden in
 ;an include), so the sample magnetization is never touched.
 ;
+;d11 is the DATA-TRANSFER delay (v0.7.7): the row is written ('wr')
+;during it and the receiver unit hands the acquired row to the
+;workstation in that window.  It exists because of Oulu (Avance III
+;HD 500, AQS DRU-E, TopSpin 3.7.0, 2026-09-30, the first live run):
+;every pseudo-2D block there acquired its FIRST 262144-point row
+;(1 MB of int32) completely and was then aborted by the receiver
+;unit 12-18 s into the SECOND row --
+;    Exception in DRUCONTR 1: Your pulse program produces too much
+;    data for the LAN capacity. ->Experiment aborted by DRU1!
+;-- while the 64 kB 1D rungs of the same session passed, and TopSpin
+;left the full-size ser it pre-allocates, one real row and zeros.
+;What the evidence says: the abort came mid-row, not at the wr, and
+;zgref2d already had 2 s between its rows, so the write window (50 ms
+;here, 30 ms there, before v0.7.7) is the WEAKEST explanation.  The
+;leading one is the acquisition mode the operator's parameter set
+;carried: every Oulu acquisition ran DIGMOD baseopt with DSPFIRM
+;rectangle, in which Bruker documents that "16 times more data points
+;are internally processed" and that for larger TD the DRU's memory
+;may be the limiting factor -- 16 x 262144 is exactly the DRU's 4M-
+;sample scan memory -- while Torino's Neo, which acquired this same
+;sequence without complaint, ran DIGMOD digital / DSPFIRM sharp.  The
+;run script therefore sets digital / sharp on every experiment
+;(v0.7.7); d11 = 1 s (1 MB/s, twice below what the rungs proved) is
+;insurance, and the script's row probe (expno 17), which tries this
+;row geometry first and shortens the row if the unit still refuses,
+;is the safety net.
+;
 ;Plain syntax only -- compiles on TopSpin 2.x through 4.x.
 ;If <Avance.incl> is missing on a very old system, comment it out:
 ;this sequence uses none of its macros.
 
 #include <Avance.incl>
 
+;acqt0=0 is Bruker's own idiom for a pulse-free acquisition (the
+;library programs cp, zgesgppe, cosyetgp and hmqcet carry the same
+;line): the FID's time origin is the start of the acquisition, there
+;being no pulse to measure it from.  It also silences rga's warning
+;"acqt0 not set in pulse program, result may be incorrect!" (Oulu,
+;2026-09-30, on v0.7.6).
+"acqt0=0"
+
 ;d1 : loop delay, keep short (e.g. 50 ms) -- there is nothing to relax
+;d11: data-transfer delay -- the row is written during it (1 s; the
+;     run script's row probe lengthens it on a console that needs
+;     more, and records the value it used)
 ;ns : MUST be 1 (one transient per row; averaging would defeat the
 ;     noise-statistics analysis)
 ;td1: number of rows = number of noise records
@@ -20,11 +58,12 @@
 1 ze
 2 d1
   go=2 ph31
-  d1 wr #0 if #0 ze
+  d11 wr #0 if #0 ze
   lo to 2 times td1
 exit
 
 ph31=0
 
-;aq per row = td/(2*swh); the run script sizes td1 so that
-;td1*(aq+2*d1) fills the requested wall-clock duration.
+;aq per row = td/(2*swh); one row spends d1 + aq + d11, which is
+;the per-row time the run script records in the clock audit; it
+;sizes td1 so that td1*(aq+d1+d11) fills the requested duration.

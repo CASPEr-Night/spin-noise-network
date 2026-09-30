@@ -58,7 +58,7 @@
 \large (Bruker / TopSpin)}
 \author{John W. Blanchard (\href{mailto:jwbquantum@gmail.com}{jwbquantum@gmail.com})
 \and Reza Ebadi \and Claude (Anthropic)}
-\date{Software v0.7.6 --- September 2026}
+\date{Software v0.7.7 --- September 2026}
 
 \begin{document}
 \maketitle
@@ -139,7 +139,8 @@ python3 --version
 \item \textbf{Disk and time:} the default run writes roughly 200\,MB
       (${\geq}10$\,GB free is comfortable headroom for reruns and longer noise
       blocks) and takes ${\sim}45$ minutes of magnet time, of which you are
-      needed for the first ${\sim}5$ (the dialogs).
+      needed for the first ${\sim}6$ (the dialogs, then the one-minute row
+      probe that follows the gain ladder).
 \end{itemize}
 
 \section{Download}
@@ -156,7 +157,14 @@ workstation (next section):
 \item \file{topspin/spin\_noise\_run.py} --- the acquisition script (Jython,
       runs inside \ts).
 \item \file{topspin/pp/zgnoise2d} --- the no-pulse pseudo-2D pulse program
-      used for the noise blocks.
+      used for the noise blocks (and the row probe). Since v0.7.7 it defines
+      \texttt{acqt0=0} (Bruker's idiom for a pulse-free acquisition), both
+      pulse programs write each row during a data-transfer delay
+      \texttt{d11} (1\,s), and the script acquires every experiment in
+      \texttt{DIGMOD} \texttt{digital} / \texttt{DSPFIRM} \texttt{sharp}:
+      Oulu's Avance III HD, running \texttt{baseopt} from the operator's
+      parameter set, had every 1\,MB pseudo-2D row aborted by its receiver
+      unit after the first (2026-09-30).
 \item \file{topspin/pp/zgref2d} --- the small-flip pseudo-2D pulse program
       used for the two reference blocks (since v0.7.6): Bruker's
       \file{zg2d} without the pacing delay it computes from \texttt{d20},
@@ -260,15 +268,20 @@ it at your desk. Pass criteria, from the release's desk-test checklist:
       \texttt{'pulsecal'}, \texttt{'rga'} --- and no manual-fallback dialog
       appears for any of them, and no Jython traceback anywhere.
 \item a dataset \file{SPINNOISE\_<yyyymmdd>\_<hhmm>} exists with expnos
-      \textbf{1, 10, 14, 15, 16, 11, 12, 13}.
+      \textbf{1, 10, 14, 15, 16, 17, 11, 12, 13}, each holding the raw-data
+      file its mocked acquisition left (since v0.7.7: \file{fid} for the 1Ds,
+      \file{ser} for the pseudo-2Ds, of the blocks' real size --- about
+      100\,MB for a 30-min desktest --- filled with pseudo-random samples,
+      never data; the status line says \texttt{row probe: attempt 1 passed}).
 \item \file{meta.json} is written twice (dataset directory and bundle) and
       contains a \texttt{software} block with
-      \texttt{"script\_version": "0.7.6"} (this release),
+      \texttt{"script\_version": "0.7.7"} (this release),
       \texttt{"schema\_version": "1.2"} (the orchestrator's Bruker-only
       metadata vintage, accepted under the repository's vendor-neutral v2.0
       schema), a \texttt{script\_sha256} fingerprint, and
       \texttt{"run\_mode": "desktest"} --- plus a \texttt{clock\_audit} block
-      with one timing entry per acquisition.
+      with one timing entry per acquisition (the row probe included) and a
+      \texttt{calibration.row\_probe} record.
 \item the bundle zip,
       \file{SPINNOISE\_<date>\_<time>/}\allowbreak\file{spinnoise\_<slug>\_<YYYYMMDD\_HHMMSS>Z\_<hex>.zip},
       opens in any zip tool, and the validator passes on any Python-3 machine:
@@ -284,9 +297,9 @@ on the flag --- just do not send it.
 \section{The real run}
 \label{sec:dialogs}
 
-One honest note before the first live run: as of v0.7.6 the script has been
+One honest note before the first live run: as of v0.7.7 the script has been
 desk-tested end to end (a real Jython interpreter against stubbed \ts{}
-APIs modelling ten console behaviours, plus the SIMULATE/DESKTEST modes
+APIs modelling twelve console behaviours, plus the SIMULATE/DESKTEST modes
 above), has completed DESKTEST on a real \ts{} 4.4.0 console (Torino,
 September 2026), where it found two console-specific faults that were fixed
 within a day, and on a \ts{} 3.7.0 console (Oulu, September 2026), where it
@@ -296,8 +309,20 @@ has run one live session (Torino, 2026-09-25): the pulse-free noise block
 acquired and the report resolves the water spin-noise dip on it, but both
 reference blocks were refused by the console because Bruker's \file{zg2d}
 computes a pacing delay from a parameter the script never set --- fixed in
-v0.7.6 by the project's own \file{zgref2d}. A complete live session,
-references included, is still pending. We therefore treat the first live
+v0.7.6 by the project's own \file{zgref2d}. Oulu's first live run with
+v0.7.6 (2026-09-30, Avance III HD 500, \ts{} 3.7.0) then met the receiver
+unit: every pseudo-2D block acquired its first 1\,MB row and was aborted
+12--18\,s into the second (``too much data for the LAN capacity'') while
+the small 1D rungs passed, and the console left full-size \file{ser} files
+holding one acquired row and zeros, which the script took for data. Every
+Oulu expno ran \texttt{DIGMOD} \texttt{baseopt} from the operator's
+parameter set --- a mode in which Bruker documents 16 times the points
+processed inside the DRU --- while Torino's Neo had acquired the same rows
+in \texttt{digital}: the leading explanation, fixed in v0.7.7 by setting
+\texttt{digital} / \texttt{sharp} on every experiment, with the
+data-transfer delay \texttt{d11} as insurance, the row probe as the safety
+net and the content check of every block. A
+complete live session, references included, is still pending. We therefore treat the first live
 run at each facility as a supervised pilot --- write to
 \href{mailto:jwbquantum@gmail.com}{jwbquantum@gmail.com} and we will
 screen-share through it.
@@ -366,12 +391,23 @@ xpy spin_noise_run
 \item \dialog{90-degree pulse} --- confirm P90 ($\mu$s) and its power (dB),
       pre-filled from \texttt{pulsecal} or the current P1. Sanity-check it
       (${\sim}$7--15\,$\mu$s is typical) before confirming.
+\item \emph{Row probe} (v0.7.7, status line only, ${\sim}1$\,min) --- after
+      the four gain-ladder rungs the script acquires a short pulse-free
+      pseudo-2D at expno 17, in the \texttt{digital} acquisition mode it
+      has set, and checks that its \emph{last} row holds data; the status
+      line says \texttt{row probe: attempt 1 passed}. A console whose
+      receiver unit refuses the default row even so makes it try a longer
+      transfer delay and then shorter rows (up to ${\sim}5$\,min); the
+      setting it settles on is recorded in \file{meta.json}
+      (\texttt{calibration.row\_probe}) and used for every block --- a
+      console property, not a fault. Stay until you have seen the
+      \texttt{passed} line.
 \item \emph{Noise block auto-start} --- after the references the script
       prints the row count, per-row time, and RG to the status line and
       starts the pulse-free block by itself 30\,s later. There is no
-      dialog to click: \emph{the P90 confirmation above is the
-      walk-away point} (the RG ladder and opening reference run
-      unattended in between, ${\sim}$15\,min).
+      dialog to click: \emph{the row probe's ``passed'' line is the
+      walk-away point} (the opening reference runs unattended after it,
+      ${\sim}$3\,min, then the noise block).
 \item \dialog{Final notes} --- anything unusual during the run (construction,
       elevator, He fill, lock left on, \ldots). Blank if all was quiet.
 \item \dialog{Done} --- the bundle path and the one-line upload command.
@@ -393,8 +429,10 @@ expno & role \\
 \midrule
 1 & setup: tune/match, shim, P90 calibration \\
 10, 14, 15, 16 & RG ladder: quick $1^{\circ}$ 1Ds at RG $=$ 1, 8, 64, max \\
-11 & reference (open): \file{zgref2d}, $1^{\circ}$ pseudo-2D, 8 rows
-     $\times$ ${\sim}19$\,s \\
+17 & row probe: \file{zgnoise2d}, RG 1, two or more rows per attempt ---
+     the row length / transfer delay the receiver unit accepts \\
+11 & reference (open): \file{zgref2d}, $1^{\circ}$ pseudo-2D, ${\sim}170$\,s
+     of rows (8 $\times$ ${\sim}21$\,s at the default row) \\
 12 & \textbf{noise}: \file{zgnoise2d}, \emph{no pulse at all}, NS$=$1/row,
      RG max stable \\
 13 & reference (close): same as 11 (drift check) \\
@@ -501,6 +539,37 @@ python3 uploader/upload_bundle.py <bundle.zip> --selftest
       script: type \texttt{d20 21.2} with the template dataset open before
       starting the run (each reference row then lasts 21.2\,s). See
       \file{docs/TROUBLESHOOTING.md}.
+\item \textbf{\ts{} shows \texttt{Exception in DRUCONTR 1: Your pulse
+      program produces too much data for the LAN capacity. ->Experiment
+      aborted by DRU1!} during a reference or noise block (script v0.7.6
+      or earlier; Avance III HD, \ts{} 3.7.0 at Oulu, 2026-09-30)} --- the
+      receiver unit acquired the first 1\,MB row of each block completely
+      and aborted the block 12--18\,s into the second; the console left
+      full-size \file{ser} files of one row and zeros, which the old script
+      took for data and packed. Leading explanation: the acquisition mode
+      --- every Oulu expno ran \texttt{DIGMOD} \texttt{baseopt} (16 times
+      the points inside the DRU, per Bruker), Torino's Neo acquired the
+      same rows in \texttt{digital}; the 30--50\,ms write window before
+      \texttt{wr} is the weaker one (the abort came mid-row). Install
+      v0.7.7: the script sets \texttt{DIGMOD} \texttt{digital} /
+      \texttt{DSPFIRM} \texttt{sharp} on every experiment, both pulse
+      programs write during a 1\,s transfer delay \texttt{d11}
+      (insurance), the row probe (expno 17) checks before the references
+      that the row comes back with data and shortens it if not (safety
+      net), and every block is checked for content afterwards --- with
+      only status-line WARNINGs, never a dialog, after the probe. To
+      settle it on the old dataset (two minutes): expno 12 of
+      \file{SPINNOISE\_20260930\_1201}, \texttt{1 td} $\to$ 1,
+      \texttt{digmod} $\to$ digital, \texttt{zg}; if still refused,
+      \texttt{d1 1} and \texttt{zg} once more. See
+      \file{docs/TROUBLESHOOTING.md}.
+\item \textbf{\ts{} shows \texttt{rga: acqt0 not set in pulse program,
+      result may be incorrect!} at the noise block (script v0.7.6 or
+      earlier)} --- harmless: the old \file{zgnoise2d} defined no time
+      origin; \texttt{rga} still returned the gain that keeps the
+      pulse-free rows clear of full scale. v0.7.7's \file{zgnoise2d}
+      defines \texttt{acqt0=0}, Bruker's own idiom for a pulse-free
+      acquisition, and the warning is gone.
 \item \textbf{A \texttt{parmode} dialog appears} --- some \ts{} versions ask
       before converting a dataset to 2D. Answer yes/OK --- the dataset is
       fresh, there is nothing to lose.

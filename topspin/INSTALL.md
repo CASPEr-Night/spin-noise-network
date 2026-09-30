@@ -21,6 +21,22 @@ reference sequence — Bruker's `zg2d` without the delay it computes from
 `d20`, which came out negative and refused to compile on Torino's
 Avance Neo (2026-09-25). Older scripts used `zg2d` directly.
 
+Since v0.7.7 the script sets the acquisition mode to `DIGMOD` `digital`
+/ `DSPFIRM` `sharp` on every experiment it acquires with, both pulse
+programs write each row during a dedicated data-transfer delay `d11`
+(1 s by default), and a row probe checks before the first reference
+block that the row the console is given comes back with data. Why: at
+Oulu (Avance III HD 500, AQS DRU-E, TopSpin 3.7.0, 2026-09-30) every
+1 MB pseudo-2D row was acquired once and the block then aborted by the
+receiver unit 12-18 s into its second row (`DRUCONTR ... too much data
+for the LAN capacity`), leaving full-size `ser` files of one row and
+zeros. Every Oulu acquisition ran `baseopt` from the operator's parameter
+set -- a mode in which Bruker documents 16x the points processed inside
+the DRU -- while Torino's Neo acquired the same rows in `digital`; the
+mode switch is the fix, `d11` the insurance, the probe the safety net
+(`docs/TROUBLESHOOTING.md` has the evidence and a two-minute manual
+check on the old dataset).
+
 Works on TopSpin **2.x, 3.x and 4.x** (the script is written for the
 embedded Jython interpreter and avoids anything version-specific; every
 optional command — `atma`, `topshim`, `pulsecal`, `rga` — degrades to an
@@ -76,8 +92,17 @@ operator dialog when missing).
    slug in its own runs. One `config.json` serves both at upload time
    (the uploader only warns when a bundle's slug differs from the
    configured one).
-6. Walk away. Default total time is ~45 min (30 min noise block +
-   setup/references). Overnight option available.
+6. Stay for one more minute: after the four gain-ladder rungs the
+   **row probe** (v0.7.7, expno 17) acquires a short pulse-free
+   pseudo-2D (in digital mode, which the script has set) and checks
+   that its last row holds data; on most consoles the first attempt
+   passes (~1 min) and the status line says so. A console whose receiver
+   unit refuses the default row even so (Oulu's Avance III HD did in
+   `baseopt`, 2026-09-30) makes it walk a ladder of a longer transfer
+   delay and shorter rows, up to ~5 min, and the row length it settles
+   on is recorded in `meta.json` (`calibration.row_probe`) — a console
+   property, not a fault. Then walk away. Default total time is ~45 min
+   (30 min noise block + setup/references). Overnight option available.
 7. A final dialog shows the path of the finished bundle zip
    (`spinnoise_<slug>_<timestamp>_<hex>.zip`) and the one-line upload
    command:
@@ -98,9 +123,17 @@ Dataset `SPINNOISE_<date>_<time>` in your current data directory:
 |---|---|
 | 1 | setup: tune/match, shim, P90 calibration |
 | 10, 14, 15, 16 | RG ladder: quick 1° 1D at RG = 1, 8, 64, max (rungs 2–4 sit at 14–16 because 11–13 are reserved) |
-| 11 | reference_open: `zgref2d`, 1° pseudo-2D, 8 rows × ~19 s |
+| 17 | row_probe (v0.7.7): `zgnoise2d`, RG 1, 2+ rows per attempt — finds the row length / transfer delay `d11` the receiver unit accepts; the last attempt's data stay here |
+| 11 | reference_open: `zgref2d`, 1° pseudo-2D, ~170 s of rows (8 × ~21 s at the default row) |
 | 12 | **noise**: `zgnoise2d`, *no pulse at all*, NS=1/row, RG max stable, rows fill the chosen duration |
 | 13 | reference_close: same as 11 |
+
+The row length (TD, default 262144) and the transfer delay (D11,
+default 1 s) may differ between consoles; whatever the probe settled on
+is what expnos 11–13 were acquired with, and `meta.json` records it. The
+acquisition mode is `DIGMOD` `digital` / `DSPFIRM` `sharp` on every expno
+(set by the script; `software.param_api.digmod_form` says whether the
+console took it).
 
 `meta.json` is written into the dataset directory and into the bundle.
 
@@ -153,6 +186,32 @@ step-by-step checklist with pass criteria is
   *acquisition check* with Cancel and install v0.7.6, whose `zgref2d`
   has no such line. Workaround only, on an older script: set `d20` to
   21.2 s in the template dataset before starting (`d20 21.2`). See
+  `docs/TROUBLESHOOTING.md`.
+- **TopSpin shows `Exception in DRUCONTR 1: Your pulse program produces
+  too much data for the LAN capacity. ->Experiment aborted by DRU1!`
+  during a reference or noise block (script v0.7.6 or earlier; Avance
+  III HD, TopSpin 3.7.0 at Oulu, 2026-09-30)** — the receiver unit
+  acquired the first 1 MB row of each block completely and aborted the
+  block 12–18 s into the second row; TopSpin left full-size `ser` files
+  of one row and zeros, which the old script took for data. Leading
+  explanation: the acquisition mode — every Oulu expno ran `DIGMOD`
+  `baseopt` (16x the points inside the DRU, per Bruker), Torino's Neo
+  acquired the same rows in `digital`; the 30–50 ms write window before
+  `wr` is the weaker one (the abort came mid-row). Install v0.7.7: the
+  script sets `DIGMOD` `digital` / `DSPFIRM` `sharp` on every experiment,
+  both pulse programs write during a 1 s transfer delay `d11`
+  (insurance), the row probe (expno 17) checks before the references
+  that the row comes back with data and shortens it if not (safety net),
+  and every block is checked for content afterwards. To settle it on the
+  old dataset: expno 12 of `SPINNOISE_20260930_1201`, `1 td` → 1,
+  `digmod` → digital, `zg`; if still refused, `d1 1` and `zg` once more.
+  See `docs/TROUBLESHOOTING.md`.
+- **TopSpin shows `rga: acqt0 not set in pulse program, result may be
+  incorrect!` at the noise block (script v0.7.6 or earlier)** —
+  harmless: the old `zgnoise2d` defined no time origin; `rga` still
+  returned the gain that keeps the pulse-free rows clear of full scale.
+  v0.7.7's `zgnoise2d` carries `"acqt0=0"`, Bruker's own idiom for a
+  pulse-free acquisition, and the warning is gone. See
   `docs/TROUBLESHOOTING.md`.
 - **`parmode` dialog appears** — some TopSpin versions ask before
   converting a dataset to 2D; answer yes/OK (the dataset is fresh, there

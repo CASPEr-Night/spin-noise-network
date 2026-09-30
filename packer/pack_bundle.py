@@ -128,13 +128,13 @@ import zipfile
 
 # Kept in sync with the repository VERSION file (a literal, because this
 # script may be copied standalone); testing/static_check.py enforces it.
-PACKER_VERSION = "0.7.6"
+PACKER_VERSION = "0.7.7"
 SCHEMA_VERSION = "2.0"
 
 GAMMA_1H_MHZ_PER_T = 42.5774806   # same constant spin_noise_run.py uses
 
 ROLES = ("setup", "rg_ladder", "reference_open", "noise", "reference_close",
-         "noise_tune", "sweep_signcal")
+         "noise_tune", "sweep_signcal", "row_probe")
 RUN_MODES = ("live", "simulate", "desktest", "archival-repackage",
              "synthetic-injection", "external-acquisition")
 
@@ -1688,6 +1688,14 @@ def build_meta(vendor, reader, data_dir, answers):
         "rg_ladder": ladder,
         "topshim_ok": bool(cal_ans.get("topshim_ok", False)),
     }
+    # The schema's optional calibration objects travel as given: the
+    # orchestrator's rd_optimize (probe-tuning scan) and row_probe (0.7.7:
+    # the row geometry the console's receiver unit accepted and the data
+    # content check of every pseudo-2D block).  A repack must not lose the
+    # record of a refused block.
+    for key in ("rd_optimize", "row_probe"):
+        if isinstance(cal_ans.get(key), dict):
+            cal[key] = cal_ans[key]
 
     # --- software provenance ---------------------------------------------------
     run_mode = answers.get("run_mode", "external-acquisition")

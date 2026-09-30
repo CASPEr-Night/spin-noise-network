@@ -23,10 +23,11 @@ This executes `topspin/spin_noise_run.py` **unmodified** end to end
 buffers, and unicode dialog strings exactly as TopSpin's embedded Jython
 delivers them). Requires `jython` (2.7.x) and `python3` on PATH.
 
-The harness runs the script under ten modelled consoles
-(`HARNESS_TS_FLAVOR` in `testing/run_jython_harness.sh`; a few seconds
-each, ~4 min for the whole suite including the report and clock-recovery
-steps). All of them accept PARMODE by enum name only and read it back as
+The harness runs the script under twelve modelled consoles
+(`HARNESS_TS_FLAVOR` in `testing/run_jython_harness.sh`; up to a minute
+each since the mocked acquisitions write raw-data files of the blocks'
+real size, ~25 min for the whole suite including the report and
+clock-recovery steps). All of them accept PARMODE by enum name only and read it back as
 the ordinal, as TopSpin does; NONE of them creates the F1 parameter file
 `acqu2` on a scripted `PARMODE` write, and while a dataset says 2D
 without `acqu2` every F1 read or write pops the console's own dialog
@@ -56,7 +57,21 @@ made 1D; its template `acqu2` carries `FnMODE` `5`, which the script
 must set to `0` in the session's pseudo-2D expnos — by file edit, one
 reload — while the template file keeps its `5`); `legacy-noacqu2` is the
 name under which Oulu's TopSpin 3.7.0 (2026-09-25) was first modelled and
-now differs from `legacy` only in having `GETACQUDIM`, as 3.7.0 does. On
+now differs from `legacy` only in having `GETACQUDIM`, as 3.7.0 does;
+`legacy-dru` and `legacy-dru-refused` (v0.7.7) put that console on an
+Avance III HD whose AQS DRU refuses a pseudo-2D block the way Oulu's did
+on 2026-09-30 (`too much data for the LAN capacity`: first row acquired,
+the rest zeros, full-size `ser`, one row plus 12 s of wall time) — the
+first for 1 MB rows shipped in 1 s but not in 3 s, so the row probe must
+pass at its second attempt and acquire the blocks with `d11` 3 s; the
+second for every pseudo-2D row, so the probe fails five times, every block
+is recorded as not acquired, the noise block is retried once, only
+WARNINGs are said, and a bundle is still produced. Every flavor's template
+also carries Oulu's acquisition mode (`DIGMOD` `baseopt` / `DSPFIRM`
+`rectangle`, the leading explanation of those aborts), so the script must
+switch every dataset it acquires with to `digital` / `sharp` by enum name
+and read it back; `ts44-strict` rejects those names as it rejects
+`PARMODE`'s, and the script must record that once and go on. On
 every 1D-template flavor the script must therefore create the file
 itself from the console's parameter library at the attended probe,
 before touching F1 (copying `acqu2` and `proc2` only, never a status
@@ -89,11 +104,15 @@ Pass criteria (the wrapper enforces all of them; exit code 0 = pass):
 1. Each mode run ends with `HARNESS simulate: PASS` /
    `HARNESS desktest: PASS` — meaning, per run: no unscripted dialog, no
    hardware-guard breach (`XCMD`/`ZG` never reached), no crash `ERRMSG`,
-   no abort, the full expno tree **1, 10, 14, 15, 16, 11, 12, 13**, both
-   pulse programs installed, the references recorded as `zgref2d` and
-   every clock-audit expectation equal to the per-role timing model
-   (`zgref2d`: one `d1` + 30 ms per row; `zgnoise2d`: two `d1`; `zg`:
-   one `d1`), `meta.json` written twice with
+   no abort, the full expno tree **1, 10, 14, 15, 16, 17, 11, 12, 13**, both
+   pulse programs installed, the references recorded as `zgref2d`, the
+   row probe at expno 17 with role `row_probe` and every clock-audit
+   expectation equal to the per-role timing model (`zgref2d`: one `d1` +
+   `d11` per row; `zgnoise2d`: one `d1` + `d11`; `zg`: one `d1`), the
+   raw-data files the mocked acquisitions leave holding data in their
+   first and last rows exactly where `calibration.row_probe.blocks` says
+   `acquired`, every acquired dataset in `DIGMOD` `digital` / `DSPFIRM`
+   `sharp` (`software.param_api.digmod_form` `name`), `meta.json` written twice with
    `run_mode` equal to the mode (so the bundle can never pass as data)
    and a real `sha256:<64 hex>` script self-fingerprint, and a bundle
    zip readable back through `java.util.zip.ZipFile`.
@@ -176,9 +195,10 @@ below. Expect:
       city / country / email) → facility slug → contact consent →
       sample → VT setpoint → duration → lock state → BSMS sweep
       confirmation → hardware check → probe type → probe temperatures →
-      P90 confirmation → final notes. (The noise block AUTO-STARTS
-      after a 30 s status-line countdown -- no dialog; the old
-      "noise block starting" dialog was removed deliberately.)
+      P90 confirmation → final notes. (The row probe after the RG ladder
+      and the noise block are status-line steps -- `row probe: attempt 1
+      passed`, then the 30 s countdown -- no dialog; the old "noise block
+      starting" dialog was removed deliberately.)
 - [ ] Terminal shows `SIMULATE -> ...` / `SIMULATE: zg mocked ...` lines
       and **no** errors.
 - [ ] Final dialog reports the bundle path.
@@ -214,17 +234,25 @@ java-zip bundling — and mocks **only** the hardware commands, inside
       reference blocks after Torino's first live run, where `zg2d`'s
       `d20`-computed pacing delay came out negative and refused to
       compile.
-- [ ] Each acquisition step prints `DESKTEST: zg mocked (...)` — no
-      "cannot see a raw-data file" dialog.
+- [ ] Each acquisition step prints `DESKTEST: zg mocked (...)` followed
+      by `mocked raw data written: fid|ser (N x TD int32, pseudo-random,
+      NOT data)` — no "cannot see a raw-data file" dialog. The row probe
+      prints `row probe: attempt 1/5 -- TD 262144 ...` and `row probe:
+      attempt 1 passed` (the mocked acquisition always yields data).
 - [ ] No Jython traceback anywhere.
 
 ## 6. Pass criteria (all must hold, DESKTEST run)
 
 1. **Expno tree as documented** (`topspin/INSTALL.md` expno map): a
    dataset `SPINNOISE_<yyyymmdd>` exists in the current data directory
-   containing expnos **1, 10, 14, 15, 16, 11, 12, 13** — each a `WR`
-   copy of the template (real `acqus` etc.; no `ser`/`fid` for the
-   mocked acquisitions is expected and correct).
+   containing expnos **1, 10, 14, 15, 16, 17, 11, 12, 13** — each a `WR`
+   copy of the template (real `acqus` etc.). Since v0.7.7 every mocked
+   acquisition leaves a raw-data file of the block's real size (`fid` of
+   16384 int32 for the 1Ds, `ser` of rows × 262144 int32 for the
+   pseudo-2Ds: ~85 MB for the 30-min noise block, ~200 MB of disk with
+   the staging copy and the bundle) filled with pseudo-random samples —
+   never data, and the reason the desktest bundle must never be uploaded.
+   The data-content check that runs live reads these files.
 2. **meta.json written twice**: once in the `SPINNOISE_<date>` dataset
    directory, once inside the bundle staging dir — and it contains a
    `software` object with `"script_version"` equal to the repository
@@ -236,7 +264,7 @@ java-zip bundling — and mocks **only** the hardware commands, inside
    `"run_mode": "desktest"`.
 3. **Clock audit recorded** (schema 1.2): `meta.json` contains a
    `clock_audit` object with a `blocks` array — one entry per
-   acquisition block (setup, the four RG-ladder rungs,
+   acquisition block (setup, the four RG-ladder rungs, `row_probe`,
    `reference_open`, `noise`, `reference_close`), each carrying
    `wall_start_ms`, `wall_end_ms`, and `ocxo_expected_s` (null for
    setup) — plus `ntp_status_raw` and `workstation_time_source` from

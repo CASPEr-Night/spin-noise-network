@@ -68,7 +68,7 @@
     },
     "param_api": {
      "type": "object",
-     "description": "What the console accepted when the orchestrator set up its pseudo-2D datasets (spin_noise_run.py 0.7.3+, optional, diagnostic provenance -- no downstream analysis depends on it). Keys: parmode_form ('name' = PUTPAR by enum name accepted | 'operator' = parmode typed by the operator | '' = never written), parmode_readback (raw GETPAR PARMODE), acqudim_readback (GETACQUDIM or null), parmode_already (datasets already of the wanted dimensionality), parmode_unverified, dim_readback_unreliable (0/1), reload_ok / reload_failed (RE after the switch), f1_td_form ('1 TD' | 'operator'), f1_td_already, f1_td_verified (0/1), f1_td_readback_source ('getpar' | 'getpar-axis' | 'acqu2' | ''), f1_td_readback_mismatch, f1_readback_unreliable (0/1), failed_forms (list of 'KIND:form', each probed at most once per session), putpar_failures (PUTPAR calls the console rejected -- each one was a stray error dialog for the operator), last_putpar_error. Since 0.7.5: f1_files_created (number of times the script itself created the F1 parameter file acqu2 (+proc2) because the console did not), f1_files_source ('' = never needed | 'template' = copied from the operator's template dataset | 'expno:<n>' = from another expno of the session | 'par:<SET>' = from the console's standard parameter library exp/stan/nmr/par | 'operator' = the operator's parmode was asked for), f1_fnmode_edits (number of F1 parameter files acqu2 the script set to FnMODE 0 = 'undefined' by a file edit this session -- Bruker's rule for a pulse program without an mc statement -- whether it copied the file or the dataset inherited it from a 2D template or a sibling expno; one RE per file edited; the mode is never written through the parameter API and the operator's template dataset is never edited), f1_fnmode_copied (the FnMODE value found in the first F1 file the script normalised, whatever its source; '' when none needed it), acq_write_mismatch (TD/RG writes whose readback still disagreed after a reload and a rewrite -- the block was acquired with what the console held), last_acq_write_mismatch ('expno <n> <name>: wrote <w> read <r>'). Background: TopSpin validates enumerated parameters by name; TopSpin 4.4.0 rejected the ordinal PARMODE the older script wrote (Torino, 2026-09-18); TopSpin 3.7.0 accepted PARMODE 2D but did not create acqu2, after which the console popped one 'format file is invalid ... acqu2' dialog per run (trigger not established) and every parameter write into the dataset was silently lost (Oulu, 2026-09-25)."
+     "description": "What the console accepted when the orchestrator set up its pseudo-2D datasets (spin_noise_run.py 0.7.3+, optional, diagnostic provenance -- no downstream analysis depends on it). Keys: parmode_form ('name' = PUTPAR by enum name accepted | 'operator' = parmode typed by the operator | '' = never written), parmode_readback (raw GETPAR PARMODE), acqudim_readback (GETACQUDIM or null), parmode_already (datasets already of the wanted dimensionality), parmode_unverified, dim_readback_unreliable (0/1), reload_ok / reload_failed (RE after the switch), f1_td_form ('1 TD' | 'operator'), f1_td_already, f1_td_verified (0/1), f1_td_readback_source ('getpar' | 'getpar-axis' | 'acqu2' | ''), f1_td_readback_mismatch, f1_readback_unreliable (0/1), failed_forms (list of 'KIND:form', each probed at most once per session), putpar_failures (PUTPAR calls the console rejected -- each one was a stray error dialog for the operator), last_putpar_error. Since 0.7.5: f1_files_created (number of times the script itself created the F1 parameter file acqu2 (+proc2) because the console did not), f1_files_source ('' = never needed | 'template' = copied from the operator's template dataset | 'expno:<n>' = from another expno of the session | 'par:<SET>' = from the console's standard parameter library exp/stan/nmr/par | 'operator' = the operator's parmode was asked for), f1_fnmode_edits (number of F1 parameter files acqu2 the script set to FnMODE 0 = 'undefined' by a file edit this session -- Bruker's rule for a pulse program without an mc statement -- whether it copied the file or the dataset inherited it from a 2D template or a sibling expno; one RE per file edited; the mode is never written through the parameter API and the operator's template dataset is never edited), f1_fnmode_copied (the FnMODE value found in the first F1 file the script normalised, whatever its source; '' when none needed it), acq_write_mismatch (TD/RG writes whose readback still disagreed after a reload and a rewrite -- the block was acquired with what the console held), last_acq_write_mismatch ('expno <n> <name>: wrote <w> read <r>'). Background: TopSpin validates enumerated parameters by name; TopSpin 4.4.0 rejected the ordinal PARMODE the older script wrote (Torino, 2026-09-18); TopSpin 3.7.0 accepted PARMODE 2D but did not create acqu2, after which the console popped one 'format file is invalid ... acqu2' dialog per run (trigger not established) and every parameter write into the dataset was silently lost (Oulu, 2026-09-25). Since 0.7.7: blocks_without_data (expnos of pseudo-2D blocks, the row probe included, whose LAST row held no data after zg -- the receiver unit refused them; details in calibration.row_probe); the acquisition mode the script writes on every dataset it acquires with -- DIGMOD digital / DSPFIRM sharp by enum name, the fix for Oulu's aborted 262144-point rows (2026-09-30: every expno there ran DIGMOD baseopt / DSPFIRM rectangle from the operator's parameter set, a mode in which Bruker documents 16x the points processed inside the DRU; Torino's digital / sharp rows acquired) -- as digmod_form ('name' = both written by enum name and read back as digital / sharp | 'unverified' = accepted, no usable readback | 'mismatch' = accepted but the console kept another mode | '' = never written, or rejected: failed_forms then carries DIGMOD:name or DSPFIRM:name), digmod_readback / dspfirm_readback (last raw GETPAR strings: the ordinal on 3.x/4.x, '1' = digital, '0' = sharp), digmod_mismatch (datasets whose readback disagreed with the accepted write). Nothing downstream depends on these; a live bundle whose digmod_form is not 'name' and whose row probe walked past its first entry is the console telling the maintainers which explanation held."
     }
    },
    "description": "Provenance of the software that produced the bundle. Required from schema 1.1 onward."
@@ -527,6 +527,51 @@
     "rd_optimize": {
      "type": "object",
      "description": "OPTIONAL (documented 2026-08-31, no schema-version bump: an additive, never-required object that changes no validation outcome for any existing bundle). Written by spin_noise_run.py when the 'rdopt' option ran: the probe-tuning scan for maximum radiation damping. Keys: enabled, offsets_khz, decay_rates_per_s (FID envelope decay = 1/T2* + lambda_r per offset; null where unmeasurable), amplitudes, scan_expnos, chosen_offset_khz, improvement_frac, final_retune_ok, p90_us_at_setup / p90_us_at_chosen (P90 is recalibrated at the chosen tuning; the session's calibration.p90_us is the recalibrated value), note."
+    },
+    "row_probe": {
+     "type": "object",
+     "description": "OPTIONAL (spin_noise_run.py 0.7.7+, additive, never required). The row probe and the data-content check of every pseudo-2D block. WHY: Oulu (Avance III HD 500, AQS DRU-E, TopSpin 3.7.0, 2026-09-30) refused every pseudo-2D block at zg -- 'Exception in DRUCONTR 1: Your pulse program produces too much data for the LAN capacity. ->Experiment aborted by DRU1!' -- while the 64 kB 1D rungs passed; TopSpin pre-allocated the full-size ser files (first row acquired, rows 2..N zeros), so file existence and size proved nothing. Keys: expno (the probe's, 17), ladder ([[td, d11_s], ...] tried in order), attempts (per attempt: attempt, td, d11, rows, data_first / data_last = 1 data | 0 all zeros | null unreadable, wall_s), passed (bool), attempt_passed (1-based, or null), td_row / transfer_delay_s (the row geometry every pseudo-2D block of the session used: the winner, or the first ladder entry when none passed), rows (rows of the recorded attempt), blocks (per pseudo-2D block incl. the probe: expno, role, td, d11, rows, data_first, data_last, acquired = data_last == 1, wall_s), block_retries (noise blocks re-acquired once with the next ladder setting: expno, role, first_try, retry). software.param_api.blocks_without_data lists the expnos whose last row held no data.",
+     "properties": {
+      "expno": {
+       "type": "integer",
+       "minimum": 1
+      },
+      "ladder": {
+       "type": "array"
+      },
+      "attempts": {
+       "type": "array"
+      },
+      "passed": {
+       "type": "boolean"
+      },
+      "attempt_passed": {
+       "type": [
+        "integer",
+        "null"
+       ]
+      },
+      "td_row": {
+       "type": "integer",
+       "minimum": 1
+      },
+      "transfer_delay_s": {
+       "type": "number",
+       "exclusiveMinimum": 0
+      },
+      "rows": {
+       "type": [
+        "integer",
+        "null"
+       ]
+      },
+      "blocks": {
+       "type": "array"
+      },
+      "block_retries": {
+       "type": "array"
+      }
+     }
     }
    }
   },
@@ -566,9 +611,10 @@
        "sweep_verify",
        "sweep_signcal",
        "noise_sweep",
-       "noise_tune"
+       "noise_tune",
+       "row_probe"
       ],
-      "description": "Experiment role. rdopt_scan (small-flip 1Ds of the rd-optimize tuning scan), sweep_verify (field-step verification 1Ds), and noise_sweep (per-step pulse-free noise blocks of the field-stepped sweep) were added for the optional rdopt/sweep features; sweep_signcal (the carrier-displacement sign-convention calibration 1D) was added for the v0.6 carrier-follow sweep. noise_tune (v0.7.1) marks pulse-free noise blocks acquired at deliberately varied probe tuning/match settings -- the spin-noise tuning ladder -- each carrying the optional per-experiment tuning object; readers group them by tuning.setting_index and never co-add them with the headline noise block. Enum extensions only, all earlier bundles remain valid."
+      "description": "Experiment role. rdopt_scan (small-flip 1Ds of the rd-optimize tuning scan), sweep_verify (field-step verification 1Ds), and noise_sweep (per-step pulse-free noise blocks of the field-stepped sweep) were added for the optional rdopt/sweep features; sweep_signcal (the carrier-displacement sign-convention calibration 1D) was added for the v0.6 carrier-follow sweep. noise_tune (v0.7.1) marks pulse-free noise blocks acquired at deliberately varied probe tuning/match settings -- the spin-noise tuning ladder -- each carrying the optional per-experiment tuning object; readers group them by tuning.setting_index and never co-add them with the headline noise block. Enum extensions only, all earlier bundles remain valid. row_probe (v0.7.7): the short zgnoise2d pseudo-2D at expno 17 the orchestrator acquires after the RG ladder to find the row length / data-transfer delay the console's receiver unit accepts (see calibration.row_probe); never co-added with the noise block."
      },
      "pulprog": {
       "type": "string",
@@ -666,9 +712,10 @@
          "sweep_verify",
          "sweep_signcal",
          "noise_sweep",
-         "noise_tune"
+         "noise_tune",
+         "row_probe"
         ],
-        "description": "Same role vocabulary as experiments[].role, including the optional rdopt/sweep feature roles (enum extension; earlier bundles remain valid)."
+        "description": "Same role vocabulary as experiments[].role, including the optional rdopt/sweep feature roles (enum extension; earlier bundles remain valid). row_probe (v0.7.7): the short zgnoise2d pseudo-2D at expno 17 the orchestrator acquires after the RG ladder to find the row length / data-transfer delay the console's receiver unit accepts (see calibration.row_probe); never co-added with the noise block."
        },
        "wall_start_ms": {
         "type": "integer",
