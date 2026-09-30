@@ -122,7 +122,7 @@ AUTOSTEP = False          # True (with SWEEP): TIER-2 programmatic field
 
 # Single source of truth for the script version.  KEEP IN SYNC with the
 # repository VERSION file (testing/static_check.py enforces the match).
-SCRIPT_VERSION  = "0.7.6"
+SCRIPT_VERSION  = "0.7.7"
 # NOTE: no module constant named PROGRAM_VERSION -- TopSpin's TopCmds
 # exports a FUNCTION of that name and `from TopCmds import *` (below)
 # overwrote the alias, so v0.7.3 bundles carry "<function PROGRAM_VERSION
@@ -150,26 +150,115 @@ PP_REF_NAME     = "zgref2d"       # pulse program of the small-flip
 
 # Experiment numbers (see PROTOCOL.md).  The RG ladder starts at 10; its
 # extra rungs live at 14/15/16 because 11/12/13 are reserved for the
-# reference / noise / reference experiments.
+# reference / noise / reference experiments; 17 is the row probe (v0.7.7).
 EXP_SETUP     = 1
 EXP_LADDER    = [10, 14, 15, 16]  # rungs: RG = 1, 8, 64, max_safe
 EXP_REF_OPEN  = 11
 EXP_NOISE     = 12
 EXP_REF_CLOSE = 13
+EXP_ROW_PROBE = 17
 
 # Acquisition geometry.
 # TD per row is kept at a conservative 256k points: safe on every console
 # generation from AV II to Neo (old digitizers/RCUs choke far above this;
 # 4.x allows much more, but there is no benefit for this protocol).
+# Since v0.7.7 TD_ROW and D11_TRANSFER_S are the DEFAULTS of a per-session
+# row geometry: the row probe (run_row_probe, section 8b of main) tries
+# ROW_PROBE_LADDER on the console itself and every pseudo-2D block then
+# uses the first setting whose rows came back with data.  WHY: Oulu's
+# Avance III HD 500 (AQS DRU-E, TopSpin 3.7.0, 2026-09-30, first live run)
+# had all three pseudo-2D blocks aborted by the receiver unit 12-18 s
+# into their SECOND row -- "Exception in DRUCONTR 1: Your pulse program
+# produces too much data for the LAN capacity. ->Experiment aborted by
+# DRU1!" -- after each had acquired its first row completely, while the
+# 64 kB 1D rungs passed, and TopSpin left full-size ser files holding one
+# acquired row and zeros.  The leading explanation is the acquisition
+# MODE (DIGMOD baseopt, see set_digital_mode below), which the script now
+# sets to digital; the probe is the safety net if that is not enough.
 TD_ROW      = 262144        # complex-pair points per row (TD, F2)
 SWH_HZ      = 6900.0        # -> AQ = TD/(2*SWH) ~ 19.0 s per row
 TD_LADDER   = 16384         # quick 1D ladder acquisitions (~1.2 s)
-REF_ROWS    = 8             # rows in each reference pseudo-2D
-D1_NOISE_S  = 0.05          # loop delay in zgnoise2d (also precedes wr)
+REF_ROWS    = 8             # rows in each reference pseudo-2D at the
+                            # default geometry (ref_rows_for keeps a block
+                            # near REF_BLOCK_SECS when the probe shortens
+                            # the row)
+REF_BLOCK_SECS = 170.0      # a reference block: 8 rows x ~21 s (v0.7.6)
+D1_NOISE_S  = 0.05          # loop delay in zgnoise2d (before go)
 D1_REF_S    = 2.0           # relaxation delay for the small-flip references
-REF_ROW_FIXED_S = 0.03      # zgref2d's fixed '30m wr' per row, before the
-                            # row is written (zgnoise2d has none: 'd1 wr')
+D11_TRANSFER_S = 1.0        # DATA-TRANSFER delay: the 'd11 wr' line of
+                            # zgnoise2d and zgref2d, the window in which
+                            # the receiver unit hands the acquired row to
+                            # the workstation.  1 MB per row in 1 s asks
+                            # for 1 MB/s, twice below the 2.2 MB/s Oulu's
+                            # DRU proved on the rungs (64 kB in 30 ms); the
+                            # 50 ms / 30 ms of v0.7.6 asked for 20-35 MB/s.
+                            # INSURANCE, not the diagnosis: Oulu's abort
+                            # came mid-row, not at the wr, and zgref2d had
+                            # 2 s between rows already (see the acquisition
+                            # mode below).  Set with the common acquisition
+                            # parameters and read back like TD.
 ROW_OVERHEAD_S = 1.0        # empirical per-row disk/housekeeping allowance
+# Row probe: (TD, d11) settings tried in order at EXP_ROW_PROBE with
+# zgnoise2d and a few rows until the LAST row of an attempt holds data.
+# The first entry is the default geometry in DIGITAL mode -- the case the
+# acquisition-mode fix (set_digital_mode) is expected to make acceptable;
+# the ladder runs whether or not the console took the DIGMOD write, so a
+# rejected write still ends in a probed geometry.  The second entry keeps
+# the row and triples the transfer window (hypothesis: the window is too
+# short); the rest shorten the row (hypothesis: the per-row volume is
+# what the unit limits -- in baseopt mode the DRU processes 16x the
+# points, so a quarter row is what Oulu's 4M-sample scan memory would
+# take).  The winner is used for every pseudo-2D block of the session and
+# recorded in meta.json (calibration.row_probe).
+ROW_PROBE_LADDER = [(262144, 1.0), (262144, 3.0), (131072, 1.0),
+                    (65536, 1.0), (32768, 1.0)]
+ROW_PROBE_MIN_ROWS = 2      # Oulu's DRU acquired the FIRST row of every
+                            # refused block and aborted 12-18 s into the
+                            # second: a one-row probe would pass anywhere,
+                            # so an attempt has at least two rows and is
+                            # judged on its LAST one ...
+ROW_PROBE_MIN_SECS = 40.0   # ... and covers at least this much acquisition
+                            # (a 19 s row: two rows; a 2.4 s row: many)
+RAW_SAMPLE_BYTES = 65536    # bytes read per window by ser_row_has_data
+# Acquisition mode (v0.7.7): DIGMOD digital and DSPFIRM sharp on every
+# experiment the script acquires with -- the setup expno, the rungs, the
+# row probe, the references, the noise block, the sweep -- written by
+# enum NAME like PARMODE and read back (GETPAR returns the ORDINAL on
+# 3.x/4.x: "1" is digital, "0" is sharp; the names are accepted too).
+# WHY: at Oulu (Avance III HD 500, AQS DRU-E, TopSpin 3.7.0, 2026-09-30,
+# the first live run) every pseudo-2D block acquired its first 262144-
+# point row completely and was aborted by the receiver unit 12-18 s into
+# the second -- "Exception in DRUCONTR 1: Your pulse program produces too
+# much data for the LAN capacity. ->Experiment aborted by DRU1!" -- while
+# the 64 kB 1D rungs passed.  Every Oulu acquisition ran DIGMOD 3
+# (baseopt) with DSPFIRM 4 (rectangle), carried over from the operator's
+# parameter set; Torino's Avance Neo, which acquired the same zgnoise2d
+# rows without complaint, ran DIGMOD 1 (digital) / DSPFIRM 0 (sharp).
+# Bruker documents that baseopt "needs some more internal memory ... for
+# larger TD, the memory on the DRU (RCU) may be a limiting factor"
+# (TopSpin 3 Acquisition Reference, DSPFIRM) and that with baseopt "16
+# times more data points are internally processed" (TopSpin 4.2
+# Acquisition Reference); the DRU's direct scan memory is 4M samples --
+# 16 x 262144 exactly -- and its sustained LAN rate 45 Mbit/s (AQS
+# technical manuals).  A 16-fold internal data volume explains every
+# observation (small rungs pass, both pseudo-2D pulse programs fail,
+# Torino passes); the write-window explanation behind d11 does not (the
+# abort came mid-row, not at the wr, and zgref2d already had 2 s between
+# rows), so d11 stays as insurance and the row probe as the safety net.
+# Digital mode is also what this protocol wants: no baseline optimisation
+# of a pulse-free record, and DE returns to its plain value (Oulu ran DE
+# 13.55 us in baseopt, Torino 6.5 us in digital).  Bruker documents that
+# setting DSPFIRM rectangle selects DIGMOD baseopt and vice versa, so
+# both are written, DIGMOD first.  A console that rejects the enum name
+# (PUTPAR raises -> putpar_failures, failed_forms) or whose readback
+# keeps another mode is recorded in param_api (digmod_form,
+# digmod_readback, dspfirm_readback, digmod_mismatch) and never insisted
+# on -- the row probe then finds a row the unit takes in whatever mode it
+# kept.
+DIGMOD_NAME  = "digital"           # documented enum name (DIGMOD)
+DSPFIRM_NAME = "sharp"             # documented enum name (DSPFIRM)
+DIGMOD_DIGITAL_READBACKS = ("1", "digital")   # GETPAR: ordinal on 3.x/4.x
+DSPFIRM_SHARP_READBACKS  = ("0", "sharp")
 SMALL_FLIP_EXTRA_DB = 39.08 # 20*log10(90): attenuate calibrated 90-deg
                             # power by this much -> ~1 degree tip at P1=P90
 
@@ -294,6 +383,9 @@ if IN_TOPSPIN:
     import java.io.FileOutputStream
     import java.util.zip.ZipOutputStream
     import java.util.zip.ZipEntry
+    import java.util.Random
+    import java.nio.ByteBuffer
+    import java.nio.ByteOrder
     import jarray
 else:
     java = None
@@ -473,19 +565,20 @@ def ocxo_expected_s(td, swh, ns, rows, d1_s, d1_per_row, fixed_s_per_row):
     """OCXO-implied duration of one acquisition block, in seconds, from the
     acquisition parameters alone:
         rows * (ns * (AQ + d1_per_row * d1) + fixed_s_per_row),
-    AQ = TD/(2*SWH).  zg and zgref2d spend one d1 per transient; zgnoise2d
-    spends two (one before go, one before wr).  fixed_s_per_row is a
-    literal delay the sequence spends once per row whatever the parameters
-    say: REF_ROW_FIXED_S (30 ms, the '30m wr' line) for zgref2d, 0 for
-    zgnoise2d ('d1 wr') and for the zg rungs -- zg's two 30m lines per
-    pass are real, but its ~3 s blocks never survive the report's 5%
-    wall/OCXO gate on hardware (Torino, 2026-09-25: 5.4 s wall for 3.2 s
-    expected), so their model is left as it was.  NOT included: the pulse,
-    the receiver's DE, and zgref2d's single 30m before its row loop (once
-    per block) -- the report re-derives every block from the bundled
-    pulse-program text plus acqus where it can, and the fit's intercept
-    absorbs constant per-block terms.  Disk/housekeeping overhead is not
-    included either -- it is not OCXO-derived."""
+    AQ = TD/(2*SWH).  zg, zgref2d and zgnoise2d all spend one d1 per
+    transient (until v0.7.6 zgnoise2d spent a second d1 before its wr).
+    fixed_s_per_row is a delay the sequence spends once per row besides
+    d1: the data-transfer delay d11 of the 'd11 wr' line for zgref2d and
+    zgnoise2d (acquire_block passes the session's value), 0 for the zg
+    rungs -- zg's two 30m lines per pass are real, but its ~3 s blocks
+    never survive the report's 5% wall/OCXO gate on hardware (Torino,
+    2026-09-25: 5.4 s wall for 3.2 s expected), so their model is left as
+    it was.  NOT included: the pulse, the receiver's DE, and zgref2d's
+    single 30m before its row loop (once per block) -- the report
+    re-derives every block from the bundled pulse-program text plus acqus
+    where it can, and the fit's intercept absorbs constant per-block
+    terms.  Disk/housekeeping overhead is not included either -- it is
+    not OCXO-derived."""
     if not swh:
         return None
     aq = td / (2.0 * swh)
@@ -1233,9 +1326,28 @@ PARAM_API = {
                                    # FIRST of those files, whatever its
                                    # source (library set, 2D template,
                                    # sibling expno); "" when none needed it
-    "acq_write_mismatch": 0,       # TD/RG readbacks that disagreed with
-                                   # the write even after a reload + rewrite
+    "acq_write_mismatch": 0,       # TD/RG/D11 readbacks that disagreed
+                                   # with the write even after a reload +
+                                   # rewrite
     "last_acq_write_mismatch": "", # "expno <n> <name>: wrote <w> read <r>"
+    "blocks_without_data": [],     # expnos of pseudo-2D blocks (the row
+                                   # probe included) whose LAST row held
+                                   # no data after zg -- the receiver unit
+                                   # refused them (Oulu, 2026-09-30); the
+                                   # details are in calibration.row_probe
+    "digmod_form": "",             # acquisition mode (v0.7.7): "name" =
+                                   # DIGMOD digital / DSPFIRM sharp written
+                                   # by enum name and read back |
+                                   # "unverified" = accepted, no usable
+                                   # readback | "mismatch" = accepted but
+                                   # the readback kept another mode | ""
+                                   # = never written, or rejected
+                                   # (failed_forms DIGMOD:name or
+                                   # DSPFIRM:name)
+    "digmod_readback": "",         # last raw GETPAR("DIGMOD"): "1" digital
+    "dspfirm_readback": "",        # last raw GETPAR("DSPFIRM"): "0" sharp
+    "digmod_mismatch": 0,          # datasets whose readback disagreed with
+                                   # the accepted digital/sharp write
 }
 
 # The operator's template dataset (CURDATA() at start), set by main():
@@ -2004,15 +2116,17 @@ ACQ_WRITE_GAIN_TOL = 1.5
 
 def verify_acq_write(name, wanted, kind):
     """Read an acquisition parameter back after writing it.  kind "int":
-    exact (TD); kind "gain": within one console gain step (RG).  On a
-    mismatch the dataset is reloaded (RE) and the value written once more;
-    a second mismatch is counted in PARAM_API (acq_write_mismatch,
+    exact (TD); kind "float": exact to 1e-6 (D 11, a delay the console
+    stores as written); kind "gain": within one console gain step (RG).
+    On a mismatch the dataset is reloaded (RE) and the value written once
+    more; a second mismatch is counted in PARAM_API (acq_write_mismatch,
     last_acq_write_mismatch) and announced, never dialogued.
 
     WHY: on TopSpin 3.7.0 with a 2D dataset lacking acqu2 every write was
     lost without an exception (Oulu, 2026-09-25), so putpar_failures 0
-    proved nothing; TD and RG decide what gets recorded, so they are the
-    two parameters read back.  SWH is not: the console rounds it to its
+    proved nothing; TD and RG decide what gets recorded, and D11 (v0.7.7)
+    whether the receiver unit accepts the block, so these are the
+    parameters read back.  SWH is not: the console rounds it to its
     dwell-time grid.  Returns 1 when the readback agrees."""
     def agrees(raw):
         if kind == "int":
@@ -2022,6 +2136,8 @@ def verify_acq_write(name, wanted, kind):
         w = to_float(wanted, None)
         if v is None or w is None:
             return 0
+        if kind == "float":
+            return abs(v - w) < 1e-6
         if w <= 0.0 or v <= 0.0:
             return abs(v - w) < 1e-6
         r = v / w
@@ -2059,28 +2175,339 @@ def set_rg(rg):
     return verify_acq_write("RG", rg, "gain")
 
 
-def set_common_acq(o1_hz, td, swh, ns, d1_s):
+def set_digital_mode():
+    """DIGMOD := digital and DSPFIRM := sharp on the current dataset, by
+    the documented enum names (like PARMODE), read back afterwards; see
+    the WHY at DIGMOD_NAME (Oulu, 2026-09-30: baseopt / rectangle rows
+    of 262144 points were aborted by the DRU, Torino's digital / sharp
+    rows were not).  Never insisted on: a console that rejects a name has
+    that form marked failed (failed_forms, one console dialog at most,
+    never repeated), a readback that keeps another mode is counted
+    (digmod_mismatch) and announced, and in both cases the run goes on --
+    the row probe then decides the row geometry in whatever mode the
+    console kept.  DIGMOD is written first because Bruker couples the two
+    (rectangle selects baseopt and vice versa); a console that rejected
+    only the DSPFIRM name still gets the DIGMOD write on every dataset
+    (the mode is the fix, the filter follows it by that coupling), and
+    its readback then decides.  Returns 1 when both readbacks agree with
+    the write."""
+    if _form_has_failed("DIGMOD", "name"):
+        return 0
+    if not putpar("DIGMOD", DIGMOD_NAME):
+        _form_failed("DIGMOD", "name")
+        say("DIGMOD=%s rejected by this console -- leaving the acquisition "
+            "mode as the parameter set has it; the row probe decides the "
+            "row geometry" % DIGMOD_NAME)
+        return 0
+    if not _form_has_failed("DSPFIRM", "name"):
+        if not putpar("DSPFIRM", DSPFIRM_NAME):
+            _form_failed("DSPFIRM", "name")
+            say("DSPFIRM=%s rejected by this console -- leaving the filter "
+                "as the parameter set has it (DIGMOD=%s is still written on "
+                "every dataset); the row probe decides the row geometry"
+                % (DSPFIRM_NAME, DIGMOD_NAME))
+    dm = getpar("DIGMOD").strip()
+    df = getpar("DSPFIRM").strip()
+    PARAM_API["digmod_readback"] = dm
+    PARAM_API["dspfirm_readback"] = df
+    if dm in DIGMOD_DIGITAL_READBACKS and df in DSPFIRM_SHARP_READBACKS:
+        if PARAM_API["digmod_form"] == "":
+            PARAM_API["digmod_form"] = "name"
+        return 1
+    if dm == "" and df == "":
+        if PARAM_API["digmod_form"] == "":
+            PARAM_API["digmod_form"] = "unverified"
+            say("DIGMOD=%s / DSPFIRM=%s accepted; this console offers no "
+                "usable readback, trusting it" % (DIGMOD_NAME, DSPFIRM_NAME))
+        return 0
+    PARAM_API["digmod_mismatch"] = PARAM_API["digmod_mismatch"] + 1
+    PARAM_API["digmod_form"] = "mismatch"
+    say("WARNING: DIGMOD/DSPFIRM read back '%s'/'%s' after writing %s/%s "
+        "-- the console kept its acquisition mode (Oulu's baseopt rows "
+        "were aborted by the DRU, 2026-09-30); continuing, the row probe "
+        "decides the row geometry and meta.json records this"
+        % (dm, df, DIGMOD_NAME, DSPFIRM_NAME))
+    return 0
+
+
+def set_common_acq(o1_hz, td, swh, ns, d1_s, d11_s):
+    """The acquisition parameters every experiment of the session gets.
+    The acquisition mode goes first (set_digital_mode: DIGMOD digital,
+    DSPFIRM sharp -- the fix for Oulu's aborted rows, 2026-09-30; the
+    console re-derives DE and the filter from it before TD/SWH are set).
+    d11_s is the data-transfer delay of the 'd11 wr' line (zgnoise2d,
+    zgref2d; unused by the zg rungs, set anyway so one code path serves
+    all); it is read back like TD because the receiver unit's acceptance
+    of a pseudo-2D block may depend on it."""
+    set_digital_mode()
     putpar("TD", str(td))
     putpar("SWH", "%.2f" % swh)   # SWH in Hz sets SW consistently
     putpar("O1", "%.2f" % o1_hz)
     putpar("NS", str(ns))
     putpar("DS", "0")
     putpar("D 1", "%.4f" % d1_s)
+    putpar("D 11", "%.4f" % d11_s)
     set_rg(1)
     verify_acq_write("TD", td, "int")   # TD decides the row length
+    verify_acq_write("D 11", d11_s, "float")   # D11 whether the row arrives
 
 
-def run_zg_and_wait(expno_dir, what, ocxo_s=None):
+def raw_data_file(expno_dir):
+    """Path of the expno's raw-data file (ser, else fid), or None."""
+    if not expno_dir:
+        return None
+    for fn in ("ser", "fid"):
+        try:
+            p = os.path.join(expno_dir, fn)
+            if os.path.isfile(p):
+                return p
+        except CATCHABLE:
+            pass
+    return None
+
+
+def raw_row_min_bytes(expno_dir, td):
+    """The fewest bytes one row of td points can occupy in the raw-data
+    file: td samples of int32 (TopSpin 2.x/3.x, and 4.x unless the
+    expno's acqus says DTYPA 2 = float64; the status file is a property
+    of the console, so even a copy inherited from the template answers
+    that correctly).  TopSpin's 1 kB row padding only adds to it.  0 when
+    td is unknown -- ser_row_has_data then falls back to the file size
+    alone.  Read for the short-file guard there."""
+    if not td or td <= 0:
+        return 0
+    bps = 4
+    try:
+        if int(_acqus_scalar(expno_dir, "DTYPA", 0)) == 2:
+            bps = 8
+    except CATCHABLE:
+        bps = 4
+    return td * bps
+
+
+def ser_row_has_data(path, row_index, n_rows, min_row_bytes=0):
+    """1 when row row_index (0-based) of the raw-data file holds a
+    non-zero byte in the samples read, 0 when every byte read is zero,
+    None when nothing could be read.  The row stride is the file size
+    divided by n_rows, so int32 (TopSpin 2/3) and float64 (TopSpin 4)
+    files read alike without acqus, and TopSpin's 1 kB row padding is
+    inside the stride.  Two windows of RAW_SAMPLE_BYTES are read, one at
+    the row's start and one from its middle, so neither the digital
+    filter's group delay at the start nor a quiet stretch decides.
+
+    min_row_bytes (raw_row_min_bytes: TD x 4, or x 8 for float64) is the
+    SHORT-FILE guard: a console that does not pre-allocate the ser leaves
+    a file of only the rows that arrived, and size // n_rows would then
+    lay the missing last row over the data of an earlier one and call it
+    acquired.  A file smaller than n_rows x min_row_bytes cannot hold
+    n_rows rows: its stride is one real row and every row past its end
+    (a partial last row included) is 0, never acquired.  0 = no guard.
+
+    WHY: TopSpin 3.x pre-allocates the whole ser when zg starts, so a
+    block the receiver unit refused leaves a file of the right SIZE with
+    zeros where the rows never came (Oulu, Avance III HD 500, DRU-E,
+    2026-09-30: the first row acquired, rows 2..N all zeros, in all three
+    pseudo-2D blocks) -- existence and size prove nothing, content does.
+    Every read is guarded: a file that cannot be read is 'unknown', never
+    an exception in the acquisition flow."""
+    try:
+        if not path or not os.path.isfile(path):
+            return None
+        size = os.path.getsize(path)
+        if size <= 0 or n_rows < 1 or row_index < 0 or row_index >= n_rows:
+            return None
+        stride = size // n_rows
+        if min_row_bytes and min_row_bytes > 0 \
+                and size < n_rows * min_row_bytes:
+            # short file: fewer than n_rows rows of this TD were written
+            stride = min_row_bytes
+            if (row_index + 1) * stride > size:
+                return 0
+        if stride <= 0:
+            return None
+        n = RAW_SAMPLE_BYTES
+        if n > stride:
+            n = stride
+        offsets = [row_index * stride]
+        mid = row_index * stride + (stride - n) // 2
+        if mid > offsets[0]:
+            offsets.append(mid)
+        got_any = 0
+        f = open(path, "rb")
+        try:
+            for off in offsets:
+                f.seek(off)
+                buf = f.read(n)
+                if not buf:
+                    continue
+                got_any = 1
+                if buf.count("\x00") != len(buf):
+                    return 1
+        finally:
+            f.close()
+        if not got_any:
+            return None
+        return 0
+    except CATCHABLE:
+        return None
+
+
+def block_data_check(expno_dir, rows, td=0):
+    """(first, last): ser_row_has_data of the block's first and last row
+    (the same row for a 1D).  The LAST row is the one that decides whether
+    a pseudo-2D block was acquired: Oulu's refused blocks all held their
+    first row.  td (the block's TD, as written and read back) arms the
+    short-file guard -- a ser that never received all its rows on a
+    console that does not pre-allocate it; 0 leaves the size alone to
+    decide the stride."""
+    path = raw_data_file(expno_dir)
+    if path is None:
+        return None, None
+    if rows < 1:
+        rows = 1
+    mrb = raw_row_min_bytes(expno_dir, td)
+    first = ser_row_has_data(path, 0, rows, mrb)
+    if rows == 1:
+        return first, first
+    return first, ser_row_has_data(path, rows - 1, rows, mrb)
+
+
+MOCK_ROW_CACHE = {}   # td -> one row of pseudo-random int32 bytes (fallback)
+
+
+def _mock_write_java(path, td, rows):
+    """rows x td little-endian int32 samples in [-2e6, 2e6) from
+    java.util.Random, a fresh row each time (identical rows would give a
+    desktest report zero row-to-row scatter).  Java 8's IntStream fills a
+    1 MB row in milliseconds; a JVM without it raises before the file is
+    opened and the caller falls back to _mock_write_python."""
+    rnd = java.util.Random(long(20260930 + td + rows))
+    arr = rnd.ints(long(td), -2000000, 2000000).toArray()
+    fos = java.io.FileOutputStream(path)
+    try:
+        r = 0
+        while r < rows:
+            if r > 0:
+                arr = rnd.ints(long(td), -2000000, 2000000).toArray()
+            bb = java.nio.ByteBuffer.allocate(4 * td)
+            bb.order(java.nio.ByteOrder.LITTLE_ENDIAN)
+            bb.asIntBuffer().put(arr)
+            fos.write(bb.array())
+            r = r + 1
+    finally:
+        fos.close()
+
+
+def _mock_write_python(path, td, rows):
+    """Pure-Python fallback: one pseudo-random row per TD (an LCG, built
+    once and cached), written rows times rotated by one sample per row so
+    the rows differ."""
+    base = MOCK_ROW_CACHE.get(td)
+    if base is None:
+        parts = []
+        v = 20260930 + td
+        i = 0
+        while i < td:
+            v = (v * 1103515245 + 12345) & 0x7fffffff
+            parts.append(struct.pack("<i", (v % 4000001) - 2000000))
+            i = i + 1
+        base = "".join(parts)
+        MOCK_ROW_CACHE[td] = base
+    f = open(path, "wb")
+    try:
+        r = 0
+        while r < rows:
+            k = (4 * r) % len(base)
+            f.write(base[k:] + base[:k])
+            r = r + 1
+    finally:
+        f.close()
+
+
+def mock_write_raw_data(expno_dir, td, rows):
+    """SIMULATE/DESKTEST (v0.7.7): leave <expno_dir>/fid (rows == 1) or
+    /ser (rows > 1) of rows x td little-endian int32 pseudo-random samples
+    behind the mocked zg, so block_data_check has a file of the block's
+    size to read -- the same check that runs live.  |value| < 2^21, so a
+    desktest report's ADC check never reads the rows as clipped.  Never
+    data: the bundle says run_mode simulate/desktest.  Best effort -- a
+    failure here is announced, never fatal."""
+    if not expno_dir or td <= 0 or rows <= 0:
+        return
+    if rows > 1:
+        fn = "ser"
+    else:
+        fn = "fid"
+    path = os.path.join(expno_dir, fn)
+    try:
+        done = 0
+        if IN_TOPSPIN:
+            try:
+                _mock_write_java(path, td, rows)
+                done = 1
+            except CATCHABLE:
+                done = 0
+        if not done:
+            _mock_write_python(path, td, rows)
+        say("%s: mocked raw data written: %s (%d x %d int32, pseudo-random, "
+            "NOT data)" % (hw_mode_name(), fn, rows, td))
+    except CATCHABLE:
+        print "spin_noise_run: WARNING could not write the mocked raw-data " \
+              "file %s" % path
+        try:
+            traceback.print_exc()
+        except CATCHABLE:
+            pass
+
+
+def mock_acquisition(expno_dir, rows, ocxo_s):
+    """The mocked zg of SIMULATE/DESKTEST: advance the harness's virtual
+    clock by the block's OCXO-implied duration and leave a raw-data file
+    of the block's size behind (mock_write_raw_data).  The Jython harness
+    may take the whole step over through HARNESS_MOCK_ACQ, a test seam
+    testing/jython_entry.py injects, to model a receiver unit that
+    refuses the block: the file it leaves then has TopSpin 3.x's refused
+    shape -- first row data, the rest zeros -- and the clock advances by
+    one row plus the abort.  In production the NameError path is taken
+    and nothing notices the seam."""
+    td = to_int(getpar("TD"), 0)
+    d11 = to_float(getpar("D 11"), 0.0)
+    handled = 0
+    try:
+        handled = HARNESS_MOCK_ACQ(expno_dir, td, rows, d11, ocxo_s)
+    except NameError:
+        handled = 0
+    except CATCHABLE:
+        handled = 0
+    if handled:
+        return
+    harness_clock_advance(ocxo_s)
+    mock_write_raw_data(expno_dir, td, rows)
+
+
+def run_zg_and_wait(expno_dir, what, ocxo_s=None, rows=1, attended=1):
     """Start acquisition and wait.  Both the per-command function ZG and
     the XCMD fallback block per the manual (default wait=WAIT_TILL_DONE).
-    As belt-and-braces we verify a raw data file appeared; if not, the
-    operator adjudicates.  SIMULATE/DESKTEST mock the acquisition (the
-    hw_skip() guard below is what testing/static_check.py verifies).
-    ocxo_s is the block's OCXO-implied duration; the mocked path hands it
-    to the harness's virtual clock so the clock audit can be tested."""
+    Afterwards the raw-data FILE is looked for -- and that is all this
+    function decides on: a refused zg leaves a full-size ser of zeros on
+    TopSpin 3.x (Oulu, 2026-09-30, "too much data for the LAN capacity"),
+    so whether the file holds DATA is the caller's question, answered by
+    block_data_check() on the block's first and last row.  When no file
+    exists at all and the console is attended (attended=1: the row probe
+    and the opening reference, right after the operator's last dialog)
+    the operator adjudicates in a CONFIRM; unattended (the noise block,
+    the closing reference, the sweep) the same condition is a WARNING on
+    the status line and the run continues to the bundle -- a modal dialog
+    there stranded a session overnight once (v0.5.0) and would again.
+    SIMULATE/DESKTEST mock the acquisition (the hw_skip() guard below is
+    what testing/static_check.py verifies) and, since v0.7.7, write a
+    raw-data file of the block's size so the content check has something
+    to read (mock_acquisition).  ocxo_s is the block's OCXO-implied
+    duration, handed to the harness's virtual clock in the mocked path;
+    rows is the block's row count (1 for a 1D)."""
     if hw_skip():
         say("%s: zg mocked (%s)" % (hw_mode_name(), what))
-        harness_clock_advance(ocxo_s)
+        mock_acquisition(expno_dir, rows, ocxo_s)
         return
     ok = 0
     try:
@@ -2090,21 +2517,23 @@ def run_zg_and_wait(expno_dir, what, ocxo_s=None):
         ok = 0
     if not ok:
         ok, _r = safe_hw_cmd("zg", "zg (%s)" % what)
-    # verify data landed on disk
-    got = 0
-    if expno_dir:
-        for fn in ("ser", "fid"):
-            if os.path.exists(os.path.join(expno_dir, fn)):
-                got = 1
-    if not got:
-        ans = CONFIRM("spin_noise_run: acquisition check",
-                      "The script cannot see a raw-data file (ser/fid) for\n"
-                      "the experiment it just started:\n  %s\n\n"
-                      "If the acquisition is still running, wait for it to\n"
-                      "finish, then press OK.  Press Cancel to abort the "
-                      "run." % what)
-        if ans != 1:
-            abort("Acquisition did not complete: " + what)
+    # verify a raw-data file landed on disk (its CONTENT is the caller's
+    # check: block_data_check)
+    if expno_dir and raw_data_file(expno_dir) is None:
+        if attended:
+            ans = CONFIRM("spin_noise_run: acquisition check",
+                          "The script cannot see a raw-data file (ser/fid) "
+                          "for\nthe experiment it just started:\n  %s\n\n"
+                          "If the acquisition is still running, wait for it "
+                          "to\nfinish, then press OK.  Press Cancel to abort "
+                          "the run." % what)
+            if ans != 1:
+                abort("Acquisition did not complete: " + what)
+        else:
+            say("WARNING: no raw-data file (ser/fid) for %s -- the console "
+                "did not acquire this block (zg refused it, or the pulse "
+                "program did not compile); continuing unattended, the "
+                "report will flag the block" % what)
 
 
 def run_rga():
@@ -2130,7 +2559,9 @@ def run_rga():
 
 
 def record_experiment(meta, expno, role, started, finished, rows):
-    """Append one entry to meta['experiments'] from current status params."""
+    """Append one entry to meta['experiments'] from current status params.
+    Schema-shaped keys only (the packer round-trips them field by field);
+    the v0.7.7 data-content results live in calibration.row_probe."""
     td = to_int(getpar("TD"), 0)
     swh = to_float(getpar("SWH"), 0.0)
     aq = 0.0
@@ -2152,6 +2583,282 @@ def record_experiment(meta, expno, role, started, finished, rows):
     }
     meta["experiments"].append(entry)
     return entry
+
+
+# ----------------------------------------------------------------------------
+# Row geometry (v0.7.7) and the pseudo-2D block driver.
+#
+# One row of zgnoise2d spends d1 + AQ + d11, one row of zgref2d
+# d1 + p1 + AQ + d11 (d11 = the data-transfer delay, see D11_TRANSFER_S).
+# TD and d11 are the session's row geometry: the defaults, or what the
+# row probe found this console's receiver unit accepts.  Block durations
+# are kept whatever the row: the noise block fills noise_secs, a
+# reference block stays near REF_BLOCK_SECS.
+# ----------------------------------------------------------------------------
+
+def aq_row_s(td):
+    return td / (2.0 * SWH_HZ)
+
+
+def noise_row_secs(td, d11_s):
+    """Wall time of one zgnoise2d row for SIZING a block: d1 before go,
+    the acquisition, d11 while the row is written, plus the housekeeping
+    allowance (not OCXO-derived, so absent from ocxo_expected_s)."""
+    return aq_row_s(td) + D1_NOISE_S + d11_s + ROW_OVERHEAD_S
+
+
+def noise_rows_for(secs, td, d11_s):
+    n = int(secs / noise_row_secs(td, d11_s))
+    if n < 4:
+        n = 4
+    return n
+
+
+def ref_rows_for(td, d11_s):
+    """Rows of a reference block: REF_ROWS (8) at the default geometry,
+    otherwise as many as keep the block near REF_BLOCK_SECS."""
+    n = int(round(REF_BLOCK_SECS / (aq_row_s(td) + D1_REF_S + d11_s)))
+    if n < 2:
+        n = 2
+    return n
+
+
+def probe_rows_for(td, d11_s):
+    """Rows of one row-probe attempt: at least ROW_PROBE_MIN_ROWS, and
+    enough for ROW_PROBE_MIN_SECS of acquisition (see the constants)."""
+    n = int(math.ceil(ROW_PROBE_MIN_SECS
+                      / (aq_row_s(td) + D1_NOISE_S + d11_s)))
+    if n < ROW_PROBE_MIN_ROWS:
+        n = ROW_PROBE_MIN_ROWS
+    return n
+
+
+def next_ladder_setting(td, d11_s):
+    """The ROW_PROBE_LADDER entry after (td, d11_s), or None past the end
+    or when (td, d11_s) is not a ladder entry."""
+    i = 0
+    while i < len(ROW_PROBE_LADDER):
+        e = ROW_PROBE_LADDER[i]
+        if e[0] == td and abs(e[1] - d11_s) < 1e-9:
+            if i + 1 < len(ROW_PROBE_LADDER):
+                return ROW_PROBE_LADDER[i + 1]
+            return None
+        i = i + 1
+    return None
+
+
+def block_wall_s(cb):
+    """Wall seconds of a closed clock-audit entry, or None."""
+    try:
+        return (cb["wall_end_ms"] - cb["wall_start_ms"]) / 1000.0
+    except CATCHABLE:
+        return None
+
+
+# meta.json calibration.row_probe (v0.7.7): what the row probe tried and
+# found, the geometry the session used, and the data-content check of
+# every pseudo-2D block.  Filled by run_row_probe / note_block_data; the
+# dict is the SAME object meta['calibration']['row_probe'] points at.
+ROW_PROBE = {
+    "expno": EXP_ROW_PROBE,
+    "ladder": [],                 # [[td, d11], ...] as tried, in order
+    "rows": None,                 # rows of the recorded (final) attempt
+    "td_row": TD_ROW,             # the geometry the session used ...
+    "transfer_delay_s": D11_TRANSFER_S,   # ... (winner, or the default)
+    "passed": False,
+    "attempt_passed": None,       # 1-based index of the winning attempt
+    "attempts": [],               # per attempt: td, d11, rows, data_first,
+                                  # data_last, wall_s
+    "blocks": [],                 # per pseudo-2D block: expno, role, td,
+                                  # d11, rows, data_first, data_last,
+                                  # acquired, wall_s
+    "block_retries": [],          # noise blocks re-acquired once with the
+                                  # next ladder setting
+}
+
+
+def note_block_data(expno, role, td, d11_s, rows, first, last, wall_s):
+    """Record a pseudo-2D block's data-content check (block_data_check on
+    its first and last row).  A block whose LAST row holds no data was not
+    acquired -- whatever the ser's size says -- and its expno also goes to
+    PARAM_API blocks_without_data.  None (unreadable) counts as no data."""
+    entry = {"expno": expno, "role": role, "td": td, "d11": d11_s,
+             "rows": rows, "data_first": first, "data_last": last,
+             "acquired": (last == 1), "wall_s": wall_s}
+    ROW_PROBE["blocks"].append(entry)
+    if last != 1:
+        PARAM_API["blocks_without_data"].append(expno)
+    return entry
+
+
+def warn_block_without_data(entry, what):
+    """The WARNING for a block whose last row held no data.  A status-line
+    message, never a dialog: the blocks this is said for run unattended."""
+    if entry["acquired"]:
+        return
+    say("WARNING: %s (expno %d) -- the last of its %d rows holds no data "
+        "(first row: %s); the receiver unit did not acquire this block (a "
+        "full-size ser of zeros is what a refused zg leaves on TopSpin 3.x: "
+        "'too much data for the LAN capacity', Oulu 2026-09-30). Continuing; "
+        "meta.json records it (calibration.row_probe.blocks, param_api."
+        "blocks_without_data) and the report flags the block"
+        % (what, entry["expno"], entry["rows"],
+           {1: "data", 0: "no data", None: "unreadable"}.get(
+               entry["data_first"], "?")))
+
+
+def acquire_block(expno, role, what, expno_dir, td, rows, d1_s, d11_s,
+                  attended):
+    """One pseudo-2D block (or a row-probe attempt): clear the raw data,
+    zg, clock audit, then the data-content check of the first and last
+    row.  The caller has set PULPROG / TD / D11 / F1 TD / RG.  Returns
+    (t0, clock_entry, first, last)."""
+    clear_raw_data(expno_dir)
+    t0 = now_local()
+    ocxo_s = ocxo_expected_s(td, SWH_HZ, 1, rows, d1_s, 1, d11_s)
+    cb = clock_block_begin(expno, role, ocxo_s)
+    run_zg_and_wait(expno_dir, what, ocxo_s, rows, attended)
+    clock_block_end(cb)
+    first, last = block_data_check(expno_dir, rows, td)
+    return t0, cb, first, last
+
+
+def run_row_probe(meta, template, dsname, o1_hz):
+    """Section 8b (v0.7.7), ATTENDED -- right after the RG ladder, before
+    the opening reference, while the operator is still near the console:
+    find a row geometry (TD, d11) this console's receiver unit accepts.
+
+    Expno EXP_ROW_PROBE is WR-copied from the opening reference (2D since
+    the dialect probe, acqu2 in place), given zgnoise2d and RG 1, and for
+    each ROW_PROBE_LADDER entry in order: TD/D11/F1 TD set, raw data
+    cleared, zg, then the decision -- by DATA CONTENT, not by the file's
+    existence or size: the LAST row of the attempt must hold non-zero
+    samples (block_data_check).  WHY the last row and several rows:
+    Oulu's DRU acquired the first row of every block it refused and
+    aborted 12-18 s into the second, so a one-row probe (or a size check)
+    passes on any console.  The first attempt that yields data wins and
+    is the geometry of every pseudo-2D block of the session.  When every
+    attempt fails: a WARNING (never a dialog), the failure is recorded,
+    and the session continues with the first setting so it completes and
+    the report shows the failure.  One clock-audit block is kept for the
+    expno -- the final attempt's -- and experiments[] records that
+    attempt; the per-attempt wall times are in calibration.row_probe.
+    RG 1 is enough for the content check: at Oulu the pulse-free rows
+    at RG 200 had 134 counts rms, i.e. ~0.7 counts at RG 1, where about
+    half the samples are non-zero, and the check reads 2 x 64 kB per row.
+    Returns (td, d11_s)."""
+    say("row probe: expno %d -- finding a row length / transfer delay this "
+        "console's receiver unit accepts (%d settings to try; ~1 min when "
+        "the first passes)" % (EXP_ROW_PROBE, len(ROW_PROBE_LADDER)))
+    ROW_PROBE["ladder"] = []
+    for e in ROW_PROBE_LADDER:
+        ROW_PROBE["ladder"].append([e[0], e[1]])
+    ensure_template_dim(template, dsname, 2)   # WR() copies the 2D opening
+    cd = open_expno(template, dsname, EXP_ROW_PROBE)   # reference (acqu2)
+    expno_dir = ds_path(cd)
+    clear_raw_data(expno_dir)
+    putpar("PULPROG", PP_NAME)
+    winner = None
+    last_cb = None
+    t0 = now_local()
+    td, d11 = ROW_PROBE_LADDER[0]
+    rows = probe_rows_for(td, d11)
+    first, last = None, None
+    i = 0
+    while i < len(ROW_PROBE_LADDER):
+        td, d11 = ROW_PROBE_LADDER[i]
+        rows = probe_rows_for(td, d11)
+        make_2d(rows)
+        set_common_acq(o1_hz, td, SWH_HZ, 1, D1_NOISE_S, d11)   # RG 1
+        say("row probe: attempt %d/%d -- TD %d (%.1f s rows), d11 %.1f s, "
+            "%d rows" % (i + 1, len(ROW_PROBE_LADDER), td, aq_row_s(td),
+                         d11, rows))
+        t0, cb, first, last = acquire_block(
+            EXP_ROW_PROBE, "row_probe",
+            "row probe attempt %d (TD %d, d11 %.1f s)" % (i + 1, td, d11),
+            expno_dir, td, rows, D1_NOISE_S, d11, 1)
+        if last_cb is not None:
+            try:
+                CLOCK_BLOCKS.remove(last_cb)   # one audit block per expno
+            except CATCHABLE:
+                pass
+        last_cb = cb
+        ROW_PROBE["attempts"].append(
+            {"attempt": i + 1, "td": td, "d11": d11, "rows": rows,
+             "data_first": first, "data_last": last,
+             "wall_s": block_wall_s(cb)})
+        if last == 1:
+            winner = (td, d11)
+            ROW_PROBE["passed"] = True
+            ROW_PROBE["attempt_passed"] = i + 1
+            say("row probe: attempt %d passed -- TD %d, d11 %.1f s is the "
+                "row geometry of this session" % (i + 1, td, d11))
+            break
+        say("row probe: attempt %d -- the last row holds no data (first "
+            "row: %s); trying the next setting"
+            % (i + 1, {1: "data", 0: "no data"}.get(first, "unreadable")))
+        i = i + 1
+    record_experiment(meta, EXP_ROW_PROBE, "row_probe", t0, now_local(),
+                      rows)
+    note_block_data(EXP_ROW_PROBE, "row_probe", td, d11, rows, first, last,
+                    block_wall_s(last_cb))
+    ROW_PROBE["rows"] = rows
+    if winner is None:
+        td, d11 = ROW_PROBE_LADDER[0]
+        say("WARNING: row probe -- none of the %d settings came back with "
+            "data in its last row; this console's receiver unit refused "
+            "every pseudo-2D row tried. Continuing with TD %d / d11 %.1f s "
+            "so the session completes; every block is checked the same way "
+            "and the report will show the failure. Please send the bundle "
+            "and TopSpin's error text to the maintainers"
+            % (len(ROW_PROBE_LADDER), td, d11))
+    ROW_PROBE["td_row"] = td
+    ROW_PROBE["transfer_delay_s"] = d11
+    meta["calibration"]["row_probe"] = ROW_PROBE
+    return td, d11
+
+
+def acquire_noise_block(meta, expno, role, what, expno_dir, o1_hz,
+                        noise_secs, td, d11_s, rows, noise_rg):
+    """The pulse-free block at the session geometry, UNATTENDED: zg, the
+    data-content check of the first and last row; when the last row holds
+    no data, ONE retry with the next ROW_PROBE_LADDER setting (rows
+    recomputed to keep the block's duration), then a WARNING -- never a
+    dialog.  The caller has set PULPROG / F1 TD / TD / D11 / RG for the
+    first attempt.  Returns the row count of the recorded acquisition."""
+    t0, cb, first, last = acquire_block(expno, role, what, expno_dir, td,
+                                        rows, D1_NOISE_S, d11_s, 0)
+    if last != 1:
+        nxt = next_ladder_setting(td, d11_s)
+        if nxt is not None:
+            first_try = {"td": td, "d11": d11_s, "rows": rows,
+                         "data_first": first, "data_last": last,
+                         "wall_s": block_wall_s(cb)}
+            say("WARNING: %s -- the last of its %d rows holds no data; "
+                "retrying ONCE with the next row setting, TD %d / d11 %.1f s"
+                % (what, rows, nxt[0], nxt[1]))
+            try:
+                CLOCK_BLOCKS.remove(cb)     # the retry is the block's audit
+            except CATCHABLE:
+                pass
+            td, d11_s = nxt
+            rows = noise_rows_for(noise_secs, td, d11_s)
+            make_2d(rows)
+            set_common_acq(o1_hz, td, SWH_HZ, 1, D1_NOISE_S, d11_s)
+            set_rg(noise_rg)
+            t0, cb, first, last = acquire_block(
+                expno, role, what + " (retry)", expno_dir, td, rows,
+                D1_NOISE_S, d11_s, 0)
+            ROW_PROBE["block_retries"].append(
+                {"expno": expno, "role": role, "first_try": first_try,
+                 "retry": {"td": td, "d11": d11_s, "rows": rows,
+                           "data_first": first, "data_last": last,
+                           "wall_s": block_wall_s(cb)}})
+    record_experiment(meta, expno, role, t0, now_local(), rows)
+    entry = note_block_data(expno, role, td, d11_s, rows, first, last,
+                            block_wall_s(cb))
+    warn_block_without_data(entry, what)
+    return rows
 
 
 # ============================================================================
@@ -2383,10 +3090,11 @@ def make_1d():
 def clear_raw_data(expno_dir):
     """Delete any fid/ser inherited from the WR() template copy, BEFORE
     acquiring. Without this a silently failed zg leaves the PREVIOUS
-    experiment's raw data in place: run_zg_and_wait's data-landed check
-    passes vacuously and read_fid_points would parse stale data as a
-    fresh measurement (mislabeled rd-opt rates, unverified sweep mass
-    coordinates). Deleting first makes both checks real."""
+    experiment's raw data in place: run_zg_and_wait's file check and
+    block_data_check's content check pass vacuously and read_fid_points
+    would parse stale data as a fresh measurement (mislabeled rd-opt
+    rates, unverified sweep mass coordinates). Deleting first makes the
+    checks real."""
     if not expno_dir:
         return
     for fn in ("fid", "ser"):
@@ -2418,15 +3126,15 @@ def acquire_quick_1d(meta, template, dsname, expno, role, o1_hz,
     cd = open_expno(template, dsname, expno)
     make_1d()                    # verifies; writes only if still not 1D
     putpar("PULPROG", "zg")
-    set_common_acq(o1_hz, TD_LADDER, SWH_HZ, 1, D1_REF_S)
+    set_common_acq(o1_hz, TD_LADDER, SWH_HZ, 1, D1_REF_S, D11_TRANSFER_S)
     set_small_flip(p90_us, p90_db, db_par)
     set_rg(RDOPT_RG)
     clear_raw_data(ds_path(cd))  # stale template copy must not pass as data
     t0 = now_local()
     ocxo_s = ocxo_expected_s(TD_LADDER, SWH_HZ, 1, 1, D1_REF_S, 1, 0.0)
     cb = clock_block_begin(expno, role, ocxo_s)
-    run_zg_and_wait(ds_path(cd), role, ocxo_s)
-    clock_block_end(cb)
+    run_zg_and_wait(ds_path(cd), role, ocxo_s, 1, 1)   # attended: the
+    clock_block_end(cb)                                # operator drives
     record_experiment(meta, expno, role, t0, now_local(), 1)
     return ds_path(cd)
 
@@ -3254,7 +3962,8 @@ def sweep_sign_calibration(meta, template, dsname, o1_hz, p90_us,
 
 def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
                     db_par, noise_secs, fallback_rg, bf1_mhz,
-                    autostep_requested=0):
+                    autostep_requested=0, td_row=TD_ROW,
+                    d11_s=D11_TRANSFER_S):
     """Field-stepped noise blocks: every step is its own axion mass
     point. The operator steps the field via the LOCK REFERENCE; the
     script verifies each step by measuring the sample's line, then
@@ -3418,11 +4127,9 @@ def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
     if autostep_requested:
         ast = autostep_setup(meta, sweep, bf1_mhz, hop_hz)
 
-    aq_row = TD_ROW / (2.0 * SWH_HZ)
-    row_secs = aq_row + 2.0 * D1_NOISE_S + ROW_OVERHEAD_S
-    n_rows = int(per_secs / row_secs)
-    if n_rows < 4:
-        n_rows = 4
+    # Row geometry from the row probe (td_row, d11_s); rows fill per_secs.
+    row_secs = noise_row_secs(td_row, d11_s)
+    n_rows = noise_rows_for(per_secs, td_row, d11_s)
     noise_expnos = []
     noise_rg = None
     last_set_hz = 0.0
@@ -3630,23 +4337,19 @@ def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
         cd = open_expno(template, dsname, expno_n)
         putpar("PULPROG", PP_NAME)
         make_2d(n_rows)
-        set_common_acq(o1_step, TD_ROW, SWH_HZ, 1, D1_NOISE_S)
+        set_common_acq(o1_step, td_row, SWH_HZ, 1, D1_NOISE_S, d11_s)
         if noise_rg is None:
             noise_rg = run_rga()
             if noise_rg is None:
                 noise_rg = fallback_rg
         set_rg(noise_rg)
-        clear_raw_data(ds_path(cd))
-        t0 = now_local()
-        ocxo_s = ocxo_expected_s(TD_ROW, SWH_HZ, 1, n_rows, D1_NOISE_S, 2, 0.0)
-        cb = clock_block_begin(expno_n, "noise_sweep", ocxo_s)
-        run_zg_and_wait(ds_path(cd), "sweep noise block %d" % (k + 1),
-                        ocxo_s)
-        clock_block_end(cb)
-        record_experiment(meta, expno_n, "noise_sweep",
-                          t0, now_local(), n_rows)
+        # zg, the data-content check, one retry with the next row setting
+        # if the last row came back empty, WARNING -- unattended, no dialog
+        rows_k = acquire_noise_block(
+            meta, expno_n, "noise_sweep", "sweep noise block %d" % (k + 1),
+            ds_path(cd), o1_step, per_secs, td_row, d11_s, n_rows, noise_rg)
         step["noise_expno"] = expno_n
-        step["rows"] = n_rows
+        step["rows"] = rows_k
         noise_expnos.append(expno_n)
         sweep["steps"].append(step)
 
@@ -3718,13 +4421,51 @@ PP_TEXT = """;zgnoise2d
 ;NO rf pulse statement anywhere in this sequence (and none hidden in
 ;an include), so the sample magnetization is never touched.
 ;
+;d11 is the DATA-TRANSFER delay (v0.7.7): the row is written ('wr')
+;during it and the receiver unit hands the acquired row to the
+;workstation in that window.  It exists because of Oulu (Avance III
+;HD 500, AQS DRU-E, TopSpin 3.7.0, 2026-09-30, the first live run):
+;every pseudo-2D block there acquired its FIRST 262144-point row
+;(1 MB of int32) completely and was then aborted by the receiver
+;unit 12-18 s into the SECOND row --
+;    Exception in DRUCONTR 1: Your pulse program produces too much
+;    data for the LAN capacity. ->Experiment aborted by DRU1!
+;-- while the 64 kB 1D rungs of the same session passed, and TopSpin
+;left the full-size ser it pre-allocates, one real row and zeros.
+;What the evidence says: the abort came mid-row, not at the wr, and
+;zgref2d already had 2 s between its rows, so the write window (50 ms
+;here, 30 ms there, before v0.7.7) is the WEAKEST explanation.  The
+;leading one is the acquisition mode the operator's parameter set
+;carried: every Oulu acquisition ran DIGMOD baseopt with DSPFIRM
+;rectangle, in which Bruker documents that "16 times more data points
+;are internally processed" and that for larger TD the DRU's memory
+;may be the limiting factor -- 16 x 262144 is exactly the DRU's 4M-
+;sample scan memory -- while Torino's Neo, which acquired this same
+;sequence without complaint, ran DIGMOD digital / DSPFIRM sharp.  The
+;run script therefore sets digital / sharp on every experiment
+;(v0.7.7); d11 = 1 s (1 MB/s, twice below what the rungs proved) is
+;insurance, and the script's row probe (expno 17), which tries this
+;row geometry first and shortens the row if the unit still refuses,
+;is the safety net.
+;
 ;Plain syntax only -- compiles on TopSpin 2.x through 4.x.
 ;If <Avance.incl> is missing on a very old system, comment it out:
 ;this sequence uses none of its macros.
 
 #include <Avance.incl>
 
+;acqt0=0 is Bruker's own idiom for a pulse-free acquisition (the
+;library programs cp, zgesgppe, cosyetgp and hmqcet carry the same
+;line): the FID's time origin is the start of the acquisition, there
+;being no pulse to measure it from.  It also silences rga's warning
+;"acqt0 not set in pulse program, result may be incorrect!" (Oulu,
+;2026-09-30, on v0.7.6).
+"acqt0=0"
+
 ;d1 : loop delay, keep short (e.g. 50 ms) -- there is nothing to relax
+;d11: data-transfer delay -- the row is written during it (1 s; the
+;     run script's row probe lengthens it on a console that needs
+;     more, and records the value it used)
 ;ns : MUST be 1 (one transient per row; averaging would defeat the
 ;     noise-statistics analysis)
 ;td1: number of rows = number of noise records
@@ -3732,14 +4473,15 @@ PP_TEXT = """;zgnoise2d
 1 ze
 2 d1
   go=2 ph31
-  d1 wr #0 if #0 ze
+  d11 wr #0 if #0 ze
   lo to 2 times td1
 exit
 
 ph31=0
 
-;aq per row = td/(2*swh); the run script sizes td1 so that
-;td1*(aq+2*d1) fills the requested wall-clock duration.
+;aq per row = td/(2*swh); one row spends d1 + aq + d11, which is
+;the per-row time the run script records in the clock audit; it
+;sizes td1 so that td1*(aq+d1+d11) fills the requested duration.
 """
 
 # The reference pulse program.  KEEP IDENTICAL to topspin/pp/zgref2d
@@ -3763,9 +4505,36 @@ PP_REF_TEXT = """;zgref2d
 ;session were lost while the noise block acquired normally.
 ;
 ;This sequence needs no d20 and computes nothing: one d1 per row, the
-;pulse, the acquisition, 30 ms before the row is written to disk.
+;pulse, the acquisition, then d11 while the row is written to disk.
 ;Everything else is zg2d.  The same zg2d ships with every TopSpin
 ;2.x-4.x, so this file replaces it for the references everywhere.
+;
+;d11 is the DATA-TRANSFER delay (v0.7.7; zg2d writes 30 ms after go):
+;the row is written ('wr') during it and the receiver unit hands the
+;acquired row to the workstation in that window.  It exists because
+;of Oulu (Avance III HD 500, AQS DRU-E, TopSpin 3.7.0, 2026-09-30,
+;the first live run): every pseudo-2D block there acquired its FIRST
+;262144-point row (1 MB of int32) completely and was then aborted by
+;the receiver unit 12-18 s into the SECOND row --
+;    Exception in DRUCONTR 1: Your pulse program produces too much
+;    data for the LAN capacity. ->Experiment aborted by DRU1!
+;-- while the 64 kB 1D rungs of the same session passed, and TopSpin
+;left the full-size ser it pre-allocates, one real row and zeros.
+;What the evidence says: the abort came mid-row, not at the wr, and
+;this sequence already had 2 s (d1) between its rows, so the write
+;window is the WEAKEST explanation.  The leading one is the
+;acquisition mode the operator's parameter set carried: every Oulu
+;acquisition ran DIGMOD baseopt with DSPFIRM rectangle, in which
+;Bruker documents that "16 times more data points are internally
+;processed" and that for larger TD the DRU's memory may be the
+;limiting factor -- 16 x 262144 is exactly the DRU's 4M-sample scan
+;memory -- while Torino's Neo, which acquired 262144-point rows of
+;the sibling zgnoise2d without complaint, ran DIGMOD digital /
+;DSPFIRM sharp.  The run script therefore sets digital / sharp on
+;every experiment (v0.7.7); d11 = 1 s (1 MB/s, twice below what the
+;rungs proved) is insurance, and the script's row probe (expno 17),
+;which tries the default row geometry first and shortens the row if
+;the unit still refuses, is the safety net.
 ;
 ;Plain syntax only -- compiles on TopSpin 2.x through 4.x.
 ;If <Avance.incl> is missing on a very old system, comment it out:
@@ -3780,6 +4549,9 @@ PP_REF_TEXT = """;zgref2d
 ;     the calibrated 90-degree length: a ~1 degree tip.
 ;p1 : f1 channel - the small-flip pulse (see pl1)
 ;d1 : relaxation delay; 1-5 * T1 (the run script uses 2 s)
+;d11: data-transfer delay -- the row is written during it (1 s; the
+;     run script's row probe lengthens it on a console that needs
+;     more, and records the value it used)
 ;ns : 1 -- one transient per row, set by the run script.  ph1/ph31
 ;     are therefore single steps: zg2d's 8-step cycle would only
 ;     ever reach its first entry.
@@ -3790,14 +4562,14 @@ PP_REF_TEXT = """;zgref2d
 2 d1
   p1 ph1
   go=2 ph31
-  30m wr #0 if #0 ze
+  d11 wr #0 if #0 ze
   lo to 2 times td1
 exit
 
 ph1=0
 ph31=0
 
-;aq per row = td/(2*swh); one row spends d1 + p1 + aq + 30m (plus the
+;aq per row = td/(2*swh); one row spends d1 + p1 + aq + d11 (plus the
 ;receiver's DE), which is the per-row time the run script records in
 ;the clock audit and the report re-derives from this text.
 """
@@ -3939,8 +4711,9 @@ def main():
         "This will:\n"
         "  * ask you ~6 questions about your facility and sample\n"
         "  * tune/shim, calibrate the 1H 90-degree pulse\n"
-        "  * record an RG ladder, two small-flip references, and a long\n"
-        "    pulse-free noise block (default ~45 min total)\n"
+        "  * record an RG ladder, a short row probe, two small-flip\n"
+        "    references, and a long pulse-free noise block (default\n"
+        "    ~45 min total)\n"
         "  * write meta.json and pack everything into one zip for upload\n\n"
         "Before continuing:\n"
         "  * a 5 mm tube of water is in the magnet\n"
@@ -4278,7 +5051,7 @@ def main():
     clear_raw_data(setup_dir)
     make_1d()
     putpar("PULPROG", "zg")
-    set_common_acq(o1_hz, TD_LADDER, SWH_HZ, 1, D1_REF_S)
+    set_common_acq(o1_hz, TD_LADDER, SWH_HZ, 1, D1_REF_S, D11_TRANSFER_S)
 
     # Dataset-dialect probe, while the operator is certainly at the
     # console (the hardware-check dialogs were just answered; tune/shim
@@ -4419,7 +5192,7 @@ def main():
         cd = open_expno(template, dsname, expno)
         make_1d()                # inherited from the setup expno; verifies
         putpar("PULPROG", "zg")
-        set_common_acq(o1_hz, TD_LADDER, SWH_HZ, 1, D1_REF_S)
+        set_common_acq(o1_hz, TD_LADDER, SWH_HZ, 1, D1_REF_S, D11_TRANSFER_S)
         set_small_flip(p90_us, p90_db, db_par)
         rung = ladder_rgs[i]
         if rung is None:
@@ -4434,7 +5207,7 @@ def main():
         ocxo_s = ocxo_expected_s(TD_LADDER, SWH_HZ, 1, 1, D1_REF_S, 1, 0.0)
         cb = clock_block_begin(expno, "rg_ladder", ocxo_s)
         run_zg_and_wait(ds_path(cd), "RG ladder rung %d (RG=%s)"
-                        % (i + 1, rung), ocxo_s)
+                        % (i + 1, rung), ocxo_s, 1, 1)   # attended stage
         clock_block_end(cb)
         record_experiment(meta, expno, "rg_ladder", t0, now_local(), 1)
         meta["calibration"]["rg_ladder"].append(
@@ -4443,11 +5216,22 @@ def main():
     if max_rg is None:
         max_rg = 64.0
 
+    # ---------------------------------------------------------------- 8b
+    # Row probe (v0.7.7), attended: which row length / transfer delay
+    # this console's receiver unit accepts -- decided by the data content
+    # of a short pseudo-2D's last row, not by the file it leaves.  The
+    # result (td_row, d11_s) is the row geometry of every pseudo-2D block
+    # below and of the sweep; block durations are kept whatever the row.
+    td_row, d11_s = run_row_probe(meta, template, dsname, o1_hz)
+    aq_row = aq_row_s(td_row)
+    ref_rows = ref_rows_for(td_row, d11_s)
+
     # ---------------------------------------------------------------- 9
-    # Reference (open): pseudo-2D small-flip, 8 rows x ~19 s, moderate RG.
-    aq_row = TD_ROW / (2.0 * SWH_HZ)
+    # Reference (open): pseudo-2D small-flip, ~170 s of rows (8 x ~19 s at
+    # the default geometry), moderate RG.  Still attended in the sense of
+    # run_zg_and_wait: a missing raw-data file asks the operator here.
     say("expno %d: reference_open (%d rows x %.0f s)"
-        % (EXP_REF_OPEN, REF_ROWS, aq_row))
+        % (EXP_REF_OPEN, ref_rows, aq_row))
     moderate_rg = max_rg / 4.0
     if moderate_rg < 1.0:
         moderate_rg = 1.0
@@ -4458,19 +5242,19 @@ def main():
     # this script never sets -- negative, so the console refused to
     # compile it (Torino, 2026-09-25).  The rows are stored serially
     # exactly like the noise block.
-    make_2d(REF_ROWS)             # already 2D: verifies F1 TD only
-    set_common_acq(o1_hz, TD_ROW, SWH_HZ, 1, D1_REF_S)
+    make_2d(ref_rows)             # already 2D: verifies F1 TD only
+    set_common_acq(o1_hz, td_row, SWH_HZ, 1, D1_REF_S, d11_s)
     set_small_flip(p90_us, p90_db, db_par)
     set_rg(moderate_rg)
-    clear_raw_data(ds_path(cd))
-    t0 = now_local()
-    ocxo_s = ocxo_expected_s(TD_ROW, SWH_HZ, 1, REF_ROWS, D1_REF_S, 1,
-                             REF_ROW_FIXED_S)
-    cb = clock_block_begin(EXP_REF_OPEN, "reference_open", ocxo_s)
-    run_zg_and_wait(ds_path(cd), "reference_open", ocxo_s)
-    clock_block_end(cb)
+    t0, cb, first, last = acquire_block(
+        EXP_REF_OPEN, "reference_open", "reference_open", ds_path(cd),
+        td_row, ref_rows, D1_REF_S, d11_s, 1)
     record_experiment(meta, EXP_REF_OPEN, "reference_open",
-                      t0, now_local(), REF_ROWS)
+                      t0, now_local(), ref_rows)
+    warn_block_without_data(
+        note_block_data(EXP_REF_OPEN, "reference_open", td_row, d11_s,
+                        ref_rows, first, last, block_wall_s(cb)),
+        "reference_open")
 
     # ---------------------------------------------------------------- 10
     # Noise phase.  Default: one long pulse-free block (expno 12).
@@ -4481,31 +5265,31 @@ def main():
     if SWEEP:
         swept = run_field_sweep(
             meta, template, dsname, o1_hz, p90_us, p90_db, db_par,
-            noise_secs, max_rg, bf1, AUTOSTEP)
+            noise_secs, max_rg, bf1, AUTOSTEP, td_row, d11_s)
     if swept is not None:
         sweep_verify_expnos, noise_expnos = swept
     else:
         # Noise block: zgnoise2d, NO pulse, NS=1/row, RG = max stable,
-        # rows sized to the requested duration.
-        row_secs = aq_row + 2.0 * D1_NOISE_S + ROW_OVERHEAD_S
-        n_rows = int(noise_secs / row_secs)
-        if n_rows < 4:
-            n_rows = 4
+        # rows sized to the requested duration at the probed row geometry.
+        row_secs = noise_row_secs(td_row, d11_s)
+        n_rows = noise_rows_for(noise_secs, td_row, d11_s)
         say("expno %d: NOISE block, %d rows x %.0f s (~%.0f min)"
             % (EXP_NOISE, n_rows, row_secs, n_rows * row_secs / 60.0))
         ensure_template_dim(template, dsname, 2)   # WR() copies 2D
         cd = open_expno(template, dsname, EXP_NOISE)
         putpar("PULPROG", PP_NAME)
         make_2d(n_rows)
-        set_common_acq(o1_hz, TD_ROW, SWH_HZ, 1, D1_NOISE_S)
+        set_common_acq(o1_hz, td_row, SWH_HZ, 1, D1_NOISE_S, d11_s)
         # RG for the noise block: rga on this (pulse-free) experiment finds
         # the maximum stable gain, then it stays FIXED for the whole block.
+        # (zgnoise2d carries "acqt0=0" since v0.7.7 -- Bruker's idiom for a
+        # pulse-free acquisition -- so rga no longer warns 'acqt0 not set
+        # in pulse program' as it did, harmlessly, at Oulu on v0.7.6, where
+        # it returned 203; see docs/TROUBLESHOOTING.md.)
         noise_rg = run_rga()
         if noise_rg is None:
             noise_rg = max_rg
         set_rg(noise_rg)
-        clear_raw_data(ds_path(cd))
-        t0 = now_local()
         # NON-modal by design: a blocking dialog here stranded overnight
         # sessions when the operator walked away after the last question
         # (the ladder + references run ~15 min in between).  Auto-start
@@ -4515,7 +5299,7 @@ def main():
             tail = ("NOTE: this console needs '1 td' typed by hand; the "
                     "closing reference AFTER this block will ask for it "
                     "again (rows = %d). The noise data is safe on disk "
-                    "meanwhile" % REF_ROWS)
+                    "meanwhile" % ref_rows)
         elif param_api_needs_operator():
             tail = ("NOTE: your help was needed once at the start; later "
                     "datasets are handled automatically -- no further step "
@@ -4527,13 +5311,13 @@ def main():
             SLEEP(30)
         except CATCHABLE:
             pass
-        # zgnoise2d spends TWO d1 delays per row (before go, before wr)
-        # and no fixed delay.
-        ocxo_s = ocxo_expected_s(TD_ROW, SWH_HZ, 1, n_rows, D1_NOISE_S, 2, 0.0)
-        cb = clock_block_begin(EXP_NOISE, "noise", ocxo_s)
-        run_zg_and_wait(ds_path(cd), "noise block (%d rows)" % n_rows, ocxo_s)
-        clock_block_end(cb)
-        record_experiment(meta, EXP_NOISE, "noise", t0, now_local(), n_rows)
+        # zg, the data-content check of the first and last row, ONE retry
+        # with the next row setting if the last row came back empty, then
+        # a WARNING -- unattended: never a dialog from here on.
+        acquire_noise_block(meta, EXP_NOISE, "noise",
+                            "noise block (%d rows)" % n_rows, ds_path(cd),
+                            o1_hz, noise_secs, td_row, d11_s, n_rows,
+                            noise_rg)
 
         noise_expnos = [EXP_NOISE]
 
@@ -4543,19 +5327,21 @@ def main():
     ensure_template_dim(template, dsname, 2)   # after a sweep the current
     cd = open_expno(template, dsname, EXP_REF_CLOSE)   # dataset is a 1D
     putpar("PULPROG", PP_REF_NAME)
-    make_2d(REF_ROWS)
-    set_common_acq(o1_hz, TD_ROW, SWH_HZ, 1, D1_REF_S)
+    make_2d(ref_rows)
+    set_common_acq(o1_hz, td_row, SWH_HZ, 1, D1_REF_S, d11_s)
     set_small_flip(p90_us, p90_db, db_par)
     set_rg(moderate_rg)
-    clear_raw_data(ds_path(cd))
-    t0 = now_local()
-    ocxo_s = ocxo_expected_s(TD_ROW, SWH_HZ, 1, REF_ROWS, D1_REF_S, 1,
-                             REF_ROW_FIXED_S)
-    cb = clock_block_begin(EXP_REF_CLOSE, "reference_close", ocxo_s)
-    run_zg_and_wait(ds_path(cd), "reference_close", ocxo_s)
-    clock_block_end(cb)
+    # Unattended (attended=0): a missing file or an empty last row is a
+    # WARNING and a meta record, never a dialog.
+    t0, cb, first, last = acquire_block(
+        EXP_REF_CLOSE, "reference_close", "reference_close", ds_path(cd),
+        td_row, ref_rows, D1_REF_S, d11_s, 0)
     record_experiment(meta, EXP_REF_CLOSE, "reference_close",
-                      t0, now_local(), REF_ROWS)
+                      t0, now_local(), ref_rows)
+    warn_block_without_data(
+        note_block_data(EXP_REF_CLOSE, "reference_close", td_row, d11_s,
+                        ref_rows, first, last, block_wall_s(cb)),
+        "reference_close")
 
     # ---------------------------------------------------------------- 12
     # Final operator notes.
@@ -4582,8 +5368,8 @@ def main():
         os.makedirs(data_stage)
 
     all_expnos = [EXP_SETUP] + EXP_LADDER + rdopt_expnos \
-        + [EXP_REF_OPEN] + noise_expnos + sweep_verify_expnos \
-        + [EXP_REF_CLOSE]
+        + [EXP_ROW_PROBE, EXP_REF_OPEN] + noise_expnos \
+        + sweep_verify_expnos + [EXP_REF_CLOSE]
     for expno in all_expnos:
         src = os.path.join(name_dir, str(expno))
         if os.path.isdir(src):

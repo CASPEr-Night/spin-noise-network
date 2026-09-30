@@ -35,7 +35,12 @@ matplotlib):
   1. Bundle validation via the uploader's own selftest validator.
   2. Run-mode gate: simulate/desktest bundles get a clearly marked
      SOFTWARE-TEST report and NO science numbers (protects against test
-     data masquerading as results). synthetic-injection bundles run the
+     data masquerading as results) -- but, since 0.7.7, the same raw-data
+     CONTENT check as live data (report.json raw_data_check: rows that
+     are all zeros dropped and counted, a file without a data row
+     EXCLUDED, each a FAIL naming the expno), because the mocked
+     acquisitions leave real-size files and the harness models Oulu's
+     refusing receiver unit. synthetic-injection bundles run the
      full science pipeline but are watermarked as validation, not data.
   3. Noise block: per-row Welch PSDs (Hann, 50% overlap, power co-added --
      never amplitude), spike replacement outside the protected line region,
@@ -559,6 +564,15 @@ class Bundle(object):
         # refuses the dataset as it did at Torino. qa_flags turns
         # each entry into a WARN; the reader itself keeps reading the rows
         # that are present, as before (the numbers do not change).
+        # Since 0.7.7 a row that is ALL ZEROS is not a row: TopSpin 3.x
+        # pre-allocates the whole ser when zg starts, so a block the
+        # receiver unit refused (Oulu, Avance III HD 500, 2026-09-30:
+        # "too much data for the LAN capacity") leaves a file of the
+        # declared size holding one acquired row and zeros -- the 0.7.6
+        # report co-added 88 zero rows of Oulu's noise block as data.
+        # Such rows are counted (read_log n_rows_zero, the entry here
+        # carries zero_rows) and never yielded; a block with no data row
+        # at all is refused.
         self.rows_declared_vs_read = {}
         self._procpar_cache = {}
 
@@ -813,6 +827,7 @@ class Bundle(object):
         row_bytes = td * dt.itemsize
         padded = int(math.ceil(row_bytes / 1024.0)) * 1024
         count = 0
+        zero_rows = 0
         n_pts = None
         note = None
         if is_ser and n_rows > 1:
@@ -826,55 +841,108 @@ class Bundle(object):
                         break
                     if stride > row_bytes:
                         fh.read(stride - row_bytes)      # block padding
-                    v = np.frombuffer(chunk, dtype=dt).astype(np.float64)
+                    v = np.frombuffer(chunk, dtype=dt)
+                    if not np.any(v):
+                        zero_rows += 1           # never acquired: skipped
+                        continue
+                    v = v.astype(np.float64)
                     count += 1
                     row = v[0::2] + 1j * v[1::2]
                     n_pts = int(row.size)
                     yield row
             finally:
                 fh.close()
-            if count and count < n_rows:
-                note = self._rows_short_note(expno, n_rows, count, "ser")
+            if count and (count < n_rows or zero_rows):
+                note = self._rows_short_note(expno, n_rows, count, "ser",
+                                             zero_rows)
         else:
             raw = self.read(path)
-            v = np.frombuffer(raw[:row_bytes], dtype=dt).astype(np.float64)
+            v = np.frombuffer(raw[:row_bytes], dtype=dt)
             if v.size < td:
-                v = np.frombuffer(raw, dtype=dt).astype(np.float64)
-            count = 1
-            row = v[0::2] + 1j * v[1::2]
-            n_pts = int(row.size)
-            yield row
-            if n_rows > 1 and not is_ser:
-                note = self._rows_short_note(expno, n_rows, 1, "fid")
+                v = np.frombuffer(raw, dtype=dt)
+            if not np.any(v):
+                zero_rows = 1
+            else:
+                v = v.astype(np.float64)
+                count = 1
+                row = v[0::2] + 1j * v[1::2]
+                n_pts = int(row.size)
+                yield row
+                if n_rows > 1 and not is_ser:
+                    note = self._rows_short_note(expno, n_rows, 1, "fid")
         if not count:
-            self._refuse(expno, "ser shorter than one TD=%d row" % td)
+            if zero_rows:
+                self._refuse(expno, self._all_zeros_reason(
+                    expno, zero_rows, "ser" if is_ser else "fid"))
+            else:
+                self._refuse(expno, "ser shorter than one TD=%d row" % td)
             return
         entry = {
             "format": "bruker", "dtype": str(dt),
             "n_rows": int(count), "n_points_complex": int(n_pts),
             "dc_offset_subtracted": False}
+        if zero_rows:
+            entry["n_rows_zero"] = int(zero_rows)
         if note:
             entry["note"] = note
         self.read_log[int(expno)] = entry
 
-    def _rows_short_note(self, expno, declared, read, data_file):
+    def _rows_short_note(self, expno, declared, read, data_file,
+                         zero_rows=0):
         """Record (rows_declared_vs_read) and word the read_log note for a
-        pseudo-2D expno whose data file holds fewer rows than meta.json's
-        td1_rows: a ser that stopped early, or a plain 1D fid where a
-        pseudo-2D block was declared (a console that lost the script's
-        parameter writes acquires the inherited 1D experiment -- a 2D
-        dataset without acqu2 on TopSpin 3.7.0 at Oulu, 2026-09-25, and
-        on 4.4.0 at Torino, 2026-09-22). The rows present are read as
-        before; qa_flags raises the WARN."""
-        self.rows_declared_vs_read[int(expno)] = {
-            "declared": int(declared), "read": int(read), "file": data_file}
+        pseudo-2D expno whose data file holds fewer DATA rows than
+        meta.json's td1_rows: a ser that stopped early, a plain 1D fid
+        where a pseudo-2D block was declared (a console that lost the
+        script's parameter writes acquires the inherited 1D experiment --
+        a 2D dataset without acqu2 on TopSpin 3.7.0 at Oulu, 2026-09-25,
+        and on 4.4.0 at Torino, 2026-09-22), or -- since 0.7.7 -- a ser of
+        the declared size whose later rows are all zeros: TopSpin 3.x
+        pre-allocates the file when zg starts and a block the receiver
+        unit refused never fills it (Oulu, 2026-09-30, "too much data for
+        the LAN capacity": first row acquired, rows 2..N zeros, in all
+        three pseudo-2D blocks). The rows with data are read as before;
+        qa_flags raises the WARN (and, for zero rows, the FAIL)."""
+        rec = {"declared": int(declared), "read": int(read),
+               "file": data_file}
+        if zero_rows:
+            rec["zero_rows"] = int(zero_rows)
+        self.rows_declared_vs_read[int(expno)] = rec
         if data_file == "fid":
             return ("a 1D fid (1 row) was found where meta.json declares %d "
                     "rows (td1_rows): the block was not acquired as the "
                     "pseudo-2D it declares; the one row was read" % declared)
+        if zero_rows:
+            return ("ser holds %d of the %d rows meta.json declares as data; "
+                    "%d row(s) are all zeros (never acquired: TopSpin 3.x "
+                    "pre-allocates the file and a block the receiver unit "
+                    "refused never fills it) and were skipped; the %d row(s) "
+                    "with data were read" % (read, declared, zero_rows, read))
         return ("ser holds %d of the %d rows meta.json declares "
                 "(acquisition stopped early); the rows present "
                 "were read" % (read, declared))
+
+    def _all_zeros_reason(self, expno, zero_rows, data_file):
+        """Refusal text for a raw-data file whose every row is zeros."""
+        status = self._acqu2s_rows_text(expno)
+        return ("%s holds only zeros in all %d row(s): nothing was acquired "
+                "-- TopSpin 3.x pre-allocates the file when zg starts, and a "
+                "block the receiver unit refused ('Your pulse program "
+                "produces too much data for the LAN capacity', Avance III HD "
+                "DRU, Oulu 2026-09-30) leaves it so%s"
+                % (data_file, zero_rows, status))
+
+    def _acqu2s_rows_text(self, expno):
+        """'; the status file acqu2s says TD=<n> row(s) were acquired' when
+        the expno carries one (Oulu's refused blocks: acqu2s TD 1 under a
+        meta td1_rows of 8 / 89 / 8), else ''."""
+        try:
+            n = self.acqu2s(expno).get("TD")
+            if n not in (None, ""):
+                return ("; the status file acqu2s says TD=%s row(s) were "
+                        "acquired" % n)
+        except Exception:
+            pass
+        return ""
 
     def _read_rows_bruker(self, expno, exp_meta):
         acq = self.acqus(expno)
@@ -908,25 +976,39 @@ class Bundle(object):
         row_bytes = td * dt.itemsize
         padded = int(math.ceil(row_bytes / 1024.0)) * 1024
         rows = []
+        zero_rows = 0
         if is_ser and n_rows > 1:
             stride = ser_row_stride(len(raw), n_rows, row_bytes, padded)
             for r in range(n_rows):
                 chunk = raw[r * stride: r * stride + row_bytes]
                 if len(chunk) < row_bytes:
                     break
-                v = np.frombuffer(chunk, dtype=dt).astype(np.float64)
+                v = np.frombuffer(chunk, dtype=dt)
+                if not np.any(v):
+                    zero_rows += 1               # never acquired: skipped
+                    continue
+                v = v.astype(np.float64)
                 rows.append(v[0::2] + 1j * v[1::2])
         else:
-            v = np.frombuffer(raw[:row_bytes], dtype=dt).astype(np.float64)
+            v = np.frombuffer(raw[:row_bytes], dtype=dt)
             if v.size < td:
-                v = np.frombuffer(raw, dtype=dt).astype(np.float64)
-            rows.append(v[0::2] + 1j * v[1::2])
+                v = np.frombuffer(raw, dtype=dt)
+            if not np.any(v):
+                zero_rows = 1
+            else:
+                v = v.astype(np.float64)
+                rows.append(v[0::2] + 1j * v[1::2])
         if not rows:
-            self._refuse(expno, "ser shorter than one TD=%d row" % td)
+            if zero_rows:
+                self._refuse(expno, self._all_zeros_reason(
+                    expno, zero_rows, "ser" if is_ser else "fid"))
+            else:
+                self._refuse(expno, "ser shorter than one TD=%d row" % td)
             return None, acq
         note = None
-        if is_ser and n_rows > 1 and len(rows) < n_rows:
-            note = self._rows_short_note(expno, n_rows, len(rows), "ser")
+        if is_ser and n_rows > 1 and (len(rows) < n_rows or zero_rows):
+            note = self._rows_short_note(expno, n_rows, len(rows), "ser",
+                                         zero_rows)
         elif not is_ser and n_rows > 1:
             note = self._rows_short_note(expno, n_rows, 1, "fid")
         rows = np.array(rows)
@@ -934,6 +1016,8 @@ class Bundle(object):
             "format": "bruker", "dtype": str(dt),
             "n_rows": int(rows.shape[0]), "n_points_complex": int(rows.shape[1]),
             "dc_offset_subtracted": False}
+        if zero_rows:
+            entry["n_rows_zero"] = int(zero_rows)
         if note:
             entry["note"] = note
         self.read_log[int(expno)] = entry
@@ -5140,6 +5224,207 @@ def parse_local(s):
         return None
 
 
+def _raw_data_refusal_flags(bundle, meta, add):
+    """raw-data refusals: an experiment whose layout nothing declares --
+    or whose file holds no data row (0.7.7) -- is excluded, never
+    guessed, and the exclusion is a FAIL naming the expno, not silence.
+    Shared by qa_flags (science) and the software-test raw-data check."""
+    for expno in sorted(bundle.read_errors):
+        role = next((e.get("role") for e in meta.get("experiments", [])
+                     if e.get("expno") == expno), "?")
+        add("FAIL", "raw data expno %d (%s)" % (expno, role),
+            "EXCLUDED from every analysis: %s" % bundle.read_errors[expno])
+
+
+def _raw_data_rows_flags(bundle, meta, add):
+    """'rows declared vs read' (0.7.5) and 'raw data all zeros' (0.7.7)
+    from what the reader recorded (read_log, rows_declared_vs_read).
+    Shared by qa_flags (science) and the software-test raw-data check."""
+    # Rows declared vs read (0.7.5). meta.json's td1_rows is the row count
+    # the script WROTE (and, where the console allowed, read back); the
+    # data file holds what the console ACQUIRED. Oulu (TopSpin 3.7.0,
+    # 2026-09-25): every parameter write into a 2D dataset without acqu2
+    # was lost silently, so a live run there would have produced a 1D
+    # fid -- or a ser of the wrong length -- under a meta.json declaring
+    # 89 rows; Torino's live run (TopSpin 4.4.0, 2026-09-22) lost the
+    # writes the same way and zg then refused the datasets, leaving NO
+    # raw data behind td1_rows 8/89/8 (an expno without a data file is
+    # the reader's FAIL above, not a row mismatch). Nothing in the script
+    # can see that after the fact; the bundle can. Every noise/reference
+    # expno the reader accepted is compared (a refused one is already a
+    # FAIL above); an Agilent fid whose block count disagrees lands in the
+    # same family.
+    row_roles = ("reference_open", "reference_close", "noise", "noise_sweep",
+                 "row_probe")
+    compared = 0
+    mismatched = 0
+    for exp in meta.get("experiments", []):
+        if exp.get("role") not in row_roles:
+            continue
+        expno = exp.get("expno")
+        declared = exp.get("td1_rows")
+        entry = bundle.read_log.get(expno)
+        if declared is None or entry is None or expno in bundle.read_errors:
+            continue
+        got = entry.get("n_rows")
+        try:
+            declared = int(declared)
+        except (TypeError, ValueError):
+            continue
+        compared += 1          # only an expno actually compared counts
+        if got == declared:
+            continue
+        mismatched += 1
+        short = bundle.rows_declared_vs_read.get(expno) or {}
+        if short.get("file") == "fid":
+            what = ("a 1D fid (1 row) was found -- the block was not "
+                    "acquired as the pseudo-2D it declares (a console that "
+                    "loses parameter writes acquires the inherited 1D "
+                    "experiment, or refuses zg outright: a 2D dataset "
+                    "without acqu2 on TopSpin 3.7.0 at Oulu, 2026-09-25, "
+                    "and 4.4.0 at Torino, 2026-09-22)")
+        elif short.get("file") == "ser" and short.get("zero_rows"):
+            what = ("the ser is full-size but %d of its rows are all zeros "
+                    "-- never acquired: TopSpin 3.x pre-allocates the file "
+                    "when zg starts, and a block the receiver unit refused "
+                    "('too much data for the LAN capacity', Avance III HD "
+                    "DRU, Oulu 2026-09-30) leaves zeros where its rows never "
+                    "came; the %d row(s) with data were analysed"
+                    % (short["zero_rows"], got))
+        elif short.get("file") == "ser":
+            what = ("ser holds %d row(s) (acquisition stopped early); the "
+                    "rows present were analysed" % got)
+        else:
+            what = "%s row(s) were read" % got
+        add("WARN", "rows declared vs read",
+            "meta.json declares %d rows for expno %d (%s), %s"
+            % (declared, expno, exp.get("role"), what))
+    if compared and not mismatched:
+        add("OK", "rows declared vs read",
+            "every noise/reference expno's data file holds the rows "
+            "meta.json declares (%d expno(s) compared)" % compared)
+    # Raw data all zeros (0.7.7): a row of zeros is no row.  TopSpin 3.x
+    # pre-allocates the whole ser when zg starts; when the receiver unit
+    # refuses the block -- Oulu, Avance III HD 500, AQS DRU-E, TopSpin
+    # 3.7.0, 2026-09-30: "Exception in DRUCONTR 1: Your pulse program
+    # produces too much data for the LAN capacity. ->Experiment aborted by
+    # DRU1!" -- the file of the right size stays, its first row acquired
+    # (the abort came 12-18 s into the second) and every later row zeros.
+    # The 0.7.6 script took the file for an acquisition and the 0.7.6
+    # report co-added the zeros as data.  Here every such block is a
+    # FAIL naming it: the rows with data were analysed on their own, and
+    # a block without a single data row is refused above (EXCLUDED).
+    for exp in meta.get("experiments", []):
+        expno = exp.get("expno")
+        entry = bundle.read_log.get(expno) or {}
+        nz = int(entry.get("n_rows_zero") or 0)
+        if not nz:
+            continue
+        add("FAIL", "raw data all zeros",
+            "expno %d (%s): %d of %d row(s) in the ser hold only zeros -- "
+            "never acquired (the receiver unit refused the block after its "
+            "first row: TopSpin 3.x pre-allocates the full ser, Oulu "
+            "2026-09-30); the %d row(s) with data were analysed as the "
+            "block, so every number from it rests on %d row(s), not the "
+            "%s meta.json declares%s"
+            % (expno, exp.get("role"), nz, nz + int(entry.get("n_rows") or 0),
+               int(entry.get("n_rows") or 0), int(entry.get("n_rows") or 0),
+               exp.get("td1_rows"), bundle._acqu2s_rows_text(expno)))
+
+
+def _row_probe_flags(meta, sw, add):
+    """The acquisition script's own account (0.7.7): the row probe and the
+    data-content check of every pseudo-2D block, from meta.json.  Shared
+    by qa_flags (science) and the software-test raw-data check."""
+    # The acquisition script's own account (0.7.7): the row probe and the
+    # data-content check of every pseudo-2D block, from meta.json -- what
+    # the console said at the time, beside what the files say above.
+    rp = (meta.get("calibration") or {}).get("row_probe")
+    if isinstance(rp, dict):
+        att = rp.get("attempts") or []
+        geom = "TD %s, d11 %s s" % (rp.get("td_row"), rp.get("transfer_delay_s"))
+        if rp.get("passed") and rp.get("attempt_passed") == 1:
+            add("OK", "row probe (acquisition script)",
+                "the console's receiver unit accepted the default row "
+                "geometry at the first attempt (%s); %d attempt(s) recorded"
+                % (geom, len(att)))
+        elif rp.get("passed"):
+            add("WARN", "row probe (acquisition script)",
+                "the receiver unit refused the default row geometry; attempt "
+                "%s of %d passed and the session's pseudo-2D blocks used %s "
+                "(rows resized to keep the block durations) -- a "
+                "console-specific row length, recorded, not a fault"
+                % (rp.get("attempt_passed"), len(att), geom))
+        else:
+            add("FAIL", "row probe (acquisition script)",
+                "none of the %d row settings tried came back with data in "
+                "its last row; the session continued with %s so the bundle "
+                "exists -- expect every pseudo-2D block below to be refused"
+                % (len(att), geom))
+        bwd = (sw.get("param_api") or {}).get("blocks_without_data") \
+            if isinstance(sw.get("param_api"), dict) else None
+        if bwd:
+            add("FAIL", "blocks without data (acquisition script)",
+                "the script found no data in the LAST row of expno(s) %s "
+                "right after zg (calibration.row_probe.blocks has the "
+                "details; %d noise-block retry/retries recorded) -- these "
+                "blocks were not acquired whatever their ser size says"
+                % (bwd, len(rp.get("block_retries") or [])))
+        elif rp.get("blocks"):
+            add("OK", "blocks without data (acquisition script)",
+                "the script found data in the first and last row of every "
+                "pseudo-2D block right after zg (%d block(s))"
+                % len(rp.get("blocks")))
+
+
+def software_test_raw_data_check(bundle, meta):
+    """The raw-data CONTENT check of a software-test (simulate / desktest)
+    bundle -- plumbing, like the clock audit, not science: nothing here
+    is a measurement, and the science gate stays shut.  Every experiment's
+    data file is streamed through the reader the science report uses
+    (iter_rows: a row that is all zeros is dropped and counted, a file
+    without a data row is refused) and the same QA families are raised
+    -- the EXCLUDED FAIL naming the expno, 'rows declared vs read', 'raw
+    data all zeros' -- plus the acquisition script's own row-probe
+    account.  WHY: since 0.7.7 the mocked acquisitions leave real-size
+    raw-data files and the Jython harness models a receiver unit that
+    refuses pseudo-2D blocks the way Oulu's did (2026-09-30: first row
+    acquired, the rest zeros, in a full-size ser); the harness must be
+    able to see in report.json that the report names every refused
+    block.  Before this the software-test report carried no QA at all,
+    so a desktest bundle of Oulu's shape passed unremarked."""
+    for exp in meta.get("experiments", []):
+        expno = exp.get("expno")
+        if not isinstance(expno, int) or exp.get("role") == "setup":
+            continue        # the setup expno is tune/shim/pulsecal, never a zg
+        try:
+            for _row in bundle.iter_rows(expno, exp):
+                pass
+        except Exception as exc:
+            # a reader crash is a refusal to record, never a lost report
+            bundle._refuse(expno, "unreadable: %s" % exc)
+    flags = []
+
+    def add(level, name, detail):
+        flags.append({"level": level, "check": name, "detail": detail})
+
+    _raw_data_refusal_flags(bundle, meta, add)
+    _raw_data_rows_flags(bundle, meta, add)
+    _row_probe_flags(meta, meta.get("software", {}), add)
+    return {
+        "qa_flags": flags,
+        "raw_data_read": {
+            "by_expno": {str(k): v for k, v in sorted(bundle.read_log.items())},
+            "refused": {str(k): v for k, v in
+                        sorted(bundle.read_errors.items())}},
+        "note": ("Raw-data CONTENT of a software-test bundle: what the "
+                 "mocked acquisitions (or a console under desktest) left "
+                 "in the data files, read by the same reader as live "
+                 "data -- rows that are all zeros are dropped and "
+                 "counted, a file without a data row is EXCLUDED. "
+                 "Plumbing, like the clock audit; not a measurement.")}
+
+
 def qa_flags(bundle, meta, noise_res, validation_msgs):
     env = meta.get("environment", {})
     sw = meta.get("software", {})
@@ -5200,13 +5485,7 @@ def qa_flags(bundle, meta, noise_res, validation_msgs):
                 "max |sample| = %.3g (%.2g%% of %s full scale)"
                 % (st["max_abs"], 100 * st["fullscale_fraction"],
                    st["dtype"]))
-    # raw-data refusals: an experiment whose layout nothing declares is
-    # excluded, never guessed -- and the exclusion is a FAIL, not silence
-    for expno in sorted(bundle.read_errors):
-        role = next((e.get("role") for e in meta.get("experiments", [])
-                     if e.get("expno") == expno), "?")
-        add("FAIL", "raw data expno %d (%s)" % (expno, role),
-            "EXCLUDED from every analysis: %s" % bundle.read_errors[expno])
+    _raw_data_refusal_flags(bundle, meta, add)
     # spikes
     if noise_res:
         spikes = [r.get("n_spikes", 0) for r in noise_res.get("per_row", [])]
@@ -5320,60 +5599,8 @@ def qa_flags(bundle, meta, noise_res, validation_msgs):
                     "created by the console itself (the operator's parmode) "
                     "or inherited from a 2D template -- the script never "
                     "needed to copy one%s" % fn_note)
-    # Rows declared vs read (0.7.5). meta.json's td1_rows is the row count
-    # the script WROTE (and, where the console allowed, read back); the
-    # data file holds what the console ACQUIRED. Oulu (TopSpin 3.7.0,
-    # 2026-09-25): every parameter write into a 2D dataset without acqu2
-    # was lost silently, so a live run there would have produced a 1D
-    # fid -- or a ser of the wrong length -- under a meta.json declaring
-    # 89 rows; Torino's live run (TopSpin 4.4.0, 2026-09-22) lost the
-    # writes the same way and zg then refused the datasets, leaving NO
-    # raw data behind td1_rows 8/89/8 (an expno without a data file is
-    # the reader's FAIL above, not a row mismatch). Nothing in the script
-    # can see that after the fact; the bundle can. Every noise/reference
-    # expno the reader accepted is compared (a refused one is already a
-    # FAIL above); an Agilent fid whose block count disagrees lands in the
-    # same family.
-    row_roles = ("reference_open", "reference_close", "noise", "noise_sweep")
-    compared = 0
-    mismatched = 0
-    for exp in meta.get("experiments", []):
-        if exp.get("role") not in row_roles:
-            continue
-        expno = exp.get("expno")
-        declared = exp.get("td1_rows")
-        entry = bundle.read_log.get(expno)
-        if declared is None or entry is None or expno in bundle.read_errors:
-            continue
-        got = entry.get("n_rows")
-        try:
-            declared = int(declared)
-        except (TypeError, ValueError):
-            continue
-        compared += 1          # only an expno actually compared counts
-        if got == declared:
-            continue
-        mismatched += 1
-        short = bundle.rows_declared_vs_read.get(expno) or {}
-        if short.get("file") == "fid":
-            what = ("a 1D fid (1 row) was found -- the block was not "
-                    "acquired as the pseudo-2D it declares (a console that "
-                    "loses parameter writes acquires the inherited 1D "
-                    "experiment, or refuses zg outright: a 2D dataset "
-                    "without acqu2 on TopSpin 3.7.0 at Oulu, 2026-09-25, "
-                    "and 4.4.0 at Torino, 2026-09-22)")
-        elif short.get("file") == "ser":
-            what = ("ser holds %d row(s) (acquisition stopped early); the "
-                    "rows present were analysed" % got)
-        else:
-            what = "%s row(s) were read" % got
-        add("WARN", "rows declared vs read",
-            "meta.json declares %d rows for expno %d (%s), %s"
-            % (declared, expno, exp.get("role"), what))
-    if compared and not mismatched:
-        add("OK", "rows declared vs read",
-            "every noise/reference expno's data file holds the rows "
-            "meta.json declares (%d expno(s) compared)" % compared)
+    _raw_data_rows_flags(bundle, meta, add)
+    _row_probe_flags(meta, sw, add)
     # validator messages that were warnings
     for m in validation_msgs:
         if m.startswith("WARN"):
@@ -5628,6 +5855,16 @@ def render_html(ctx):
           "(dialog chain, dataset bookkeeping, meta.json, zip, checksums) "
           "was exercised end to end; that is all this report certifies."
           "</p>")
+        rc = ctx.get("raw_check") or {}
+        if rc.get("qa_flags") is not None:
+            A("<h2>Raw-data content (plumbing check)</h2><div class='card'>"
+              "<p class='small'>%s</p><table><tr><th>level</th><th>check"
+              "</th><th>detail</th></tr>" % esc(rc.get("note", "")))
+            for f in rc["qa_flags"]:
+                A("<tr><td class='%s'>%s</td><td>%s</td><td>%s</td></tr>"
+                  % (esc(str(f["level"]).lower()), esc(f["level"]),
+                     esc(f["check"]), esc(f["detail"])))
+            A("</table></div>")
         # The console's parameter dialect (software.param_api) belongs on
         # the desktest page: Oulu's v0.7.4 desktest (TopSpin 3.7.0,
         # 2026-09-25) was where a console that never creates acqu2 and
@@ -6353,10 +6590,15 @@ def main(argv=None):
         report["meta_overrides"] = meta_overrides
         report["note"] = ("run_mode '%s': plumbing test, not data; science "
                           "analysis refused by design" % run_mode)
+        # Raw-data content (0.7.7): plumbing, like the clock audit -- the
+        # same reader and the same three QA families as a live bundle, so
+        # a desktest that left Oulu's shape (one data row and zeros) is
+        # named in report.json.  Kept OUT of "science", which stays None.
+        report["raw_data_check"] = software_test_raw_data_check(bundle, meta)
         ctx = {"report_type": "software-test", "meta": meta,
                "bundle_path": bundle_path, "validation_msgs": val_msgs,
                "validation_ok": val_ok, "names": sorted(bundle.names),
-               "clock": clock}
+               "clock": clock, "raw_check": report["raw_data_check"]}
         html = render_html(ctx)
         _write(out_dir, html, report)
         print("SOFTWARE-TEST report written to %s" % out_dir)

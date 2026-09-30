@@ -2,7 +2,7 @@
 
 Operational script for the remote supervised pilot: we screen-share (or
 NoMachine) into the facility's TopSpin workstation while a local colleague
-sits at the console. `topspin/spin_noise_run.py` (v0.7.6) has not yet run a
+sits at the console. `topspin/spin_noise_run.py` (v0.7.7) has not yet run a
 complete session on a real spectrometer. Its live contacts so far: two
 unsupervised desktests at Torino (TopSpin 4.4.0) — the first (2026-09-17)
 stopped on a namespace bug fixed in v0.7.2; the second (2026-09-18, v0.7.2)
@@ -14,9 +14,20 @@ run with v0.7.5 (Torino, 2026-09-25): the pulse-free noise block acquired
 (89 rows) and the report resolves the spin-noise dip, but both reference
 blocks were refused by the console — Bruker's `zg2d` paces its rows with a
 delay computed from `d20`, which the script never set, so it was negative.
-v0.7.6 replaces `zg2d` with the project's `zgref2d` (one `d1` per row, no
-computed delay); the two Oulu consoles (TopSpin 3.7.0 and 3.2) have passed
-simulate and desktest and wait for it. Tier −1 and Tier 0 are green
+v0.7.6 replaced `zg2d` with the project's `zgref2d` (one `d1` per row, no
+computed delay). Oulu's first live run with it (2026-09-30, Avance III HD
+500, AQS DRU-E, TopSpin 3.7.0) then met the receiver unit: every pseudo-2D
+block acquired its first 1 MB row and was aborted 12–18 s into the second
+(`DRUCONTR ... too much data for the LAN capacity`) while the 64 kB rungs
+passed, and TopSpin left full-size `ser` files holding one acquired row
+and zeros, which the script took for data. Every Oulu expno ran `DIGMOD`
+`baseopt` from the operator's parameter set (16x the points inside the
+DRU, per Bruker; Torino's Neo acquired the same rows in `digital`) — the
+leading explanation. v0.7.7 sets `DIGMOD` `digital` / `DSPFIRM` `sharp`
+on every experiment, writes each row during a 1 s data-transfer delay
+`d11` (insurance), adds the attended **row probe** (expno 17: the row
+comes back with data, or a shorter row is found — the safety net) and
+checks every block's content afterwards. Tier −1 and Tier 0 are green
 (`testing/tier0_desktest.md`).
 
 The pilot runs the plain default session only. The optional modes that
@@ -70,9 +81,11 @@ console. Contact for everything: John W. Blanchard, jwbquantum@gmail.com.
       — a site with two magnets is two network nodes (e.g. `uni-oulu` and
       `uni-oulu400`); one `config.json` serves both at upload time.
 - [ ] Free disk space on the data partition (default run writes roughly
-      200 MB: noise ser file ~1 MB/row × ~95 rows for 30 min, plus
-      references, ladder, and the bundle zip — still ask for ≥10 GB free
-      as headroom for reruns and longer noise blocks).
+      200 MB: noise ser file ~1 MB/row × ~85 rows for 30 min, plus
+      references, the row probe, ladder, and the bundle zip — still ask
+      for ≥10 GB free as headroom for reruns and longer noise blocks; a
+      DESKTEST rehearsal now writes about as much, its mocked raw data
+      having the real size).
 - [ ] Console generation, probe (RT / N₂ cryo / He cryo), ATM or manual
       tune/match, sample changer or manual insertion.
 - [ ] Any local Python 3 (version — uploader floor is 3.6) on the
@@ -140,14 +153,22 @@ console. Contact for everything: John W. Blanchard, jwbquantum@gmail.com.
 7. **Setup phase (expno 1, ~10 min).** Tune/match (`atma` where present,
    dialog-guided manual flow otherwise — §6), `topshim`, `pulsecal` P90.
    Sanity-check the reported P90 (~7–15 µs typical) before confirming.
+   Then the RG ladder (~30 s) and the **row probe** (expno 17, ~1 min when
+   the first attempt passes; the script has set `DIGMOD` `digital` by
+   then — `digmod` in TopSpin shows it): watch the status line for `row
+   probe: attempt N passed` and note N and the setting in the pilot log —
+   a console that needs the second attempt or a shorter row is recorded,
+   not at fault; only `WARNING: row probe -- none of the 5 settings` is a
+   stop-and-think moment (§6).
 8. **Acquisition (~45 min wall clock; operator needed only at the start).**
    Watch the expno progression per the documented plan:
 
    | expno | what you should see |
    |---|---|
    | 10, 14, 15, 16 | RG ladder: quick 1° 1Ds at RG = 1, 8, 64, max (rga) |
-   | 11 | reference_open: `zgref2d`, 1° pseudo-2D, 8 rows × ~19 s (v0.7.5 used Bruker's `zg2d`, which the console refused at Torino) |
-   | 12 | noise block: `zgnoise2d`, no pulse, NS=1/row, RG fixed at max stable, rows fill the chosen duration (~89 rows for 30 min) |
+   | 17 | row probe (v0.7.7): `zgnoise2d`, RG 1, 2 rows × ~20 s per attempt; `row probe: attempt N passed` on the status line |
+   | 11 | reference_open: `zgref2d`, 1° pseudo-2D, ~170 s of rows (8 × ~21 s at the default row; v0.7.5 used Bruker's `zg2d`, which the console refused at Torino) |
+   | 12 | noise block: `zgnoise2d`, no pulse, NS=1/row, RG fixed at max stable, rows fill the chosen duration (~85 rows for 30 min at the default row) |
    | 13 | reference_close: same as 11 |
 
    During the noise block R and L can chat/debrief — but keep the session
@@ -188,8 +209,9 @@ console. Contact for everything: John W. Blanchard, jwbquantum@gmail.com.
 | Tune/match | atma completes (or manual flow used); wobble curve sane | |
 | P90 | pulsecal value plausible for the probe (~7–15 µs at listed power) | |
 | RG ladder | RG values 1, 8, 64 accepted; rga returns a max RG without error | |
-| Reference (11) | `zgref2d` compiles (no TCube *duration is negative* dialog); FID visible on each row; water line where expected | |
-| Noise block (12) | rows accumulating at ~20 s/row; RG unchanged; no re-pulse | |
+| Row probe (17) | `row probe: attempt 1 passed` (TD 262144, d11 1.0 s) — or WHICH attempt passed and its setting; no `DRUCONTR` dialog on the passing attempt | |
+| Reference (11) | `zgref2d` compiles (no TCube *duration is negative* dialog); no `DRUCONTR` dialog; FID visible on each row; water line where expected | |
+| Noise block (12) | rows accumulating at ~21 s/row (row = aq + d1 + d11); RG unchanged; no re-pulse; no `rga: acqt0 not set` warning (v0.7.7's `zgnoise2d` defines `acqt0=0`; on v0.7.6 it was harmless) | |
 | Lock/sweep | neither re-enabled at any point (check bsmsdisp again mid-run) | |
 | Reference (13) | line position within ~Hz of expno 11 (drift check) | |
 | Bundle | zip at printed path; meta.json at zip root; run_mode "live" | |
@@ -287,6 +309,26 @@ directory of the template dataset they had open. Nothing else was written.
   Cancel the acquisition-check dialog and install v0.7.6 (`zgref2d`).
   Workaround on an older script only: `d20 21.2` in the template dataset
   before starting. `docs/TROUBLESHOOTING.md` has the arithmetic.
+- **`Exception in DRUCONTR 1: Your pulse program produces too much data
+  for the LAN capacity. ->Experiment aborted by DRU1!` at expno 11/12/13
+  (script v0.7.6 or earlier; Avance III HD, Oulu 2026-09-30):** the
+  receiver unit acquired the first 1 MB row of each block and aborted the
+  block 12–18 s into the second; the `ser` files it leaves are full-size
+  zeros with one acquired row — not data. Leading explanation: the
+  acquisition mode (`DIGMOD` `baseopt` on every Oulu expno; Torino's
+  `digital` rows acquired); the 30–50 ms write window is the weaker one.
+  Install v0.7.7 (`DIGMOD` `digital` / `DSPFIRM` `sharp` set by the
+  script, transfer delay `d11` as insurance, row probe as safety net,
+  content checks). To settle it on the old dataset, two minutes at the
+  console: expno 12 of `SPINNOISE_20260930_1201`, `1 td` → 1, `digmod` →
+  digital, `zg`; if still refused, `d1 1` and `zg` once more
+  (`docs/TROUBLESHOOTING.md`). On v0.7.7 the row probe walks its ladder
+  by itself; if it says `WARNING: row probe -- none of the 5 settings came
+  back with data`, let the session finish (it will, without dialogs),
+  send the bundle and the console's error text — `software.param_api.
+  digmod_form` and the `calibration.row_probe.attempts` list are the
+  evidence. `rga: acqt0 not set in pulse program` on the noise block was
+  a harmless v0.7.6 warning; v0.7.7's `zgnoise2d` defines `acqt0=0`.
 - **No ATM probe:** the tune/match step falls back to a dialog — L wobbles
   and tunes manually (`wobb`), then confirms in the dialog. Same for a
   missing `rga`: the script asks L to run rga / set RG manually and type

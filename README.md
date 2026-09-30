@@ -25,9 +25,10 @@ spin-noise-limited records relevant to fundamental-sensitivity and dark-matter
    directory (details: [topspin/INSTALL.md](topspin/INSTALL.md)). Open any ¹H
    dataset. One facility slug per instrument: a site with two magnets is two nodes.
 3. Type `xpy spin_noise_run`, answer the dialogs (institution, sample, run length —
-   default ~45 min), and walk away. The script runs setup → RG ladder → reference
-   blocks → no-pulse noise blocks → closing references, tags everything, and leaves a
-   single `spinnoise_<facility>_<timestamp>.zip`.
+   default ~45 min), stay one more minute for the row probe (the status line says
+   which attempt passed), and walk away. The script runs setup → RG ladder → row
+   probe → reference blocks → no-pulse noise blocks → closing references, tags
+   everything, and leaves a single `spinnoise_<facility>_<timestamp>.zip`.
 4. Send it:
    ```bash
    python3 uploader/upload_bundle.py /path/to/spinnoise_*.zip
@@ -63,10 +64,10 @@ commands mocked — runnable on a free processing-only TopSpin install
 | Path | What it is |
 |---|---|
 | `topspin/spin_noise_run.py` | Jython orchestrator, runs inside TopSpin 2.x–4.x (5.0 untested — reports welcome) |
-| `topspin/pp/zgnoise2d` | no-pulse pseudo-2D pulse program for the noise blocks |
+| `topspin/pp/zgnoise2d` | no-pulse pseudo-2D pulse program for the noise blocks (and the row probe); since v0.7.7 it defines `acqt0=0` (Bruker's pulse-free idiom) and writes each row during a data-transfer delay `d11`, and the script acquires it in `DIGMOD` `digital` — Oulu's Avance III HD, in `baseopt`, had every 1 MB row aborted by its DRU after the first |
 | `topspin/pp/zgref2d` | small-flip pseudo-2D pulse program for the reference blocks (Bruker's `zg2d` without the `d20`-computed pacing delay that refused to compile at Torino, v0.7.6) |
 | `topspin/INSTALL.md` | install paths, expno map, troubleshooting |
-| `analysis/facility_report.py` | the per-facility report (`report.html` + `report.json`) from one bundle; noise rows are streamed, so memory does not grow with the block length (v0.7.4); the clock audit reads each block's pulse program from `pulseprogram` (TopSpin 2.x/3.x) or `pulseprogram.precomp` (TopSpin 4.x Neo consoles, v0.7.6) |
+| `analysis/facility_report.py` | the per-facility report (`report.html` + `report.json`) from one bundle; noise rows are streamed, so memory does not grow with the block length (v0.7.4); the clock audit reads each block's pulse program from `pulseprogram` (TopSpin 2.x/3.x) or `pulseprogram.precomp` (TopSpin 4.x Neo consoles, v0.7.6); rows that are all zeros are dropped, counted and FAILed — a refused block leaves a full-size `ser` of zeros on TopSpin 3.x (v0.7.7) |
 | `packer/pack_bundle.py` | Python 3 stdlib-only standalone packer: a directory of vendor data files + `answers.json` (the operator questionnaire) → a validated bundle zip, identical in layout to the orchestrator's. Pluggable vendor readers: Bruker implemented (round-trip tested); JEOL/Magritek adapter interface defined |
 | `packer/answers.example.json` | the questionnaire template for the packer (same questions as the TopSpin dialogs) |
 | `uploader/upload_bundle.py` | Python 3 stdlib-only uploader — auto-selects single-shot vs. chunked-resumable upload by size (+ `--selftest` bundle validator; accepts schema v1.0–v2.0 bundles) |
@@ -107,7 +108,7 @@ covers ~10 GB), set the shared token, and hand facilities the endpoint + token p
 
 - **One live session on Bruker hardware so far, not yet a complete one.** The script
   has been executed end-to-end under a real Jython 2.7 interpreter with a stubbed
-  TopSpin API modelling ten console behaviours — simulate and desktest modes, bundle
+  TopSpin API modelling twelve console behaviours — simulate and desktest modes, bundle
   validated by the uploader (`testing/run_jython_harness.sh`) — and has completed
   DESKTEST inside TopSpin 4.4.0 at a partner facility (Torino, 17–18 September 2026),
   where two console-specific faults were found and fixed in v0.7.2 and v0.7.3, and
@@ -120,9 +121,22 @@ covers ~10 GB), set the shared token, and hand facilities the endpoint + token p
   spin-noise dip — but both small-flip reference blocks were refused at `zg`: Bruker's
   library `zg2d` paces its rows with a delay computed from `d20`, which the script never
   set, so the delay came out negative (−21.17 s). Fixed in v0.7.6 by the project's own
-  reference pulse program `zgref2d` (`zg2d` without that line); a complete live session,
-  references included, is still pending. Oulu's two consoles (TopSpin 3.7.0 and 3.2)
-  have passed simulate and desktest with v0.7.5 and await v0.7.6 for their live runs.
+  reference pulse program `zgref2d` (`zg2d` without that line). Oulu's first live run
+  with v0.7.6 (30 September 2026, Avance III HD 500, AQS DRU-E, TopSpin 3.7.0) met the
+  next console-specific fault: every pseudo-2D block acquired its first 1 MB row and
+  was then aborted by the receiver unit 12–18 s into the second (`Exception in
+  DRUCONTR 1: Your pulse program produces too much data for the LAN capacity`) while
+  the 64 kB 1D rungs passed, and TopSpin left full-size `ser` files holding one
+  acquired row and zeros, which the script took for data. Every Oulu expno ran
+  `DIGMOD` `baseopt` from the operator's parameter set — a mode in which Bruker
+  documents 16x the points processed inside the DRU — while Torino's Neo had acquired
+  the same rows in `digital`; that is the leading explanation, the 30–50 ms write
+  window before `wr` the weaker one. v0.7.7 sets `DIGMOD` `digital` / `DSPFIRM`
+  `sharp` on every experiment, writes each row during a 1 s data-transfer delay
+  (`d11`, insurance), probes before the references that the row comes back with data
+  and shortens it if not (expno 17, decided by the content of the last row — the
+  safety net), checks every block's content afterwards, and the report drops and
+  FAILs all-zero rows. A complete live session, references included, is still pending.
   The Agilent/VnmrJ path has run three real sessions (SIU Carbondale).
   Every TopSpin call is pinned to
   Bruker's *Python Programming in TopSpin* manual, with operator-dialog fallbacks

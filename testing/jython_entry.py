@@ -23,10 +23,14 @@
 #      breaches, no ERRMSG/abort, the full expno tree, meta.json (twice,
 #      with run_mode == MODE and a real sha256 self-fingerprint), the
 #      installed pulse program, a java-zip-readable bundle, and the
-#      schema-1.2 clock_audit object (8 blocks whose wall durations track
+#      schema-1.2 clock_audit object (9 blocks whose wall durations track
 #      the stub's virtual clock, which carries a deliberate 3e-7 injected
 #      fractional offset for the offline fit to recover -- see
-#      topspin_stub.INJECTED_CLOCK_OFFSET and run_jython_harness.sh).
+#      topspin_stub.INJECTED_CLOCK_OFFSET and run_jython_harness.sh);
+#      since v0.7.7 also the row probe (expno 17), the raw-data files the
+#      mocked acquisitions leave, the data-content check of every
+#      pseudo-2D block and, under the legacy-dru flavors, the script's
+#      handling of a receiver unit that refuses blocks.
 #
 # The template parameter values are plausible reals taken from the 2020
 # archival 600 MHz cryoprobe dataset that motivated this project
@@ -62,7 +66,18 @@ import topspin_stub
 # Console flavors the stub models (see topspin_stub.py, FLAVOR).
 FLAVORS = ("legacy", "ts44", "ts44-stale", "ts44-strict", "ts44-f1echo",
            "ts44-dimlie", "ts44-f1route", "ts44-f1mismatch",
-           "legacy-2dtemplate", "legacy-noacqu2")
+           "legacy-2dtemplate", "legacy-noacqu2",
+           "legacy-dru", "legacy-dru-refused")
+DRU_FLAVORS = ("legacy-dru", "legacy-dru-refused")
+# legacy-dru / legacy-dru-refused (v0.7.7): legacy-noacqu2 on an Avance III
+# HD whose AQS DRU refuses a pseudo-2D block (Oulu, 2026-09-30: "too much
+# data for the LAN capacity"; first row acquired, the rest zeros, full-size
+# ser).  legacy-dru refuses 1 MB rows written in 1.0 s and accepts them
+# in 3.0 s, so the row probe must pass at its SECOND attempt and the
+# blocks must be acquired at (262144, 3.0); legacy-dru-refused refuses
+# every pseudo-2D block: the probe fails five times, every block is
+# recorded as not acquired, the noise block is retried once, only
+# WARNINGs are said and a bundle is still produced.  No dialog in either.
 # legacy-2dtemplate: the operator's template dataset is 2D (Torino's first
 # desktest, 2026-09-21) -- the setup expno and the ladder rungs must be
 # switched to 1D by the script, the probe to 2D; no dialogs anywhere.
@@ -84,7 +99,8 @@ FLAVORS = ("legacy", "ts44", "ts44-stale", "ts44-strict", "ts44-f1echo",
 # Small but well-formed JCAMP-DX: the script reads TD (and logs FnMODE)
 # from the copy it makes.  Its TD is deliberately NOT a row count the
 # session uses (8 / 89 / 179), so an F1 TD that merely came along with the
-# file can never pass as a verified write.
+# file can never pass as a verified write (8 / 85 / 171 at the default
+# geometry; 2 for the row probe).
 PAR_ACQU2 = ("##TITLE= Parameter file, TopSpin 3.7.0\n"
              "##JCAMPDX= 5.0\n"
              "##DATATYPE= Parameter Values\n"
@@ -237,6 +253,13 @@ TEMPLATE_PARAMS = {
     "D 1": u"2.0",
     "PULPROG": u"<zg30>",
     "PARMODE": u"0",
+    # Oulu's acquisition mode (2026-09-30): every expno of the first live
+    # run carried DIGMOD 3 (baseopt) / DSPFIRM 4 (rectangle) from the
+    # operator's parameter set -- the mode in which the DRU aborted the
+    # 262144-point rows.  The script must switch every dataset it
+    # acquires with to digital / sharp (v0.7.7).
+    "DIGMOD": u"baseopt",
+    "DSPFIRM": u"rectangle",
 }
 
 # Scripted operator answers.  The non-ASCII city (Testköping) and the
@@ -498,8 +521,10 @@ def main():
     if rdopt_on:
         expected_expnos += [20, 21, 22]
         expected_roles += ["rdopt_scan"] * 3
-    expected_expnos += [10, 14, 15, 16, 11]
-    expected_roles += ["rg_ladder"] * 4 + ["reference_open"]
+    # v0.7.7: the row probe (expno 17) sits between the ladder and the
+    # opening reference.
+    expected_expnos += [10, 14, 15, 16, 17, 11]
+    expected_roles += ["rg_ladder"] * 4 + ["row_probe", "reference_open"]
     if sweep_on:
         # v0.6: baseline verify (30), then the carrier-displacement
         # sign-calibration 1D (29), then 3 x (verify + noise), then the
@@ -654,9 +679,20 @@ def main():
           and len(_failed) == len(set(_failed))
           and len(_rej) <= len(_failed),
           "rejected=%r failed_forms=%r" % (_rej, _failed))
+    # Once this console's F1 readback has contradicted the operator twice
+    # (ts44-f1mismatch: the two bounded confirmations at the dialect
+    # probe), set_f1_td trusts its writes without reading back -- by
+    # design since v0.7.3 -- so every later dataset adds a PUTPAR '1 TD'
+    # without a GETPAR: 12 and 13, and since v0.7.7 the row probe's 17
+    # (5 writes, 4 reads).  There the requirement is that the readback
+    # was consulted at all before it was given up on.
+    _f1_unreliable = _pa.get("f1_readback_unreliable") == 1
     check("param_api: the F1 TD readback actually happened (GETPAR '1 TD' "
-          "%d times for %d PUTPAR '1 TD')" % (_n_get_f1, _n_put_f1),
-          _n_put_f1 >= 1 and _n_get_f1 >= _n_put_f1)
+          "%d times for %d PUTPAR '1 TD'%s)"
+          % (_n_get_f1, _n_put_f1,
+             _f1_unreliable and "; readback flagged unreliable" or ""),
+          _n_put_f1 >= 1 and _n_get_f1 >= 1
+          and (_n_get_f1 >= _n_put_f1 or _f1_unreliable))
     check("param_api: dataset reloaded (RE) after the dimension switch",
           (_pa.get("reload_ok") or 0) >= 1 and not _pa.get("reload_failed"),
           repr((_pa.get("reload_ok"), _pa.get("reload_failed"))))
@@ -675,8 +711,12 @@ def main():
                             src="getpar", already_min=3, unverified_min=0,
                             c2d=0, cf1=0, msg=0, notice=None, pm="1",
                             acqudim=2),
+        # ts44-strict rejects every enum name the script writes: DIGMOD's
+        # at the setup expno (set_common_acq, before any PARMODE write --
+        # the 1D template needs none there), PARMODE's at the dialect
+        # probe; DSPFIRM is never reached (DIGMOD failed first).
         "ts44-strict": dict(form="operator", f1form="1 TD",
-                            failed=["PARMODE:name"], verified=1,
+                            failed=["DIGMOD:name", "PARMODE:name"], verified=1,
                             src="getpar", already_min=3, unverified_min=0,
                             c2d=1, cf1=0, msg=1,
                             notice=u"no further step expected",
@@ -693,9 +733,14 @@ def main():
                             unverified_min=3, c2d=2, cf1=0, msg=1,
                             notice=u"no further step expected", pm="",
                             acqudim=1),
+        # f1route: the operator types '1 td' wherever a dataset needs a
+        # row count its WR source did not have -- the dialect probe (11,
+        # 8 rows), the row probe (17: WR-copied from 11 with 8, wants 2;
+        # v0.7.7), the noise block (12: 171) and the closing reference
+        # (13: from a 1D rung) = 4; section 9 re-opens 11 already at 8.
         "ts44-f1route": dict(form="name", f1form="operator",
                              failed=["F1 TD:1 TD"], verified=1, src="getpar",
-                             already_min=3, unverified_min=0, c2d=0, cf1=3,
+                             already_min=3, unverified_min=0, c2d=0, cf1=4,
                              msg=1, notice=u"'1 td' typed by hand", pm="1",
                              acqudim=2),
         "ts44-f1mismatch": dict(form="name", f1form="operator", failed=[],
@@ -714,6 +759,17 @@ def main():
                                verified=1, src="getpar", already_min=3,
                                unverified_min=0, c2d=0, cf1=0, msg=0,
                                notice=None, pm="1", acqudim=2),
+        # The same console with a refusing receiver unit: the dataset
+        # dialect is Oulu's, so every expectation here is legacy-noacqu2's
+        # (the refusals show in calibration.row_probe, checked below).
+        "legacy-dru": dict(form="name", f1form="1 TD", failed=[],
+                           verified=1, src="getpar", already_min=3,
+                           unverified_min=0, c2d=0, cf1=0, msg=0,
+                           notice=None, pm="1", acqudim=2),
+        "legacy-dru-refused": dict(form="name", f1form="1 TD", failed=[],
+                                   verified=1, src="getpar", already_min=3,
+                                   unverified_min=0, c2d=0, cf1=0, msg=0,
+                                   notice=None, pm="1", acqudim=2),
     }[flavor]
     # F1 parameter files (v0.7.5).  No console is known to create acqu2 on
     # a scripted PARMODE write -- TopSpin 3.7.0 (Oulu, 2026-09-25) and
@@ -759,19 +815,28 @@ def main():
     #     parmode dialog reloads once = 1;
     #   ts44-dimlie: the probe's write 1 + two operator confirmations 2;
     #     the readback is unreliable from then on, so every later
-    #     set_parmode writes and reloads -- 4 ladder rungs -> 1D, the
-    #     re-opened 11, 12 and 13 -> 2D -- 7 more = 10;
-    #   ts44-f1route: 2 + one operator '1 td' at each of 11, 12, 13 = 5;
-    #   ts44-f1mismatch: 2 + the two bounded confirmations at the probe = 4;
+    #     set_parmode writes and reloads -- 4 ladder rungs -> 1D, the row
+    #     probe's expno 17 (v0.7.7), the re-opened 11, 12 and 13 -> 2D --
+    #     8 more = 11 (10 before the row probe existed);
+    #   ts44-f1route: 2 + one operator '1 td' at each of 11 (the dialect
+    #     probe), 17 (v0.7.7: the WR copy of 11 carries 8 rows, the row
+    #     probe wants 2), 12 and 13 = 6 (5 before the row probe existed;
+    #     section 9 re-opens 11 already at 8 rows, no dialog there);
+    #   ts44-f1mismatch: 2 + the two bounded confirmations at the probe = 4
+    #     (F1 TD writes are trusted silently afterwards, expno 17 included);
     #   legacy-2dtemplate: setup -> 1D, probe -> 2D, the FnMODE edit of the
-    #     inherited acqu2 = 3.
+    #     inherited acqu2 = 3;
+    #   legacy-dru, legacy-dru-refused: as legacy-noacqu2 -- expno 17 and
+    #     the noise retry rewrite F1 TD / TD / D11 on datasets that are
+    #     already 2D with acqu2, which reloads nothing = 2.
     # Before the Torino evidence the accepted-switch flavors reloaded once
     # (the console 'created' the file, so nothing was copied).
     _E["reloads"] = {"legacy": 2, "ts44": 2, "ts44-stale": 2,
                      "ts44-f1echo": 2, "legacy-noacqu2": 2,
-                     "ts44-strict": 1, "ts44-dimlie": 10,
-                     "ts44-f1route": 5, "ts44-f1mismatch": 4,
-                     "legacy-2dtemplate": 3}[flavor]
+                     "ts44-strict": 1, "ts44-dimlie": 11,
+                     "ts44-f1route": 6, "ts44-f1mismatch": 4,
+                     "legacy-2dtemplate": 3,
+                     "legacy-dru": 2, "legacy-dru-refused": 2}[flavor]
     # Every dataset must have the dimensionality its role needs at
     # acquisition time, whatever the template was: the stub's parameter
     # store is inspected per expno (PARMODE ordinal "0"/"1" or name).
@@ -787,6 +852,62 @@ def main():
     check("dimensionality: 1D roles are 1D and pseudo-2D roles are 2D at "
           "acquisition, whatever the template was", not _bad_dims,
           "; ".join(_bad_dims))
+    # ---- acquisition mode (v0.7.7).  Oulu, 2026-09-30: every expno ran
+    # DIGMOD baseopt / DSPFIRM rectangle from the operator's parameter set
+    # and the DRU aborted every 262144-point pseudo-2D row after the first
+    # ("too much data for the LAN capacity"); Torino's digital / sharp
+    # rows acquired.  The template here carries Oulu's mode, so every
+    # dataset the script acquires with must read digital / sharp at
+    # acquisition, written by enum name and read back as the ordinals "1"
+    # / "0"; ts44-strict rejects the names (like PARMODE's): the script
+    # probes DIGMOD once, records DIGMOD:name in failed_forms, never
+    # writes DSPFIRM, and leaves the mode as the template had it.
+    _bad_mode = []
+    _want_mode = (u"digital", u"sharp")
+    if flavor == "ts44-strict":
+        _want_mode = (u"baseopt", u"rectangle")
+    for _e, _role in zip(expected_expnos, expected_roles):
+        _pp = topspin_stub._PARAMS.get(os.path.join(name_dir, str(_e)), {})
+        _got_mode = (_pp.get("DIGMOD"), _pp.get("DSPFIRM"))
+        if _got_mode != _want_mode:
+            _bad_mode.append("expno %d (%s): DIGMOD/DSPFIRM %r"
+                             % (_e, _role, _got_mode))
+    check("acquisition mode[%s]: every acquired dataset reads DIGMOD/DSPFIRM "
+          "%r at acquisition (template: baseopt/rectangle, Oulu's)"
+          % (flavor, _want_mode), not _bad_mode, "; ".join(_bad_mode)[:500])
+    _n_dm = len([1 for a, s in _log
+                 if a == "PUTPAR" and s == u"DIGMOD = digital"])
+    _n_df = len([1 for a, s in _log
+                 if a == "PUTPAR" and s == u"DSPFIRM = sharp"])
+    _n_dm_rej = len([1 for a, s in _log
+                     if a == "PUTPAR-REJECTED" and s.startswith(u"DIGMOD = ")])
+    _n_df_any = len([1 for a, s in _log
+                     if a in ("PUTPAR", "PUTPAR-REJECTED", "PUTPAR-DROPPED")
+                     and s.startswith(u"DSPFIRM = ")])
+    if flavor == "ts44-strict":
+        check("acquisition mode[ts44-strict]: DIGMOD's enum name probed "
+              "exactly once and rejected, DSPFIRM never written, digmod_form "
+              "'' with empty readbacks, DIGMOD:name in failed_forms",
+              _n_dm == 0 and _n_dm_rej == 1 and _n_df_any == 0
+              and _pa.get("digmod_form") == "" and "DIGMOD:name" in _failed
+              and _pa.get("digmod_readback") == "" and _pa.get("dspfirm_readback") == ""
+              and _pa.get("digmod_mismatch") == 0,
+              repr((_n_dm, _n_dm_rej, _n_df_any, _pa.get("digmod_form"),
+                    _pa.get("digmod_readback"), _pa.get("dspfirm_readback"))))
+    else:
+        check("acquisition mode[%s]: DIGMOD = digital and DSPFIRM = sharp "
+              "written by enum name at every set_common_acq (%d / %d writes "
+              "for %d datasets), never rejected, read back as '1' / '0', "
+              "digmod_form 'name', no mismatch" % (flavor, _n_dm, _n_df,
+                                                    len(expected_expnos)),
+              _n_dm >= len(expected_expnos) and _n_df == _n_dm
+              and _n_dm_rej == 0 and _pa.get("digmod_form") == "name"
+              and _pa.get("digmod_readback") == u"1"
+              and _pa.get("dspfirm_readback") == u"0"
+              and _pa.get("digmod_mismatch") == 0,
+              repr((_n_dm, _n_df, _n_dm_rej, _pa.get("digmod_form"),
+                    _pa.get("digmod_readback"), _pa.get("dspfirm_readback"),
+                    _pa.get("digmod_mismatch"))))
     # What the pseudo-2D blocks would ACQUIRE with: Oulu's v0.7.4 bundle
     # recorded td 16384 / rg 1.0 / pulprog zg2d for the noise block (the
     # values inherited from the 1D setup expno) although the script had
@@ -803,19 +924,27 @@ def main():
         _exps[_e.get("expno")] = _e
     _cks = _mo.get("checksums") or {}
     _two_d_roles = ("reference_open", "noise", "reference_close",
-                    "noise_sweep")
+                    "noise_sweep", "row_probe")
     _want_pp = {"setup": "zg", "rg_ladder": "zg", "rdopt_scan": "zg",
                 "sweep_verify": "zg", "sweep_signcal": "zg",
                 "reference_open": "zgref2d", "reference_close": "zgref2d",
-                "noise": "zgnoise2d", "noise_sweep": "zgnoise2d"}
-    # RG: set_common_acq's 1, the ladder rungs 1/8/64/rga(101 mocked),
-    # max_rg/4 = 25.25 for the references, the mocked rga for the noise
-    # blocks, RDOPT_RG = 8 for the quick 1Ds of rdopt / sweep.
+                "noise": "zgnoise2d", "noise_sweep": "zgnoise2d",
+                "row_probe": "zgnoise2d"}
+    # RG: set_common_acq's 1 (the setup expno and the row probe), the
+    # ladder rungs 1/8/64/rga(101 mocked), max_rg/4 = 25.25 for the
+    # references, the mocked rga for the noise blocks, RDOPT_RG = 8 for
+    # the quick 1Ds of rdopt / sweep.
     _want_rg = {"setup": 1.0, "reference_open": 25.25,
                 "reference_close": 25.25, "noise": 101.0,
                 "noise_sweep": 101.0, "rdopt_scan": 8.0,
-                "sweep_verify": 8.0, "sweep_signcal": 8.0}
+                "sweep_verify": 8.0, "sweep_signcal": 8.0,
+                "row_probe": 1.0}
     _ladder_rg = {10: 1.0, 14: 8.0, 15: 64.0, 16: 101.0}
+    # Row geometry (v0.7.7): TD 262144 everywhere the ladder is walked in
+    # this harness -- legacy-dru's winner is its second entry (262144,
+    # 3.0), legacy-dru-refused falls back to the first (262144, 1.0) and
+    # retries the noise block with the second.  The probe's recorded
+    # experiment is its FINAL attempt: (32768, 1.0) when none passed.
     _bad_acq = []
     _no_acqu2 = []
     for _e, _role in zip(expected_expnos, expected_roles):
@@ -826,6 +955,8 @@ def main():
         _td_want = 16384
         if _role in _two_d_roles:
             _td_want = 262144
+            if _role == "row_probe" and flavor == "legacy-dru-refused":
+                _td_want = 32768
             if ("data/%d/acqu2" % _e) not in _cks:
                 _no_acqu2.append(_e)
         _rg_want = _want_rg.get(_role)
@@ -868,8 +999,9 @@ def main():
           "; ".join(_rgl_bad))
     _n_pm_writes = len([1 for a, s in _log
                         if a == "PUTPAR" and s.startswith(u"PARMODE = ")])
-    if flavor in ("legacy", "legacy-noacqu2"):
-        check("PARMODE written exactly once (the probe's 2D; setup already 1D)",
+    if flavor in ("legacy", "legacy-noacqu2") or flavor in DRU_FLAVORS:
+        check("PARMODE written exactly once (the dialect probe's 2D; setup "
+              "already 1D; the row probe is WR-copied from expno 11)",
               _n_pm_writes == 1, "writes %d" % _n_pm_writes)
     elif flavor == "legacy-2dtemplate":
         check("PARMODE written exactly twice (setup -> 1D, probe -> 2D)",
@@ -1012,6 +1144,221 @@ def main():
                     _pa.get("f1_readback_unreliable"),
                     _pa.get("f1_td_readback_mismatch"))))
 
+    # ---- row probe and data content (v0.7.7).  Oulu (Avance III HD 500,
+    # AQS DRU-E, TopSpin 3.7.0, 2026-09-30): the receiver unit refused
+    # every pseudo-2D block at zg, TopSpin pre-allocated the full ser, the
+    # first row held data and the rest zeros, and the v0.7.6 script took
+    # the file for an acquisition.  The script now writes the transfer
+    # delay D11, probes the row geometry at expno 17 by the LAST row's
+    # content, checks every block the same way, retries the noise block
+    # once, and never dialogs for it.  The mocked acquisition leaves a
+    # raw-data file of the block's size; the legacy-dru flavors leave the
+    # refused shape.  Model of the rows per role (mirrors the script):
+    #   noise / noise_sweep: int(secs / (aq + d1_noise + d11 + 1.0));
+    #   references:          round(170 / (aq + 2.0 + d11));
+    #   row probe:           max(2, ceil(40 / (aq + d1_noise + d11))).
+    import math as _math
+    _rp = (_mo.get("calibration") or {}).get("row_probe") or {}
+    _rp_att = _rp.get("attempts") or []
+    _rp_blocks = _rp.get("blocks") or []
+    _rp_by_expno = {}
+    for _b in _rp_blocks:
+        _rp_by_expno[_b.get("expno")] = _b
+    _bwd = _pa.get("blocks_without_data")
+    _dru = [s for a, s in _log if a == "DRU-REFUSED"]
+
+    def _aq(td):
+        return td / (2.0 * 6900.0)
+
+    def _rows_model(role, td, d11, secs=3600.0):
+        if role in ("noise", "noise_sweep"):
+            return int(secs / (_aq(td) + 0.05 + d11 + 1.0))
+        if role in ("reference_open", "reference_close"):
+            return int(round(170.0 / (_aq(td) + 2.0 + d11)))
+        if role == "row_probe":
+            return max(2, int(_math.ceil(40.0 / (_aq(td) + 0.05 + d11))))
+        return None
+
+    check("row probe: calibration.row_probe present for expno 17 with the "
+          "ladder as tried, attempts, blocks and the session geometry",
+          _rp.get("expno") == 17 and _rp.get("ladder")
+          and _rp["ladder"][0] == [262144, 1.0] and len(_rp["ladder"]) == 5
+          and isinstance(_rp_att, list) and isinstance(_rp_blocks, list)
+          and isinstance(_rp.get("td_row"), int)
+          and isinstance(_rp.get("transfer_delay_s"), float),
+          repr(_rp)[:300])
+    if flavor == "legacy-dru":
+        _want_att = [(262144, 1.0, 0), (262144, 3.0, 1)]
+        _want_geom = (262144, 3.0)
+        _want_passed = (True, 2)
+        _want_dru = 1
+        _want_bwd = []
+    elif flavor == "legacy-dru-refused":
+        _want_att = [(262144, 1.0, 0), (262144, 3.0, 0), (131072, 1.0, 0),
+                     (65536, 1.0, 0), (32768, 1.0, 0)]
+        _want_geom = (262144, 1.0)
+        _want_passed = (False, None)
+        # 5 probe attempts + reference_open + noise + its retry +
+        # reference_close (sweep variant: not run under this flavor)
+        _want_dru = 9
+        _want_bwd = [17, 11, 12, 13]
+    else:
+        _want_att = [(262144, 1.0, 1)]
+        _want_geom = (262144, 1.0)
+        _want_passed = (True, 1)
+        _want_dru = 0
+        _want_bwd = []
+    _got_att = [(a.get("td"), a.get("d11"), a.get("data_last"))
+                for a in _rp_att]
+    check("row probe[%s]: attempts (td, d11, data_last) == %r -- the ladder "
+          "walked exactly as far as the modelled receiver unit requires"
+          % (flavor, _want_att), _got_att == _want_att, repr(_got_att))
+    check("row probe[%s]: every attempt's FIRST row held data (Oulu's DRU "
+          "acquired the first row of every refused block; the stub does "
+          "the same) and every attempt has rows >= 2 and a wall_s"
+          % flavor,
+          bool(_rp_att) and all([a.get("data_first") == 1
+                                 and (a.get("rows") or 0) >= 2
+                                 and isinstance(a.get("wall_s"), (int, float))
+                                 for a in _rp_att]),
+          repr(_rp_att)[:400])
+    check("row probe[%s]: passed %r at attempt %r; session geometry (td_row, "
+          "transfer_delay_s) == %r" % (flavor, _want_passed[0],
+                                        _want_passed[1], _want_geom),
+          _rp.get("passed") == _want_passed[0]
+          and _rp.get("attempt_passed") == _want_passed[1]
+          and (_rp.get("td_row"), _rp.get("transfer_delay_s")) == _want_geom,
+          repr((_rp.get("passed"), _rp.get("attempt_passed"),
+                _rp.get("td_row"), _rp.get("transfer_delay_s"))))
+    check("row probe[%s]: the stub refused %d block(s) (DRU-REFUSED log "
+          "entries)" % (flavor, _want_dru), len(_dru) == _want_dru,
+          "; ".join(_dru)[:400])
+    check("row probe[%s]: param_api.blocks_without_data == %r"
+          % (flavor, _want_bwd), _bwd == _want_bwd, repr(_bwd))
+    # every pseudo-2D block recorded in row_probe.blocks at the session
+    # geometry (the refused flavor's noise block at the retry's setting),
+    # acquired == (data_last == 1), rows consistent with experiments[]
+    # and with the duration model
+    _bad_blocks = []
+    _two_d_expected = [(e, r) for e, r in zip(expected_expnos, expected_roles)
+                       if r in _two_d_roles]
+    for _e, _role in _two_d_expected:
+        _b = _rp_by_expno.get(_e)
+        _x = _exps.get(_e) or {}
+        if _b is None:
+            _bad_blocks.append("expno %d (%s): no row_probe.blocks entry"
+                               % (_e, _role))
+            continue
+        _g_td, _g_d11 = _want_geom
+        if flavor == "legacy-dru-refused":
+            if _role in ("noise", "noise_sweep"):
+                _g_td, _g_d11 = 262144, 3.0          # the one retry
+            elif _role == "row_probe":
+                _g_td, _g_d11 = 32768, 1.0           # the final attempt
+        _probs = []
+        if (_b.get("td"), _b.get("d11")) != (_g_td, _g_d11):
+            _probs.append("geometry %r != %r"
+                          % ((_b.get("td"), _b.get("d11")), (_g_td, _g_d11)))
+        if _b.get("rows") != _x.get("td1_rows"):
+            _probs.append("rows %r != experiments td1_rows %r"
+                          % (_b.get("rows"), _x.get("td1_rows")))
+        _secs = 3600.0
+        if _role == "noise_sweep":
+            _secs = max(300.0, 3600.0 / 3.0)          # per_secs of 3 steps
+        _rm = _rows_model(_role, _g_td, _g_d11, _secs)
+        if _rm is not None and _b.get("rows") != _rm:
+            _probs.append("rows %r != duration model %r" % (_b.get("rows"), _rm))
+        _acq_want = (flavor != "legacy-dru-refused")
+        if bool(_b.get("acquired")) != _acq_want \
+                or (_b.get("data_last") == 1) != _acq_want:
+            _probs.append("acquired %r / data_last %r, expected acquired %r"
+                          % (_b.get("acquired"), _b.get("data_last"),
+                             _acq_want))
+        if _b.get("data_first") != 1:
+            _probs.append("data_first %r" % _b.get("data_first"))
+        if _probs:
+            _bad_blocks.append("expno %d (%s): %s" % (_e, _role,
+                                                      ", ".join(_probs)))
+    check("row probe[%s]: every pseudo-2D block is in row_probe.blocks at "
+          "the session geometry, rows == experiments[].td1_rows == the "
+          "duration model, acquired per the modelled receiver unit"
+          % flavor, not _bad_blocks, "; ".join(_bad_blocks)[:700])
+    _retries = _rp.get("block_retries") or []
+    if flavor == "legacy-dru-refused":
+        check("row probe[%s]: the noise block was retried exactly once, with "
+              "the next ladder setting (262144, 3.0), rows recomputed, and "
+              "still came back without data" % flavor,
+              len(_retries) == 1 and _retries[0].get("expno") == 12
+              and (_retries[0].get("first_try") or {}).get("td") == 262144
+              and (_retries[0].get("first_try") or {}).get("d11") == 1.0
+              and (_retries[0].get("retry") or {}).get("d11") == 3.0
+              and (_retries[0].get("retry") or {}).get("data_last") == 0
+              and (_retries[0].get("retry") or {}).get("rows")
+              == _rows_model("noise", 262144, 3.0),
+              repr(_retries)[:400])
+        _warns = [s for a, s in _log if a == "SHOW_STATUS"
+                  and u"WARNING" in s]
+        check("row probe[%s]: the failures were said as WARNINGs on the "
+              "status line -- the probe, each block without data, the noise "
+              "retry -- and never as a dialog" % flavor,
+              len([s for s in _warns if u"WARNING: row probe" in s]) == 1
+              and len([s for s in _warns
+                       if u"holds no data" in s]) >= 4,
+              "; ".join(_warns)[:600])
+    else:
+        check("row probe[%s]: no block retry and no WARNING about data on the "
+              "status line" % flavor,
+              not _retries and not [s for a, s in _log if a == "SHOW_STATUS"
+                                    and u"WARNING" in s
+                                    and (u"row probe" in s
+                                         or u"holds no data" in s)],
+              repr(_retries)[:200])
+    # the raw-data files the mocked acquisitions left, and their content
+    # (what block_data_check read): a fid of 16384 int32 per 1D, a ser of
+    # rows x td int32 per pseudo-2D, first row non-zero everywhere, last
+    # row non-zero unless the modelled receiver unit refused the block
+    _bad_files = []
+    for _e, _role in zip(expected_expnos, expected_roles):
+        if _role == "setup":
+            continue
+        _x = _exps.get(_e) or {}
+        _d = os.path.join(name_dir, str(_e))
+        _fn = "ser" if _role in _two_d_roles else "fid"
+        _p = os.path.join(_d, _fn)
+        if not os.path.isfile(_p):
+            _bad_files.append("expno %d (%s): no %s" % (_e, _role, _fn))
+            continue
+        _rows = int(_x.get("td1_rows") or 1)
+        _td = int(_x.get("td") or 0)
+        _size = os.path.getsize(_p)
+        if _size != _rows * _td * 4:
+            _bad_files.append("expno %d (%s): %s is %d bytes, expected %d x "
+                              "%d x 4" % (_e, _role, _fn, _size, _rows, _td))
+            continue
+        _fh = open(_p, "rb")
+        try:
+            _first = _fh.read(min(65536, _td * 4))
+            _fh.seek((_rows - 1) * _td * 4)
+            _last = _fh.read(min(65536, _td * 4))
+        finally:
+            _fh.close()
+        _first_ok = _first.count("\x00") != len(_first)
+        _last_ok = _last.count("\x00") != len(_last)
+        _b = _rp_by_expno.get(_e)
+        _want_last = True
+        if _b is not None:
+            _want_last = bool(_b.get("acquired"))
+        if not _first_ok:
+            _bad_files.append("expno %d (%s): first row all zeros" % (_e, _role))
+        if _last_ok != _want_last:
+            _bad_files.append("expno %d (%s): last row %s, recorded acquired %r"
+                              % (_e, _role, "has data" if _last_ok else "zeros",
+                                 _want_last))
+    check("mocked acquisitions leave raw-data files of rows x TD int32 (fid "
+          "for 1Ds, ser for pseudo-2Ds); first rows hold data; last rows hold "
+          "data exactly where the block is recorded as acquired (%s)" % flavor,
+          not _bad_files, "; ".join(_bad_files)[:600])
+
     # ---- clock audit (schema 1.2).  Jython 2.7 ships json, so the
     # harness can parse what the script's hand-rolled writer emitted.
     ca = None
@@ -1101,7 +1448,13 @@ def main():
         exp = b.get("ocxo_expected_s")
         # Blocks with a meaningful OCXO prediction must show a wall
         # duration consistent with it (stub advances the virtual clock by
-        # expected*(1 + 3e-7) + ~0.2 s overhead), i.e. within 1 percent.
+        # expected*(1 + 3e-7) + ~0.2 s overhead), i.e. within 1 percent --
+        # except a block the modelled receiver unit refused (recorded as
+        # not acquired): its wall time is one row plus the abort, as at
+        # Oulu (39.9 s for 168 s expected), which the report's gate drops.
+        _rb = _rp_by_expno.get(b.get("expno"))
+        if _rb is not None and not _rb.get("acquired"):
+            continue
         if exp is not None and exp > 10.0:
             if abs(wall_s / exp - 1.0) > 0.01:
                 consistent = False
@@ -1111,24 +1464,32 @@ def main():
           "(virtual clock, injected offset %.1e)"
           % topspin_stub.INJECTED_CLOCK_OFFSET,
           consistent, "; ".join(detail))
-    # Timing model per role (v0.7.6): the recorded OCXO expectation is what
+    # Timing model per role (v0.7.7): the recorded OCXO expectation is what
     # the pulse program spends per row from the parameters the script
-    # writes -- zgref2d spends one d1 and a fixed 30 ms per row (the
-    # references), zgnoise2d two d1 and nothing fixed (the noise blocks),
-    # zg one d1 (the 1D rungs / quick 1Ds; its two 30m lines are not in
-    # the acquisition-side model).  AQ = TD/(2*SWH) with TD 262144 (rows)
-    # or 16384 (1Ds) at SWH 6900 Hz; rows from experiments[].td1_rows.
-    _aq_row = 262144 / (2.0 * 6900.0)
+    # writes -- zgref2d one d1 (2 s) and the transfer delay d11 per row
+    # (the references), zgnoise2d one d1 (50 ms) and d11 (the noise blocks
+    # and the row probe; until v0.7.6 zgnoise2d spent a second d1 and
+    # zgref2d a fixed 30 ms), zg one d1 (the 1D rungs / quick 1Ds; its
+    # two 30m lines are not in the acquisition-side model).  AQ =
+    # TD/(2*SWH) with the block's TD (262144 by default, 16384 for 1Ds) at
+    # SWH 6900 Hz; TD, d11 and rows from the block's row_probe.blocks
+    # entry and experiments[].td1_rows.
     _aq_1d = 16384 / (2.0 * 6900.0)
     _bad_exp = []
     for b in blocks:
         _role = b.get("role")
         _x = _exps.get(b.get("expno")) or {}
         _rows = _x.get("td1_rows") or 0
+        _rb = _rp_by_expno.get(b.get("expno")) or {}
+        _td_b = _rb.get("td") or 262144
+        _d11_b = _rb.get("d11")
+        if _d11_b is None:
+            _d11_b = 1.0
+        _aq_row = _td_b / (2.0 * 6900.0)
         if _role in ("reference_open", "reference_close"):
-            _want = _rows * (_aq_row + 2.0 + 0.03)
-        elif _role in ("noise", "noise_sweep"):
-            _want = _rows * (_aq_row + 2 * 0.05)
+            _want = _rows * (_aq_row + 2.0 + _d11_b)
+        elif _role in ("noise", "noise_sweep", "row_probe"):
+            _want = _rows * (_aq_row + 0.05 + _d11_b)
         elif _role in ("rg_ladder", "rdopt_scan", "sweep_verify",
                        "sweep_signcal"):
             _want = _aq_1d + 2.0
@@ -1139,7 +1500,8 @@ def main():
             _bad_exp.append("expno %s (%s): recorded %r, model %r"
                             % (b.get("expno"), _role, _got, _want))
     check("clock_audit expectations follow the per-role timing model "
-          "(zgref2d: one d1 + 30 ms per row; zgnoise2d: two d1; zg: one d1)",
+          "(zgref2d: one d1 + d11 per row; zgnoise2d: one d1 + d11; zg: one "
+          "d1) at each block's recorded row geometry",
           not _bad_exp, "; ".join(_bad_exp)[:600])
     # For the wrapper: the recovery check (facility_report must refit the
     # injected offset within its stated uncertainty) runs in python3.

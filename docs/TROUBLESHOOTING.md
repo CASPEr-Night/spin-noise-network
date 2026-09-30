@@ -270,6 +270,132 @@ copies it, and `zg` ignores it). Each reference row then lasts exactly
 22 s — the report's wall/OCXO gate drops a block off by more than 5%.
 The workaround is not a substitute for the update.
 
+**TopSpin shows `Exception in DRUCONTR 1: Your pulse program produces
+too much data for the LAN capacity. ->Experiment aborted by DRU1!` as a
+reference or noise block runs, the block ends after ~30-40 s, and the
+session runs on to a bundle (script v0.7.6 or earlier).**
+Seen at Oulu (University of Oulu, Avance III HD 500, AQS DRU-E
+Z102520/04001, TopSpin 3.7.0, 2026-09-30, the first live run there) for
+all three pseudo-2D blocks -- expnos 11, 12 and 13 -- while everything
+before them worked: the F1 parameter file, the TD/RG readbacks, both
+pulse programs compiled, and the four 1D rungs (TD 16384, 64 kB each)
+acquired normally. **What the bundle establishes:** each block acquired
+its **first row completely** (non-zero samples from the group delay to
+the end of the 262144-point row) and was then aborted by the receiver
+unit **12-18 s into the second row** (39.9 s, 32.4 s and 34.7 s of wall
+time against 168 s, 1700 s and 168 s expected); every later row is **all
+zeros**, and the status file `acqu2s` says `TD= 1`. TopSpin 3.x
+pre-allocates the whole `ser` when `zg` starts (8,388,608 bytes for 8
+rows, 93,323,264 for 89), so a file of exactly the right size exists
+although nothing beyond the first row was acquired -- and the v0.7.6
+script, which checked only that a raw-data file existed, took each block
+for done, asked nothing, and packed and uploaded a bundle of zeros.
+**What explains it, in the order of the evidence.** (1) The
+**acquisition mode** -- the leading explanation. Every Oulu acquisition
+ran `DIGMOD` 3 (`baseopt`) with `DSPFIRM` 4 (`rectangle`), carried over
+from the operator's parameter set; Torino's Avance Neo, which acquired
+the same `zgnoise2d` rows (262144 points, 89 of them) without complaint
+on 2026-09-25, ran `DIGMOD` 1 (`digital`) / `DSPFIRM` 0 (`sharp`). Bruker
+documents that `baseopt` "needs some more internal memory ... for larger
+TD, the memory on the DRU (RCU) may be a limiting factor" (TopSpin 3
+Acquisition Reference, `DSPFIRM`) and that with `baseopt` "16 times more
+data points are internally processed" (TopSpin 4.2 Acquisition
+Reference); the DRU's direct scan memory is 4M samples -- 16 x 262144
+exactly -- and its sustained LAN rate 45 Mbit/s (AQS technical manuals).
+A 16-fold internal data volume explains everything seen: the 64 kB rungs
+pass, both pseudo-2D pulse programs fail the same way, Torino passes.
+(2) The **write window** -- the reading v0.7.7 was first built on, and
+the weakest: each row was handed to the workstation in the 50 ms
+(`zgnoise2d`, `d1 wr`) or 30 ms (`zgref2d`, `30m wr`) between `go` and
+`wr`, and 1 MB in 50 ms asks for 20 MB/s where the rungs proved 2.2 MB/s.
+But the abort came in the middle of the second row, not at its write,
+and `zgref2d` already had 2 s of `d1` between its rows. (3) Something
+else in the DRU firmware path -- not excluded by one session.
+**Fixed in v0.7.7**, in four parts, ordered the same way. (1) The script
+sets **`DIGMOD` `digital` and `DSPFIRM` `sharp`** on every experiment it
+acquires with (the setup expno, the rungs, the row probe, the
+references, the noise block, the sweep), by the documented enum names --
+as it writes `PARMODE` -- and reads both back (`GETPAR` returns the
+ordinal on 3.x/4.x: `1` and `0`). Digital mode is also what a pulse-free
+record wants: no baseline optimisation of noise, and `DE` returns to its
+plain value (Oulu ran `DE` 13.55 us in `baseopt`, Torino 6.5 us in
+`digital`). A console that rejects the names, or whose readback keeps
+another mode, is recorded in `meta.json` (`software.param_api.
+digmod_form`, `digmod_readback`, `dspfirm_readback`, `digmod_mismatch`,
+`failed_forms`) and never insisted on. (2) Both pulse programs write
+their row during a dedicated data-transfer delay, `d11 wr #0 if #0 ze`
+(`D11` = 1 s by default, set and read back with `TD` and `RG`) --
+**insurance**: it costs 1 s per row and rules the write window out for
+good. (3) The **row probe** at expno 17, attended, right after the RG
+ladder -- the **safety net**: a short `zgnoise2d` pseudo-2D at RG 1 is
+acquired with each setting of the ladder (TD 262144 with `d11` 1 s --
+the default geometry, in digital mode -- then `d11` 3 s, then TD 131072,
+65536, 32768 with 1 s) until the **last row comes back with non-zero
+data** -- by content, never by file size; two rows at least, because the
+first row always arrived at Oulu -- and that setting is the row geometry
+of every pseudo-2D block of the session, block durations kept (rows
+recomputed). It runs whether or not the console took the `DIGMOD` write.
+If no setting passes, the script says a WARNING on the status line,
+records it, and continues with the default so the session completes and
+the report shows the failure. (4) After **every** pseudo-2D block the
+same content check runs on its first and last row; a reference block
+without data is a WARNING, the noise block gets one retry with the next
+ladder setting and then a WARNING; nothing after the row probe is a
+dialog. `meta.json` records all of it under `calibration.row_probe`
+(`attempts`, `passed`, `attempt_passed`, `td_row`, `transfer_delay_s`,
+`blocks` with `data_first` / `data_last` / `acquired` per block,
+`block_retries`) and lists the blocks whose last row held no data in
+`software.param_api.blocks_without_data`; the probe's expno 17 travels
+in the bundle with role `row_probe`. The report (v0.7.7) reads the files
+themselves as well: a row that is all zeros is dropped and counted
+(`raw_data_read.by_expno.<n>.n_rows_zero`), a block with no data row is
+EXCLUDED, and every block with zero rows is a **FAIL** `raw data all
+zeros` naming it; `rows declared vs read` says how many rows with data
+remain -- for a desktest bundle too (`report.json` `raw_data_check`).
+**The manual check on the old dataset**, which settles which
+explanation held on Oulu's console and takes two minutes at the console:
+open expno 12 of `SPINNOISE_20260930_1201` (the refused noise block:
+`zgnoise2d` as installed by v0.7.6, TD 262144, its `d1 wr` line intact),
+type `1 td` and set it to `1` (one row: the check costs 19 s and cannot
+fill the disk), type `digmod` and choose `digital` (TopSpin then sets
+`DSPFIRM` to `sharp` by itself; `dspfirm` shows it), then `zg`. If the
+row acquires without the `DRUCONTR` message, the mode was the cause. If
+the console still refuses it, also type `d1 1` (a 1 s write window, the
+equivalent of v0.7.7's `d11`) and `zg` once more: if that passes, the
+write window was the cause after all; if it does not, please send
+TopSpin's error text -- the v0.7.7 row probe finds a row the unit takes
+either way. Do not run this on a v0.7.7 session's dataset; the script
+has done it.
+**What to look for in a v0.7.7 `meta.json`** from a console like Oulu's:
+`software.param_api.digmod_form` `name` (the mode switch took) with
+`digmod_readback` `1` / `dspfirm_readback` `0`; `calibration.row_probe.
+attempt_passed` `1` (the default row accepted in digital mode) -- or
+which attempt it took; `td_row` / `transfer_delay_s` (the geometry the
+blocks used -- a shorter row is recorded, not a fault); `blocks[].
+acquired` true for 11/12/13; `blocks_without_data` empty. The 12-18 s
+the DRU ran into the second row before aborting is what makes a two-row
+probe conclusive at the default 19 s row; at shorter rows the probe
+acquires more rows so that at least 40 s of acquisition follow the first
+row. Please send the bundle: `digmod_form` together with the `attempts`
+list is the answer to which explanation held.
+
+**TopSpin shows `rga: acqt0 not set in pulse program, result may be
+incorrect!` as the noise block's receiver-gain optimisation runs (script
+v0.7.6 or earlier).**
+Harmless. `rga` derives the FID's time origin from the pulse program's
+`acqt0` definition to judge the first points, and the v0.7.6 `zgnoise2d`
+defined none. Since v0.7.7 it carries `"acqt0=0"` before `1 ze` --
+Bruker's own idiom for a pulse-free acquisition (the library programs
+`cp`, `zgesgppe`, `cosyetgp` and `hmqcet` carry the same line): the time
+origin is the start of the acquisition, there being no pulse to measure
+it from -- so the warning no longer appears. On the older script the
+gain `rga` returned was still the one that keeps the pulse-free rows
+clear of the ADC's full scale (203 at Oulu, the console's maximum,
+2026-09-30), which is what the noise block needs; the report's ADC check
+verifies the outcome from the data. Close the message if it is modal;
+the run continues. (`zgref2d`, which pulses, carries the same `acqt0`
+line as Bruker's `zg2d`.)
+
 **Morning screen shows a "final notes" dialog and there is no zip
 yet.** Normal and by design: the bundle is written AFTER you answer
 the morning notes question. Answer it; the zip appears seconds later.
@@ -406,6 +532,21 @@ re-zip a partially extracted tree.
 - **Per-block "expected source: script-recorded (pulse program ...)"**
   — the analysis could not model a pulse program's timing with
   certainty and fell back conservatively. Informational.
+- **"raw data all zeros" (FAIL) and "rows declared vs read ... are all
+  zeros" (WARN)** — the block's `ser` has the declared size but its later
+  rows were never written: TopSpin 3.x pre-allocates the file when `zg`
+  starts and the receiver unit aborted the block after its first row
+  (section 2, `DRUCONTR`; the acquisition mode `baseopt` is the leading
+  explanation). The rows with data were analysed on their own and the
+  numbers rest on them alone; a block without a single data row is
+  EXCLUDED. Acquire again with v0.7.7, which sets `DIGMOD` `digital` and
+  whose row probe finds the row geometry the console accepts. A desktest
+  bundle gets the same lines in `report.json` under `raw_data_check`.
+- **"row probe (acquisition script)" WARN** — the console needed a row
+  setting other than the default (a longer transfer delay or a shorter
+  row); `calibration.row_probe` records which. The blocks' rows were
+  resized to keep their durations. A console property, recorded, not a
+  fault of the session.
 
 ---
 

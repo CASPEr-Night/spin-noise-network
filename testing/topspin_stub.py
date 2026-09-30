@@ -50,7 +50,7 @@ __all__ = [
     "SHOW_STATUS", "XCMD", "WAIT_TILL_DONE", "GETPAR", "GETPARSTAT",
     "PUTPAR", "GETACQUDIM", "CURDATA", "RE", "WR", "RE_PATH", "EXIT",
     "SLEEP", "ZG",
-    "HARNESS_WALL_MS", "HARNESS_ADVANCE_S",
+    "HARNESS_WALL_MS", "HARNESS_ADVANCE_S", "HARNESS_MOCK_ACQ",
 ]
 
 WAIT_TILL_DONE = 0            # sentinel; value irrelevant, only the name
@@ -66,6 +66,8 @@ MSGS = []         # every MSG (title, message)
 PUTPAR_FAILURES = []   # (name, value, message) per PUTPAR the stub rejected
 STRAY_DIALOGS = []     # console dialogs the API popped on its own (text as
                        # TopSpin 3.7.0 shows it); the harness fails on any
+DRU_REFUSALS = []      # (expno_dir, td, rows, d11_s) per pseudo-2D block the
+                       # modelled receiver unit refused (legacy-dru flavors)
 
 # Console flavor the stub models (HARNESS_TS_FLAVOR).  Common to ALL
 # flavors, per Bruker's documentation and public TopSpin scripts: PARMODE
@@ -131,9 +133,45 @@ STRAY_DIALOGS = []     # console dialogs the API popped on its own (text as
 #                   acqudim_readback 2).  The v0.7.4 script fails every
 #                   1D-template flavor: stray dialogs, wrong TD/RG/PULPROG
 #                   in the pseudo-2D blocks, no acqu2 in the bundle.
+#   "legacy-dru"  : legacy-noacqu2 (TopSpin 3.7.0, GETACQUDIM present) on
+#                   an Avance III HD whose AQS DRU refuses a pseudo-2D row
+#                   that asks for more than DRU_LAN_BPS over the transfer
+#                   delay (TD*4 bytes / d11) -- Oulu, Avance III HD 500,
+#                   DRU-E Z102520/04001, 2026-09-30, first live run: every
+#                   1 MB row written 50 ms (zgnoise2d) or 30 ms (zgref2d)
+#                   after its go was refused at zg with "Exception in
+#                   DRUCONTR 1: Your pulse program produces too much data
+#                   for the LAN capacity. ->Experiment aborted by DRU1!",
+#                   while the 64 kB rungs passed.  The console acquired
+#                   the FIRST row of every refused block, aborted 12-18 s
+#                   into the second, and left the full-size ser TopSpin
+#                   3.x pre-allocates (8,388,608 B / 93,323,264 B) with
+#                   zeros in rows 2..N; acqu2s TD said 1.  The stub's
+#                   HARNESS_MOCK_ACQ reproduces exactly that shape and
+#                   wall time; the script's row probe must walk its ladder
+#                   past the first entry (1 MB / 1.0 s = 1.05 MB/s is over
+#                   the modelled 0.6 MB/s) to the second (1 MB / 3.0 s),
+#                   and acquire the three blocks with it -- no dialog.
+#   "legacy-dru-refused": the same console with a LAN limit below every
+#                   ladder entry: every pseudo-2D block is refused whatever
+#                   TD / d11.  The script must WARN (never dialog), record
+#                   the failure, continue with the first setting, retry the
+#                   noise block once, and still produce a bundle.
 #   In "legacy" and "legacy-2dtemplate", GETACQUDIM does not exist (old
 #   TopSpin), so the GETPAR("PARMODE") ordinal path is what gets
 #   exercised there.
+# Acquisition mode (v0.7.7).  DIGMOD and DSPFIRM are enumerated like
+# PARMODE: written by NAME (analog / digital / homodecoupling-digital /
+# baseopt; sharp / smooth / medium / user_defined / rectangle), read back
+# as the ORDINAL, an ordinal written is rejected with the GetEnuOrd text.
+# Bruker couples the two -- DSPFIRM rectangle selects DIGMOD baseopt and
+# vice versa -- and the stub does the same (PUTPAR-COUPLED log entries).
+# The harness template carries Oulu's baseopt / rectangle (every Oulu
+# acquisition of 2026-09-30 ran DIGMOD 3 / DSPFIRM 4, the mode in which
+# the DRU aborted the 262144-point rows; Torino's Neo ran digital /
+# sharp and acquired them), so every flavor exercises the switch; under
+# "ts44-strict" the names are rejected like PARMODE's, and the script
+# must record that once and go on without them.
 # F1 parameter FILES -- the observed consoles (3.7.0 Oulu, 4.4.0 Torino)
 # are the model for ALL flavors: no console creates acqu2 on a scripted
 # PARMODE write.  While a dataset says 2D and has no acqu2, a GETPAR or
@@ -157,6 +195,10 @@ _TS44_PARMODE_NAMES = (u"1D", u"2D", u"3D", u"4D", u"5D", u"6D", u"7D", u"8D")
 _TS44_F1_MAP = (u"TD", u"SW", u"SWH", u"SFO1", u"BF1", u"O1", u"NUC1",
                 u"IN_F", u"ND0", u"FnTYPE")     # FnMODE deliberately absent
 _PARMODE_TO_ORDINAL = {u"1D": u"0", u"2D": u"1", u"3D": u"2"}
+_DIGMOD_TO_ORDINAL = {u"analog": u"0", u"digital": u"1",
+                      u"homodecoupling-digital": u"2", u"baseopt": u"3"}
+_DSPFIRM_TO_ORDINAL = {u"sharp": u"0", u"smooth": u"1", u"medium": u"2",
+                       u"user_defined": u"3", u"rectangle": u"4"}
 _F1_FRESH = {}    # dsdir -> 1 once RE()-loaded after its last PARMODE write
 
 _CUR = [None]             # current dataset, CURDATA()-shaped list
@@ -173,7 +215,7 @@ def configure(current_dataset, template_params, dialog_answers,
               select_answers, confirm_answers=None, flavor="legacy"):
     """Install the per-run fixture and reset all logs."""
     del LOG[:], UNSCRIPTED[:], BREACHES[:], ERRMSGS[:], MSGS[:]
-    del PUTPAR_FAILURES[:], STRAY_DIALOGS[:]
+    del PUTPAR_FAILURES[:], STRAY_DIALOGS[:], DRU_REFUSALS[:]
     _F1_FRESH.clear()
     FLAVOR[0] = flavor
     _PARAMS.clear()
@@ -451,6 +493,10 @@ def GETPAR(name, axis=0):
         v = _PARMODE_TO_ORDINAL.get(v, v)     # consoles report the ORDINAL
         if FLAVOR[0] == "ts44-dimlie":
             v = u""                           # unrecognisable readback
+    elif n == u"DIGMOD":
+        v = _DIGMOD_TO_ORDINAL.get(v, v)      # the ORDINAL, like PARMODE
+    elif n == u"DSPFIRM":
+        v = _DSPFIRM_TO_ORDINAL.get(v, v)
     elif n.startswith(u"1 "):
         if FLAVOR[0] == "ts44-f1echo":
             v = params.get("TD", u"")         # prefix ignored: F2's TD
@@ -503,6 +549,16 @@ def _validate_putpar(name, value, dsdir):
             msg = (u"exception 'Could not convert '%s' into enum:\n"
                    u"GetEnuOrd[PARMODE]: enumeration name %s not found\n"
                    u"' in validateParameterOfFamily())" % (v, v))
+    elif n in (u"DIGMOD", u"DSPFIRM"):
+        names_ok = tuple(_DIGMOD_TO_ORDINAL)
+        if n == u"DSPFIRM":
+            names_ok = tuple(_DSPFIRM_TO_ORDINAL)
+        if FLAVOR[0] == "ts44-strict":
+            names_ok = ()                       # rejected like PARMODE's
+        if v not in names_ok:
+            msg = (u"exception 'Could not convert '%s' into enum:\n"
+                   u"GetEnuOrd[%s]: enumeration name %s not found\n"
+                   u"' in validateParameterOfFamily())" % (v, n, v))
     elif n.startswith(u"1 "):
         if FLAVOR[0] == "ts44-stale" and not _F1_FRESH.get(dsdir):
             msg = u"%s: parameter not found in map" % n
@@ -513,6 +569,31 @@ def _validate_putpar(name, value, dsdir):
         LOG.append(("PUTPAR-REJECTED", u"%s = %s" % (n, v)))
         _say("PUTPAR REJECTED (%s) [%s = %s]" % (FLAVOR[0], n, v))
         raise java.lang.RuntimeException(msg)
+
+
+def _couple_acq_mode(name, params):
+    """Bruker's documented coupling: DSPFIRM rectangle selects DIGMOD
+    baseopt and DIGMOD baseopt selects DSPFIRM rectangle; leaving either
+    leaves the other (digital / sharp, the defaults)."""
+    n = _u(name)
+    if n == u"DIGMOD":
+        if params.get("DIGMOD") == u"baseopt" \
+                and params.get("DSPFIRM") != u"rectangle":
+            params["DSPFIRM"] = u"rectangle"
+            LOG.append(("PUTPAR-COUPLED", u"DSPFIRM = rectangle"))
+        elif params.get("DIGMOD") != u"baseopt" \
+                and params.get("DSPFIRM") == u"rectangle":
+            params["DSPFIRM"] = u"sharp"
+            LOG.append(("PUTPAR-COUPLED", u"DSPFIRM = sharp"))
+    elif n == u"DSPFIRM":
+        if params.get("DSPFIRM") == u"rectangle" \
+                and params.get("DIGMOD") != u"baseopt":
+            params["DIGMOD"] = u"baseopt"
+            LOG.append(("PUTPAR-COUPLED", u"DIGMOD = baseopt"))
+        elif params.get("DSPFIRM") != u"rectangle" \
+                and params.get("DIGMOD") == u"baseopt":
+            params["DIGMOD"] = u"digital"
+            LOG.append(("PUTPAR-COUPLED", u"DIGMOD = digital"))
 
 
 def PUTPAR(name, value):
@@ -547,6 +628,7 @@ def PUTPAR(name, value):
     if _u(name) == u"PARMODE" and dsdir in _F1_FRESH:
         del _F1_FRESH[dsdir]                    # F1 map stale until RE()
     LOG.append(("PUTPAR", u"%s = %s" % (_u(name), _u(value))))
+    _couple_acq_mode(name, params)
     # A scripted PARMODE write creates NO F1 parameter file on any console
     # observed (3.7.0 Oulu, 4.4.0 Torino): the transition takes, the file
     # does not appear.  Only the operator's parmode (CONFIRM side effect)
@@ -638,6 +720,88 @@ def HARNESS_ADVANCE_S(seconds):
     LOG.append(("HARNESS_ADVANCE_S", _u(seconds)))
     ms = seconds * 1000.0 * (1.0 + INJECTED_CLOCK_OFFSET)
     _VCLOCK_MS[0] = _VCLOCK_MS[0] + long(round(ms)) + 200 + _jitter_ms(8)
+
+
+# ---------------------------------------------------------------------------
+# The receiver unit (clock-audit fixture's sibling): HARNESS_MOCK_ACQ
+# ---------------------------------------------------------------------------
+# The script's mocked zg (mock_acquisition) offers this seam before it
+# advances the clock and writes its own pseudo-random raw-data file.  For
+# every flavor but the two legacy-dru ones it returns 0 (the DRU accepts
+# the block: the script writes the file and advances the clock itself).
+# Under legacy-dru a pseudo-2D block whose per-row volume over the
+# transfer delay exceeds DRU_LAN_BPS is REFUSED the way Oulu's was: the
+# file of the declared size is created, the first row holds data, every
+# later row is zeros, and the wall clock advances by one row plus the
+# abort (12-18 s at Oulu).  legacy-dru-refused refuses every pseudo-2D
+# block.  1D rungs always pass (64 kB in 30 ms did).
+
+DRU_LAN_BPS = 600000.0   # bytes per second the modelled AQS LAN accepts:
+                         # 1 MB / 1.0 s (the ladder's first entry) fails,
+                         # 1 MB / 3.0 s and 0.5 MB / 1.0 s pass
+DRU_ABORT_S = 12.0       # the DRU aborted 12-18 s into the second row
+DRU_TEXT = (u"Exception in DRUCONTR 1: Your pulse program produces too "
+            u"much data for the LAN capacity. ->Experiment aborted by DRU1!")
+
+
+def _random_row_bytes(td, seed):
+    """One row of td little-endian int32 in [-2e6, 2e6) as a Java byte[]."""
+    import java.util.Random
+    import java.nio.ByteBuffer
+    import java.nio.ByteOrder
+    rnd = java.util.Random(long(seed))
+    arr = rnd.ints(long(td), -2000000, 2000000).toArray()
+    bb = java.nio.ByteBuffer.allocate(4 * td)
+    bb.order(java.nio.ByteOrder.LITTLE_ENDIAN)
+    bb.asIntBuffer().put(arr)
+    return bb.array()
+
+
+def HARNESS_MOCK_ACQ(expno_dir, td, rows, d11_s, ocxo_s):
+    """Model of the console's receiver unit for a mocked zg.  Returns 0
+    when the block is accepted (the script then writes its own mocked
+    raw data and advances the clock), 1 when this function handled the
+    step as a REFUSAL (file of the refused shape written, clock advanced
+    by one row plus the abort, refusal logged)."""
+    if FLAVOR[0] not in ("legacy-dru", "legacy-dru-refused"):
+        return 0
+    if rows is None or rows <= 1:
+        return 0                     # the 1D rungs passed at Oulu
+    refused = 0
+    if FLAVOR[0] == "legacy-dru-refused":
+        refused = 1
+    else:
+        try:
+            bps = td * 4.0 / max(float(d11_s), 1e-3)
+        except (TypeError, ValueError):
+            bps = 1e12
+        if bps > DRU_LAN_BPS:
+            refused = 1
+    if not refused:
+        return 0
+    import java.io.RandomAccessFile
+    path = os.path.join(_b(expno_dir), "ser")
+    for fn in ("ser", "fid"):
+        p = os.path.join(_b(expno_dir), fn)
+        if os.path.isfile(p):
+            os.remove(p)
+    raf = java.io.RandomAccessFile(path, "rw")
+    try:
+        raf.write(_random_row_bytes(td, 20260930 + td))   # the first row
+        raf.setLength(long(rows) * long(td) * 4L)          # zeros: rows 2..N
+    finally:
+        raf.close()
+    per_row = 0.0
+    if ocxo_s:
+        per_row = float(ocxo_s) / rows
+    HARNESS_ADVANCE_S(per_row + DRU_ABORT_S)
+    DRU_REFUSALS.append((_u(expno_dir), td, rows, d11_s))
+    LOG.append(("DRU-REFUSED", u"%s TD %d rows %d d11 %s"
+                % (_u(expno_dir), td, rows, d11_s)))
+    _say("DRU REFUSED (%s) [TD %d, %d rows, d11 %s s -> %.2f MB/s]: %s"
+         % (FLAVOR[0], td, rows, d11_s, td * 4.0 / max(float(d11_s), 1e-3)
+            / 1e6, DRU_TEXT))
+    return 1
 
 
 class _CmdThread:

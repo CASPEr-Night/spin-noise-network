@@ -47,6 +47,29 @@ what meta.json declares (rows declared vs read).
      expno's ser truncated to half its rows (checksum updated) ->
      facility_report -> report.json's science.qa_flags carries the WARN
      for expno 12; the untouched bundle's report carries the OK line.
+  4. raw data all zeros (0.7.7; Oulu, Avance III HD 500, 2026-09-30: the
+     receiver unit refused every pseudo-2D block, TopSpin pre-allocated
+     the full-size ser, the first row held data and rows 2..N zeros --
+     the 0.7.6 report co-added 88 zero rows as data):
+     * a ser of the declared size with data in row 0 and zeros after it
+       -> n_rows 1, n_rows_zero N-1, only the data row yielded, a WARN
+       'rows declared vs read' with the zeros wording and a FAIL 'raw data
+       all zeros' naming the block (both reader paths);
+     * a ser that is zeros throughout -> refused (EXCLUDED FAIL);
+     * a 1D fid of zeros -> refused;
+     * a SOFTWARE-TEST bundle (run_mode desktest -- what the Jython
+       harness produces, whose mocked acquisitions leave real-size files
+       and whose legacy-dru flavors leave Oulu's shape) -> the report
+       completes with science None and carries the same raw-data content
+       check in report.json raw_data_check: the FAIL 'raw data all zeros'
+       for a ser of one data row and zeros, the EXCLUDED FAIL 'raw data
+       expno N (role)' for a ser of zeros only, the WARN 'rows declared
+       vs read'; before 0.7.7 a software-test report carried no QA at all
+       (unless --skip-e2e);
+     * end to end (unless --skip-e2e): the physics bundle's noise ser with
+       rows 2..N zeroed -> the report completes and carries the FAIL;
+     * the report's pulse-program parser resolves the shipped sequences'
+       'd11 wr' line as a D[11] term (the timing model of v0.7.7).
 
 Exit 0 iff every check passes. Python 3 standard library only in this
 file; the report itself needs numpy (and matplotlib for its figures).
@@ -456,6 +479,271 @@ def e2e(work):
           not other, other)
 
 
+# ---------------------------------------------------------------------------
+# 4. raw data all zeros (0.7.7)
+# ---------------------------------------------------------------------------
+
+def zero_rows_cases(fr, work):
+    fam = "rows declared vs read"
+    zfam = "raw data all zeros"
+    row0 = int32_rows(1, TD, 31)
+    # expno 11: 4 rows declared, row 0 data, rows 1-3 zeros (Oulu's shape)
+    # expno 12: 8 rows declared, all zeros
+    # expno 13: reference_close declares 2 rows, a 1D fid of zeros
+    exps = [exp(11, "reference_open", TD, 4), exp(12, "noise", TD, 8),
+            exp(13, "reference_close", TD, 2)]
+    files = [("data/11/acqus", acqus_text(TD)),
+             ("data/11/ser", row0 + b"\x00" * (3 * ROW)),
+             ("data/11/acqu2s", b"##TITLE= status F1\n##$TD= 1\n##END=\n"),
+             ("data/12/acqus", acqus_text(TD)),
+             ("data/12/ser", b"\x00" * (8 * ROW)),
+             ("data/13/acqus", acqus_text(TD)),
+             ("data/13/fid", b"\x00" * ROW)]
+    pz = os.path.join(work, "rows_zeros.zip")
+    meta = write_bundle(pz, base_meta(PARAM_API_075, exps), files)
+    for streaming in (True, False):
+        b = fr.Bundle(pz)
+        n_read = {}
+        for e in meta["experiments"]:
+            if streaming:
+                got = list(b.iter_rows(e["expno"], e))
+                n_read[e["expno"]] = len(got)
+            else:
+                rows, _acq = b.read_rows(e["expno"], e)
+                n_read[e["expno"]] = 0 if rows is None else int(rows.shape[0])
+        tag = "iter_rows" if streaming else "read_rows"
+        check("zeros bundle, %s: only the data row of expno 11 is yielded "
+              "(1), nothing from the all-zero ser (12) or fid (13)" % tag,
+              n_read == {11: 1, 12: 0, 13: 0}, n_read)
+        n11 = b.read_log.get(11, {})
+        check("zeros bundle, %s: read_log for expno 11 says n_rows 1, "
+              "n_rows_zero 3 and notes the zeros" % tag,
+              n11.get("n_rows") == 1 and n11.get("n_rows_zero") == 3
+              and "3 row(s) are all zeros" in n11.get("note", ""), n11)
+        check("zeros bundle, %s: rows_declared_vs_read for expno 11 records "
+              "declared 4, read 1, zero_rows 3" % tag,
+              b.rows_declared_vs_read.get(11) == {
+                  "declared": 4, "read": 1, "file": "ser", "zero_rows": 3},
+              b.rows_declared_vs_read)
+        check("zeros bundle, %s: the all-zero ser (12) and fid (13) are "
+              "refused with the 'holds only zeros' reason, the acqu2s-less "
+              "refusal without a status note" % tag,
+              "holds only zeros in all 8 row(s)" in b.read_errors.get(12, "")
+              and "holds only zeros in all 1 row(s)" in b.read_errors.get(13, "")
+              and "acqu2s" not in b.read_errors.get(12, ""),
+              b.read_errors)
+        fl = fr.qa_flags(b, meta, None, [])
+        fam_fl = flags_named(fl, fam)
+        check("zeros bundle, %s: one WARN '%s' (expno 11) with the zeros "
+              "wording, no OK line" % (tag, fam),
+              len(fam_fl) == 1 and fam_fl[0]["level"] == "WARN"
+              and "expno 11" in fam_fl[0]["detail"]
+              and "3 of its rows are all zeros" in fam_fl[0]["detail"]
+              and "1 row(s) with data were analysed" in fam_fl[0]["detail"],
+              fam_fl)
+        zf = flags_named(fl, zfam)
+        check("zeros bundle, %s: one FAIL '%s' naming expno 11 (3 of 4 rows), "
+              "quoting the acqu2s status TD=1" % (tag, zfam),
+              len(zf) == 1 and zf[0]["level"] == "FAIL"
+              and zf[0]["detail"].startswith("expno 11 (reference_open): 3 of "
+                                             "4 row(s)")
+              and "acqu2s says TD=1" in zf[0]["detail"], zf)
+        ex = [f for f in fl if f["check"].startswith("raw data expno")]
+        check("zeros bundle, %s: expnos 12 and 13 are EXCLUDED FAILs "
+              "(raw data expno ...)" % tag,
+              sorted(f["check"] for f in ex) == ["raw data expno 12 (noise)",
+                                                  "raw data expno 13 "
+                                                  "(reference_close)"]
+              and all(f["level"] == "FAIL" and "only zeros" in f["detail"]
+                      for f in ex), ex)
+    # the report's pulse-program timing model resolves d11 (any dN) from
+    # the acqus D array: the shipped sequences' row is d1 + [p1] + go + d11
+    for name, want_row in (("zgnoise2d", [("d", 1), ("go",), ("d", 11)]),
+                           ("zgref2d", [("d", 1), ("p", 1), ("go",),
+                                        ("d", 11)])):
+        text = open(os.path.join(REPO, "topspin", "pp", name), "rb").read()
+        pre, row, why = fr.pp_timing_model(text.decode("ascii"), 8)
+        check("pp_timing_model(%s): row terms %r (the 'd11 wr' line is one "
+              "D[11] delay), no error" % (name, want_row),
+              why is None and row == want_row, (pre, row, why))
+    text = open(os.path.join(REPO, "topspin", "pp", "zgref2d"), "rb").read()
+    pre, row, why = fr.pp_timing_model(text.decode("ascii"), 8)
+    check("pp_timing_model(zgref2d): the 30m before the loop is the one "
+          "pre-loop term", pre == [("lit", 0.03)], pre)
+
+
+def zero_noise_ser(src, dst):
+    """Copy the bundle with expno 12's ser rows 2..N zeroed (Oulu's refused
+    shape: first row acquired, the rest never came), checksum updated."""
+    zin = zipfile.ZipFile(src, "r")
+    meta = json.loads(zin.read("meta.json").decode("utf-8"))
+    e12 = [e for e in meta["experiments"] if e["expno"] == 12][0]
+    rows = int(e12["td1_rows"])
+    row_bytes = int(e12["td"]) * 4
+    padded = ((row_bytes + 1023) // 1024) * 1024
+    ser = zin.read("data/12/ser")
+    ser = ser[:padded] + b"\x00" * (len(ser) - padded)
+    meta["checksums"]["data/12/ser"] = "sha256:" + hashlib.sha256(ser).hexdigest()
+    zout = zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED)
+    for info in zin.infolist():
+        if info.filename == "meta.json":
+            zout.writestr("meta.json", json.dumps(meta, indent=1) + "\n")
+        elif info.filename == "data/12/ser":
+            zout.writestr("data/12/ser", ser)
+        else:
+            zout.writestr(info, zin.read(info.filename))
+    zout.close()
+    zin.close()
+    return rows
+
+
+def rewrite_bundle(src, dst, run_mode=None, zero_rows_of=None):
+    """Copy a bundle, optionally with software.run_mode replaced and, per
+    expno in zero_rows_of ({expno: rows_to_keep}), the ser's rows after
+    the first rows_to_keep zeroed (0 keeps none: a ser of zeros only, the
+    fully refused shape; 1 keeps the first row: Oulu's shape).  Checksums
+    updated; meta.json is not checksummed."""
+    zero_rows_of = zero_rows_of or {}
+    zin = zipfile.ZipFile(src, "r")
+    meta = json.loads(zin.read("meta.json").decode("utf-8"))
+    if run_mode is not None:
+        meta["software"]["run_mode"] = run_mode
+    payloads = {}
+    for expno, keep in zero_rows_of.items():
+        e = [x for x in meta["experiments"] if x["expno"] == expno][0]
+        row_bytes = int(e["td"]) * 4
+        padded = ((row_bytes + 1023) // 1024) * 1024
+        arc = "data/%d/ser" % expno
+        ser = zin.read(arc)
+        cut = padded * int(keep)
+        ser = ser[:cut] + b"\x00" * (len(ser) - cut)
+        meta["checksums"][arc] = "sha256:" + hashlib.sha256(ser).hexdigest()
+        payloads[arc] = ser
+    zout = zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED)
+    for info in zin.infolist():
+        if info.filename == "meta.json":
+            zout.writestr("meta.json", json.dumps(meta, indent=1) + "\n")
+        elif info.filename in payloads:
+            zout.writestr(info.filename, payloads[info.filename])
+        else:
+            zout.writestr(info, zin.read(info.filename))
+    zout.close()
+    zin.close()
+    return meta
+
+
+def e2e_software_test(work):
+    """A run_mode desktest bundle of Oulu's shape: expno 12's ser one data
+    row and zeros, expno 13's ser zeros only.  The report must complete,
+    keep science None (the gate) and name both blocks as FAILs in
+    report.json raw_data_check -- what the Jython harness asserts on its
+    legacy-dru-refused desktest bundle."""
+    base = subprocess.check_output(
+        [sys.executable, os.path.join(REPO, "testing", "make_physics_bundle.py"),
+         "--feature", "none", "--clock-offset", "0", "--out-dir",
+         os.path.join(work, "swtest")],
+        stderr=subprocess.DEVNULL).decode().strip().splitlines()[-1]
+    dst = os.path.join(work, "desktest_" + os.path.basename(base))
+    meta = rewrite_bundle(base, dst, run_mode="desktest",
+                          zero_rows_of={12: 1, 13: 0})
+    rows12 = int([e for e in meta["experiments"] if e["expno"] == 12][0]
+                 ["td1_rows"])
+    out = os.path.join(work, "report_desktest")
+    rc = subprocess.call([sys.executable, REPORT_PY, dst, "--out", out],
+                         stdout=subprocess.DEVNULL)
+    check("e2e software-test: the report completes on a run_mode desktest "
+          "bundle whose noise ser is one data row and zeros and whose "
+          "closing-reference ser is zeros only",
+          rc == 0 and os.path.isfile(os.path.join(out, "report.json")),
+          "rc=%s" % rc)
+    if rc != 0:
+        return
+    with open(os.path.join(out, "report.json"), "r") as fh:
+        rep = json.load(fh)
+    check("e2e software-test: report_type 'software-test', science None (the "
+          "gate holds), raw_data_check present",
+          rep.get("report_type") == "software-test"
+          and rep.get("science") is None
+          and isinstance(rep.get("raw_data_check"), dict),
+          (rep.get("report_type"), rep.get("science") is None,
+           type(rep.get("raw_data_check"))))
+    rcq = (rep.get("raw_data_check") or {}).get("qa_flags") or []
+    zf = flags_named(rcq, "raw data all zeros")
+    check("e2e software-test: raw_data_check carries the FAIL 'raw data all "
+          "zeros' for expno 12 (%d of %d rows)" % (rows12 - 1, rows12),
+          len(zf) == 1 and zf[0]["level"] == "FAIL"
+          and zf[0]["detail"].startswith(
+              "expno 12 (noise): %d of %d row(s)" % (rows12 - 1, rows12)), zf)
+    ex = [f for f in rcq if f["check"].startswith("raw data expno")]
+    check("e2e software-test: expno 13 is the EXCLUDED FAIL 'raw data expno "
+          "13 (reference_close)' with the 'only zeros' reason, and no other "
+          "expno is excluded",
+          [f["check"] for f in ex] == ["raw data expno 13 (reference_close)"]
+          and ex[0]["level"] == "FAIL" and "only zeros" in ex[0]["detail"],
+          ex)
+    warns = [f for f in flags_named(rcq, "rows declared vs read")
+             if f["level"] == "WARN"]
+    check("e2e software-test: one WARN 'rows declared vs read' (expno 12, "
+          "the zeros wording); the excluded expno 13 is not compared",
+          len(warns) == 1 and "expno 12" in warns[0]["detail"]
+          and "are all zeros" in warns[0]["detail"], warns)
+    rl = ((rep.get("raw_data_check") or {}).get("raw_data_read") or {})
+    check("e2e software-test: raw_data_check.raw_data_read says expno 12 "
+          "n_rows 1 / n_rows_zero %d and lists expno 13 as refused"
+          % (rows12 - 1),
+          ((rl.get("by_expno") or {}).get("12") or {}).get("n_rows") == 1
+          and ((rl.get("by_expno") or {}).get("12") or {}).get("n_rows_zero")
+          == rows12 - 1 and "13" in (rl.get("refused") or {}),
+          (rl.get("by_expno", {}).get("12"), sorted(rl.get("refused", {}))))
+    with open(os.path.join(out, "report.html"), "r", encoding="utf-8") as fh:
+        html = fh.read()
+    check("e2e software-test: report.html carries the SOFTWARE-TEST banner "
+          "and the raw-data content card naming expno 12",
+          "SOFTWARE-TEST REPORT" in html
+          and "Raw-data content (plumbing check)" in html
+          and "expno 12 (noise)" in html, len(html))
+
+
+def e2e_zeros(work):
+    base = subprocess.check_output(
+        [sys.executable, os.path.join(REPO, "testing", "make_physics_bundle.py"),
+         "--feature", "none", "--clock-offset", "0", "--out-dir", work],
+        stderr=subprocess.DEVNULL).decode().strip().splitlines()[-1]
+    zeroed = os.path.join(work, "zeros_" + os.path.basename(base))
+    rows = zero_noise_ser(base, zeroed)
+    out = os.path.join(work, "report_zeros")
+    rc = subprocess.call([sys.executable, REPORT_PY, zeroed, "--out", out],
+                         stdout=subprocess.DEVNULL)
+    check("e2e zeros: the report completes on a bundle whose noise ser is "
+          "one data row and %d zero rows (Oulu's shape)" % (rows - 1),
+          rc == 0 and os.path.isfile(os.path.join(out, "report.json")),
+          "rc=%s" % rc)
+    if rc != 0:
+        return
+    with open(os.path.join(out, "report.json"), "r") as fh:
+        rep = json.load(fh)
+    qa = (rep.get("science") or {}).get("qa_flags") or []
+    zf = flags_named(qa, "raw data all zeros")
+    check("e2e zeros: report.json carries the FAIL 'raw data all zeros' for "
+          "expno 12 (%d of %d rows)" % (rows - 1, rows),
+          len(zf) == 1 and zf[0]["level"] == "FAIL"
+          and zf[0]["detail"].startswith(
+              "expno 12 (noise): %d of %d row(s)" % (rows - 1, rows)), zf)
+    rl = ((rep.get("science") or {}).get("raw_data_read") or {}).get(
+        "by_expno") or {}
+    check("e2e zeros: the raw-data read log says expno 12 has n_rows 1 and "
+          "n_rows_zero %d" % (rows - 1),
+          (rl.get("12") or {}).get("n_rows") == 1
+          and (rl.get("12") or {}).get("n_rows_zero") == rows - 1,
+          rl.get("12"))
+    warns = [f for f in flags_named(qa, "rows declared vs read")
+             if f["level"] == "WARN"]
+    check("e2e zeros: one WARN 'rows declared vs read' for expno 12 with the "
+          "zeros wording", len(warns) == 1
+          and "expno 12" in warns[0]["detail"]
+          and "are all zeros" in warns[0]["detail"], warns)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--out-dir", default=None)
@@ -480,6 +768,13 @@ def main(argv=None):
 
     print("--- 1. param_api lines ---")
     param_api_cases(fr, work, args.meta_074)
+    print("--- 4. raw data all zeros (Bruker reader + qa_flags + pp model) ---")
+    zero_rows_cases(fr, work)
+    if not args.skip_e2e:
+        print("--- 4b. raw data all zeros, end to end ---")
+        e2e_zeros(work)
+        print("--- 4c. raw data all zeros, software-test report ---")
+        e2e_software_test(work)
     print("--- 2. rows declared vs read (Bruker reader + qa_flags) ---")
     rows_cases(fr, work)
     if not args.skip_e2e:
