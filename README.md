@@ -108,7 +108,7 @@ covers ~10 GB), set the shared token, and hand facilities the endpoint + token p
 
 - **One live session on Bruker hardware so far, not yet a complete one.** The script
   has been executed end-to-end under a real Jython 2.7 interpreter with a stubbed
-  TopSpin API modelling twelve console behaviours — simulate and desktest modes, bundle
+  TopSpin API modelling thirteen console behaviours — simulate and desktest modes, bundle
   validated by the uploader (`testing/run_jython_harness.sh`) — and has completed
   DESKTEST inside TopSpin 4.4.0 at a partner facility (Torino, 17–18 September 2026),
   where two console-specific faults were found and fixed in v0.7.2 and v0.7.3, and
@@ -130,13 +130,20 @@ covers ~10 GB), set the shared token, and hand facilities the endpoint + token p
   acquired row and zeros, which the script took for data. Every Oulu expno ran
   `DIGMOD` `baseopt` from the operator's parameter set — a mode in which Bruker
   documents 16x the points processed inside the DRU — while Torino's Neo had acquired
-  the same rows in `digital`; that is the leading explanation, the 30–50 ms write
-  window before `wr` the weaker one. v0.7.7 sets `DIGMOD` `digital` / `DSPFIRM`
+  the same rows in `digital`; that was the leading explanation, the 30–50 ms write
+  window before `wr` the weaker one — and on 2 October 2026 the operator at Oulu
+  confirmed it on the hardware: expno 12 of the refused run, set to `digital` by hand,
+  acquired at the first try. v0.7.7 sets `DIGMOD` `digital` / `DSPFIRM`
   `sharp` on every experiment, writes each row during a 1 s data-transfer delay
   (`d11`, insurance), probes before the references that the row comes back with data
   and shortens it if not (expno 17, decided by the content of the last row — the
   safety net), checks every block's content afterwards, and the report drops and
-  FAILs all-zero rows. A complete live session, references included, is still pending.
+  FAILs all-zero rows. v0.7.8 reads the mode before writing it — one `DIGMOD` write per
+  session, no `DSPFIRM` write on a console that couples the two, as TopSpin 3.7.0 does:
+  the v0.7.7 desktest at Oulu (2 October 2026) completed cleanly but popped the
+  console's own `GetEnuOrd[DSPFIRM]: enumeration name sharp not found` dialog once per
+  experiment (harmless, and gone). A complete live session, references included, is
+  still pending.
   The Agilent/VnmrJ path has run three real sessions (SIU Carbondale).
   Every TopSpin call is pinned to
   Bruker's *Python Programming in TopSpin* manual, with operator-dialog fallbacks

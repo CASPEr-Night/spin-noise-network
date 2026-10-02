@@ -44,7 +44,7 @@ TESTING="$REPO/testing"
 command -v jython >/dev/null || { echo "ERROR: jython not on PATH"; exit 2; }
 command -v python3 >/dev/null || { echo "ERROR: python3 not on PATH"; exit 2; }
 
-# Sixteen end-to-end variants: the two plain modes on the legacy console
+# Seventeen end-to-end variants: the two plain modes on the legacy console
 # model, the desktest under seven TopSpin 4.4 fault flavors (strict F1
 # map; F1 map stale until RE(); enum name rejected -> one scripted operator
 # step; F1 readback echoing the direct TD; lying dimensionality readback;
@@ -57,7 +57,13 @@ command -v python3 >/dev/null || { echo "ERROR: python3 not on PATH"; exit 2; }
 # must walk to its second setting) and with one that refuses every
 # pseudo-2D row (legacy-dru-refused: WARNINGs, a retried noise block and
 # a bundle, no dialog -- the v0.7.6 script took Oulu's full-size ser of
-# zeros for data), plus desktest with the optional rdopt + sweep features
+# zeros for data), the desktest on a 3.x console that does NOT couple
+# DSPFIRM to DIGMOD (legacy-nocouple, v0.7.8: the DSPFIRM name ladder
+# must run, "sharp(standard)" first, no dialog -- every legacy flavor
+# models Oulu's 3.7.0 of 2026-10-02, where PUTPAR DSPFIRM "sharp" popped
+# a console dialog without raising, so the v0.7.7 script, which wrote it
+# on every expno, fails them all), plus desktest with the optional rdopt
+# + sweep features
 # on under legacy AND the strict flavor (structure/dialog/meta coverage --
 # mock modes exercise the flow, not the physics).
 for RUN in "legacy simulate" "legacy desktest" "ts44 desktest" \
@@ -67,6 +73,7 @@ for RUN in "legacy simulate" "legacy desktest" "ts44 desktest" \
            "legacy-2dtemplate desktest" \
            "legacy-noacqu2 simulate" "legacy-noacqu2 desktest" \
            "legacy-dru desktest" "legacy-dru-refused desktest" \
+           "legacy-nocouple desktest" \
            "legacy desktest rdopt sweep autostep" \
            "ts44-strict desktest rdopt sweep autostep"; do
     set -- $RUN
@@ -252,7 +259,7 @@ echo "--- report QA flags (test_report_qa_flags) ---"
 python3 "$TESTING/test_report_qa_flags.py" --out-dir "$CLOCKWORK/qaflags"
 
 echo ""
-echo "JYTHON HARNESS: ALL PASS (simulate + desktest x 12 console flavors"
+echo "JYTHON HARNESS: ALL PASS (simulate + desktest x 13 console flavors"
 echo "                + selftest"
 echo "                + packer round-trip"
 echo "                + clock-offset recovery: realism, powered, null,"
