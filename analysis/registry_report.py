@@ -78,6 +78,7 @@ GAZETTEER = {
     "madison": (43.1, -89.4), "minneapolis": (45.0, -93.3),
     "tallahassee": (30.4, -84.3), "gainesville": (29.7, -82.3),
     "carbondale": (37.7, -89.2),       # Southern Illinois University
+    "tempe": (33.4, -111.9),           # Arizona State University
     "davis": (38.5, -121.7), "miami": (25.8, -80.2),
     "college station": (30.6, -96.3), "houston": (29.8, -95.4),
     "ithaca": (42.4, -76.5), "baltimore": (39.3, -76.6), "bethesda": (39.0, -77.1),

@@ -291,7 +291,8 @@ although nothing beyond the first row was acquired -- and the v0.7.6
 script, which checked only that a raw-data file existed, took each block
 for done, asked nothing, and packed and uploaded a bundle of zeros.
 **What explains it, in the order of the evidence.** (1) The
-**acquisition mode** -- the leading explanation. Every Oulu acquisition
+**acquisition mode** -- the explanation, **confirmed on the hardware on
+2026-10-02** (the manual check below). Every Oulu acquisition
 ran `DIGMOD` 3 (`baseopt`) with `DSPFIRM` 4 (`rectangle`), carried over
 from the operator's parameter set; Torino's Avance Neo, which acquired
 the same `zgnoise2d` rows (262144 points, 89 of them) without complaint
@@ -310,13 +311,18 @@ the weakest: each row was handed to the workstation in the 50 ms
 `wr`, and 1 MB in 50 ms asks for 20 MB/s where the rungs proved 2.2 MB/s.
 But the abort came in the middle of the second row, not at its write,
 and `zgref2d` already had 2 s of `d1` between its rows. (3) Something
-else in the DRU firmware path -- not excluded by one session.
+else in the DRU firmware path -- excluded by the manual check of
+2026-10-02 (below): the same row, the same pulse program, the same
+console, `digital` instead of `baseopt`, acquired.
 **Fixed in v0.7.7**, in four parts, ordered the same way. (1) The script
 sets **`DIGMOD` `digital` and `DSPFIRM` `sharp`** on every experiment it
 acquires with (the setup expno, the rungs, the row probe, the
 references, the noise block, the sweep), by the documented enum names --
 as it writes `PARMODE` -- and reads both back (`GETPAR` returns the
-ordinal on 3.x/4.x: `1` and `0`). Digital mode is also what a pulse-free
+ordinal on 3.x/4.x: `1` and `0`); since v0.7.8 it reads both FIRST and
+writes only what the readback says is missing -- one `DIGMOD` write per
+session, no `DSPFIRM` write on a console that couples the two (see the
+`GetEnuOrd[DSPFIRM]` entry below). Digital mode is also what a pulse-free
 record wants: no baseline optimisation of noise, and `DE` returns to its
 plain value (Oulu ran `DE` 13.55 us in `baseopt`, Torino 6.5 us in
 `digital`). A console that rejects the names, or whose readback keeps
@@ -352,32 +358,72 @@ themselves as well: a row that is all zeros is dropped and counted
 EXCLUDED, and every block with zero rows is a **FAIL** `raw data all
 zeros` naming it; `rows declared vs read` says how many rows with data
 remain -- for a desktest bundle too (`report.json` `raw_data_check`).
-**The manual check on the old dataset**, which settles which
-explanation held on Oulu's console and takes two minutes at the console:
-open expno 12 of `SPINNOISE_20260930_1201` (the refused noise block:
-`zgnoise2d` as installed by v0.7.6, TD 262144, its `d1 wr` line intact),
-type `1 td` and set it to `1` (one row: the check costs 19 s and cannot
-fill the disk), type `digmod` and choose `digital` (TopSpin then sets
-`DSPFIRM` to `sharp` by itself; `dspfirm` shows it), then `zg`. If the
-row acquires without the `DRUCONTR` message, the mode was the cause. If
-the console still refuses it, also type `d1 1` (a 1 s write window, the
-equivalent of v0.7.7's `d11`) and `zg` once more: if that passes, the
-write window was the cause after all; if it does not, please send
-TopSpin's error text -- the v0.7.7 row probe finds a row the unit takes
-either way. Do not run this on a v0.7.7 session's dataset; the script
-has done it.
-**What to look for in a v0.7.7 `meta.json`** from a console like Oulu's:
-`software.param_api.digmod_form` `name` (the mode switch took) with
-`digmod_readback` `1` / `dspfirm_readback` `0`; `calibration.row_probe.
-attempt_passed` `1` (the default row accepted in digital mode) -- or
-which attempt it took; `td_row` / `transfer_delay_s` (the geometry the
-blocks used -- a shorter row is recorded, not a fault); `blocks[].
-acquired` true for 11/12/13; `blocks_without_data` empty. The 12-18 s
-the DRU ran into the second row before aborting is what makes a two-row
-probe conclusive at the default 19 s row; at shorter rows the probe
-acquires more rows so that at least 40 s of acquisition follow the first
-row. Please send the bundle: `digmod_form` together with the `attempts`
-list is the answer to which explanation held.
+**The manual check on the old dataset** -- done at Oulu on 2026-10-02,
+and it settled it. The operator opened expno 12 of
+`SPINNOISE_20260930_1201` (the refused noise block: `zgnoise2d` as
+installed by v0.7.6, TD 262144, its `d1 wr` line intact), typed `1 td`
+and set it to `1` (one row: the check costs 19 s and cannot fill the
+disk), typed `digmod` and chose `digital` (TopSpin then sets `DSPFIRM`
+to `sharp` by itself; `dspfirm` shows it), then `zg` -- and **the row
+that the receiver unit had refused in `baseopt` two days earlier
+acquired cleanly at the first try**, without the `DRUCONTR` message.
+Same console, same pulse program, same row length, same 50 ms write
+window: the acquisition mode was the cause; the write window was not.
+The recipe stands for any other facility that meets the message on a
+pre-v0.7.7 dataset (if the console still refuses the row in `digital`,
+also type `d1 1` and `zg` once more, then send TopSpin's error text);
+do not run it on a v0.7.7+ session's dataset -- the script has done it.
+**What to look for in a v0.7.8 `meta.json`** from a console like Oulu's:
+`software.param_api.digmod_form` `name` (the mode switch took at the
+setup expno; `already` if the template was `digital` to begin with) with
+`dspfirm_form` `coupled` (the console moved `DSPFIRM` to `sharp` by
+itself when `DIGMOD` changed, as Oulu's 3.7.0 did -- `sharp(standard)`
+or `sharp` would mean the console did not couple and that name of the
+script's ladder took) and `digmod_readback` `1` / `dspfirm_readback`
+`0`; `calibration.row_probe.attempt_passed` `1` (the default row
+accepted in digital mode) -- or which attempt it took; `td_row` /
+`transfer_delay_s` (the geometry the blocks used -- a shorter row is
+recorded, not a fault); `blocks[].acquired` true for 11/12/13;
+`blocks_without_data` empty. The 12-18 s the DRU ran into the second row
+before aborting is what makes a two-row probe conclusive at the default
+19 s row; at shorter rows the probe acquires more rows so that at least
+40 s of acquisition follow the first row. Please send the bundle:
+`digmod_form` / `dspfirm_form` together with the `attempts` list say
+what the console kept and what it needed.
+
+**TopSpin shows `GetEnuOrd[DSPFIRM]: enumeration name sharp not found`
+-- several times over a session, one dialog per experiment the script
+acquires with (script v0.7.7).**
+Seen at Oulu (Avance III HD 500, TopSpin 3.7.0, 2026-10-02) during the
+v0.7.7 desktest: one dialog each for the setup expno, the four rungs,
+the row probe and the three pseudo-2D blocks, while the run went on to
+a bundle whose `meta.json` says `putpar_failures` `0`, `failed_forms`
+`[]`, `digmod_form` `name`, `digmod_readback` `1`, `dspfirm_readback`
+`0`. **Meaning:** v0.7.7 wrote `DIGMOD` `digital` and then `DSPFIRM`
+`sharp` on every experiment. The console accepted the first and, as
+Bruker documents (`rectangle` selects `baseopt` and vice versa), moved
+`DSPFIRM` to `sharp` by itself. The second write named the enum the way
+Bruker's Acquisition Reference spells it, `sharp`, which this console's
+enum table does not contain (TopSpin 3.x's parameter editor spells it
+`sharp(standard)`), so the console answered with its own dialog and
+dropped the write -- without raising into Jython. The script therefore
+counted no failure, marked nothing as failed, and repeated the write on
+the next expno. **Harmless:** every dataset was acquired in `digital` /
+`sharp` (the readbacks say so and the data agree), the dialogs are not
+modal, the run completes. Close them. **Fixed in v0.7.8:** the script
+reads `DIGMOD` and `DSPFIRM` before writing anything. From the second
+expno on `WR` has copied the mode, so nothing is written; at the setup
+expno it writes `DIGMOD` `digital` only, reads both back, and writes
+`DSPFIRM` only if the console did not couple -- then `sharp(standard)`
+first and `sharp` second, each at most once per session, each judged by
+its readback (a name that does not take goes to `failed_forms` as
+`DSPFIRM:<name>` and is never tried again). On Oulu's console that is
+one `DIGMOD` write per session and no dialog.
+`software.param_api.dspfirm_form` records how `DSPFIRM` came to read
+`sharp` (`coupled` on a console like Oulu's). The rule behind the fix,
+learned since v0.7.4's `acqu2` dialog: **a console dialog is not a
+Python exception, so the script decides by readback, never by the
+absence of an exception.**
 
 **TopSpin shows `rga: acqt0 not set in pulse program, result may be
 incorrect!` as the noise block's receiver-gain optimisation runs (script
@@ -536,10 +582,11 @@ re-zip a partially extracted tree.
   zeros" (WARN)** — the block's `ser` has the declared size but its later
   rows were never written: TopSpin 3.x pre-allocates the file when `zg`
   starts and the receiver unit aborted the block after its first row
-  (section 2, `DRUCONTR`; the acquisition mode `baseopt` is the leading
-  explanation). The rows with data were analysed on their own and the
-  numbers rest on them alone; a block without a single data row is
-  EXCLUDED. Acquire again with v0.7.7, which sets `DIGMOD` `digital` and
+  (section 2, `DRUCONTR`; the acquisition mode `baseopt` is the cause,
+  confirmed at Oulu on 2026-10-02). The rows with data were analysed on
+  their own and the numbers rest on them alone; a block without a single
+  data row is EXCLUDED. Acquire again with v0.7.8, which sets `DIGMOD`
+  `digital` and
   whose row probe finds the row geometry the console accepts. A desktest
   bundle gets the same lines in `report.json` under `raw_data_check`.
 - **"row probe (acquisition script)" WARN** — the console needed a row

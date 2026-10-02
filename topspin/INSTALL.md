@@ -33,9 +33,15 @@ for the LAN capacity`), leaving full-size `ser` files of one row and
 zeros. Every Oulu acquisition ran `baseopt` from the operator's parameter
 set -- a mode in which Bruker documents 16x the points processed inside
 the DRU -- while Torino's Neo acquired the same rows in `digital`; the
-mode switch is the fix, `d11` the insurance, the probe the safety net
-(`docs/TROUBLESHOOTING.md` has the evidence and a two-minute manual
-check on the old dataset).
+mode switch is the fix -- confirmed on Oulu's console on 2026-10-02,
+when the refused row acquired at the first try once set to `digital` by
+hand -- `d11` the insurance, the probe the safety net
+(`docs/TROUBLESHOOTING.md` has the evidence). Since v0.7.8 the script
+reads the mode before writing it: one `DIGMOD` write per session, at the
+setup expno, and no `DSPFIRM` write on a console that couples the two as
+TopSpin 3.7.0 does -- the v0.7.7 desktest at Oulu had popped
+`GetEnuOrd[DSPFIRM]: enumeration name sharp not found` once per
+experiment (harmless; see the troubleshooting list below).
 
 Works on TopSpin **2.x, 3.x and 4.x** (the script is written for the
 embedded Jython interpreter and avoids anything version-specific; every
@@ -132,8 +138,10 @@ The row length (TD, default 262144) and the transfer delay (D11,
 default 1 s) may differ between consoles; whatever the probe settled on
 is what expnos 11–13 were acquired with, and `meta.json` records it. The
 acquisition mode is `DIGMOD` `digital` / `DSPFIRM` `sharp` on every expno
-(set by the script; `software.param_api.digmod_form` says whether the
-console took it).
+(set by the script at the setup expno and carried along by `WR`;
+`software.param_api.digmod_form` says whether the console took it and
+`dspfirm_form` how `DSPFIRM` got there -- `coupled` on TopSpin 3.7.0,
+which moves it by itself).
 
 `meta.json` is written into the dataset directory and into the bundle.
 
@@ -193,18 +201,30 @@ step-by-step checklist with pass criteria is
   III HD, TopSpin 3.7.0 at Oulu, 2026-09-30)** — the receiver unit
   acquired the first 1 MB row of each block completely and aborted the
   block 12–18 s into the second row; TopSpin left full-size `ser` files
-  of one row and zeros, which the old script took for data. Leading
-  explanation: the acquisition mode — every Oulu expno ran `DIGMOD`
-  `baseopt` (16x the points inside the DRU, per Bruker), Torino's Neo
-  acquired the same rows in `digital`; the 30–50 ms write window before
-  `wr` is the weaker one (the abort came mid-row). Install v0.7.7: the
+  of one row and zeros, which the old script took for data. The cause,
+  confirmed at Oulu on 2026-10-02: the acquisition mode — every Oulu
+  expno ran `DIGMOD` `baseopt` (16x the points inside the DRU, per
+  Bruker), Torino's Neo acquired the same rows in `digital`, and the
+  refused row acquired at the first try once set to `digital` by hand;
+  the 30–50 ms write window before `wr` was the weaker one (the abort
+  came mid-row). Install v0.7.8: the
   script sets `DIGMOD` `digital` / `DSPFIRM` `sharp` on every experiment,
   both pulse programs write during a 1 s transfer delay `d11`
   (insurance), the row probe (expno 17) checks before the references
   that the row comes back with data and shortens it if not (safety net),
-  and every block is checked for content afterwards. To settle it on the
-  old dataset: expno 12 of `SPINNOISE_20260930_1201`, `1 td` → 1,
-  `digmod` → digital, `zg`; if still refused, `d1 1` and `zg` once more.
+  and every block is checked for content afterwards. That is what the
+  manual check on the old dataset did (expno 12 of
+  `SPINNOISE_20260930_1201`, `1 td` → 1, `digmod` → digital, `zg`). See
+  `docs/TROUBLESHOOTING.md`.
+- **TopSpin shows `GetEnuOrd[DSPFIRM]: enumeration name sharp not found`,
+  once per experiment (script v0.7.7; TopSpin 3.7.0 at Oulu,
+  2026-10-02)** — harmless: the console had already moved `DSPFIRM` to
+  `sharp` when the script set `DIGMOD` `digital`, and refused the
+  script's explicit `DSPFIRM` `sharp` (its enum table spells it
+  `sharp(standard)`) with a dialog that raised no exception, so the
+  script repeated it on every expno. Every dataset was acquired in
+  `digital` / `sharp`; close the dialogs. v0.7.8 reads the mode before
+  writing it and writes `DSPFIRM` only when the console did not couple.
   See `docs/TROUBLESHOOTING.md`.
 - **TopSpin shows `rga: acqt0 not set in pulse program, result may be
   incorrect!` at the noise block (script v0.7.6 or earlier)** —

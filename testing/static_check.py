@@ -1020,63 +1020,102 @@ check("meta: schema knows the row_probe role (experiments and clock_audit), "
       and "row_probe" in schema["properties"]["clock_audit"]["properties"]["blocks"]["items"]["properties"]["role"]["enum"]
       and "row_probe" in schema["properties"]["calibration"]["properties"]
       and "blocks_without_data" in schema["properties"]["software"]["properties"]["param_api"]["description"])
-# 6. Acquisition mode (v0.7.7).  Oulu, 2026-09-30: every expno ran DIGMOD
-#    baseopt / DSPFIRM rectangle from the operator's parameter set and the
-#    DRU aborted every 262144-point pseudo-2D row after the first; Torino's
-#    digital / sharp rows acquired.  Pinned: the script writes DIGMOD
-#    digital then DSPFIRM sharp by enum NAME on every dataset it acquires
-#    with (set_digital_mode, first thing in set_common_acq), accepts the
-#    ordinal or the name on readback, never insists (failed_forms via
-#    _form_failed, digmod_mismatch counted, no dialog), records the
-#    outcome in param_api, the schema documents the keys, the stub models
-#    the enum (ordinal readback, ts44-strict rejection, the documented
-#    DSPFIRM/DIGMOD coupling) and the harness checks every dataset's mode.
+# 6. Acquisition mode (v0.7.7; read before written since v0.7.8).  Oulu,
+#    2026-09-30: every expno ran DIGMOD baseopt / DSPFIRM rectangle from
+#    the operator's parameter set and the DRU aborted every 262144-point
+#    pseudo-2D row after the first; Torino's digital / sharp rows
+#    acquired; 2026-10-02: the operator's manual check in digital mode
+#    acquired the refused row (confirmed), and the v0.7.7 desktest showed
+#    that on 3.7.0 the DIGMOD write alone moves DSPFIRM to sharp while
+#    PUTPAR DSPFIRM "sharp" pops "GetEnuOrd[DSPFIRM]: enumeration name
+#    sharp not found" WITHOUT raising (putpar_failures 0) -- a dialog per
+#    acquired expno.  Pinned: set_digital_mode (first thing in
+#    set_common_acq) reads both before writing anything, writes DIGMOD
+#    digital by enum NAME only when the readback is not digital, writes
+#    DSPFIRM only when the readback after that is still not sharp -- by
+#    the ladder "sharp(standard)" then "sharp", each at most once per
+#    session (failed_forms) -- judges every write by readback (never by
+#    the absence of an exception), accepts the ordinal or the name on
+#    readback, never insists (digmod_mismatch counted, no dialog),
+#    records the outcome in param_api (dspfirm_form added), the schema
+#    documents the keys, the stub models the enum (ordinal readback,
+#    ts44-strict rejection, the documented coupling, Oulu's 3.7.0 dialog
+#    on "sharp", the non-coupling legacy-nocouple console) and the
+#    harness checks every dataset's mode and the write counts.
 _sdm = "\n".join(function_body("set_digital_mode")[0])
+_ram = "\n".join(function_body("_read_acq_mode")[0])
 _sca = "\n".join(function_body("set_common_acq")[0])
-check("acquisition mode: DIGMOD digital / DSPFIRM sharp written by enum name "
-      "(putpar), DIGMOD first, read back accepting ordinal or name, never "
-      "insisted on (failed_forms, digmod_mismatch), called first in "
-      "set_common_acq -- the one code path every acquired dataset takes",
-      'DIGMOD_NAME  = "digital"' in SRC and 'DSPFIRM_NAME = "sharp"' in SRC
+check("acquisition mode (v0.7.8): read before written -- DIGMOD digital by "
+      "enum name (putpar) only when the readback is not digital, DSPFIRM "
+      "only when the readback after the DIGMOD write is still not sharp, by "
+      "the ladder sharp(standard) then sharp, each name at most once "
+      "(failed_forms), every write judged by readback; never insisted on "
+      "(digmod_mismatch); called first in set_common_acq -- the one code "
+      "path every acquired dataset takes",
+      'DIGMOD_NAME  = "digital"' in SRC
+      and 'DSPFIRM_NAME_LADDER = ["sharp(standard)", "sharp"]' in SRC
+      and 'DSPFIRM_NAME = "sharp"' not in SRC
       and 'DIGMOD_DIGITAL_READBACKS = ("1", "digital")' in SRC
-      and 'DSPFIRM_SHARP_READBACKS  = ("0", "sharp")' in SRC
+      and 'DSPFIRM_SHARP_READBACKS  = ("0", "sharp", "sharp(standard)")' in SRC
       and 'putpar("DIGMOD", DIGMOD_NAME)' in _sdm
-      and 'putpar("DSPFIRM", DSPFIRM_NAME)' in _sdm
+      and 'putpar("DSPFIRM", name)' in _sdm
+      and _sdm.count('putpar("DSPFIRM"') == 1
+      and _sdm.index("_read_acq_mode()") < _sdm.index('putpar("DIGMOD"')
       and _sdm.index('putpar("DIGMOD"') < _sdm.index('putpar("DSPFIRM"')
+      and _sdm.count("_read_acq_mode()") == 3
+      and "for name in names:" in _sdm
       and '_form_failed("DIGMOD", "name")' in _sdm
-      and '_form_failed("DSPFIRM", "name")' in _sdm
+      and '_form_failed("DSPFIRM", name)' in _sdm
       and '_form_has_failed("DIGMOD", "name")' in _sdm
+      and '_form_has_failed("DSPFIRM", name)' in _sdm
+      and 'PARAM_API["dspfirm_form"] = "coupled"' in _sdm
+      and 'PARAM_API["digmod_form"] = "already"' in _sdm
       and 'PARAM_API["digmod_mismatch"] = PARAM_API["digmod_mismatch"] + 1' in _sdm
-      and 'PARAM_API["digmod_readback"] = dm' in _sdm
-      and 'PARAM_API["dspfirm_readback"] = df' in _sdm
+      and 'PARAM_API["digmod_readback"] = dm' in _ram
+      and 'PARAM_API["dspfirm_readback"] = df' in _ram
       and "CONFIRM(" not in _sdm and "SELECT(" not in _sdm
       and _sca.index("set_digital_mode()") < _sca.index('putpar("TD"')
       and SRC.count("    set_digital_mode()\n") == 1)
 check("acquisition mode: the WHY is in the file -- Oulu's DIGMOD 3 / DSPFIRM 4 "
       "against Torino's 1 / 0, Bruker's '16 times more data points' and the "
       "DRU memory statement, DE's return to its plain value, the coupling of "
-      "DSPFIRM and DIGMOD",
+      "DSPFIRM and DIGMOD, the 2026-10-02 hardware confirmation, the "
+      "GetEnuOrd[DSPFIRM] dialog and the rule 'decide by readback, never by "
+      "the absence of an exception'",
       "16 times more data points" in SRC and "DIGMOD 3" in SRC
       and "memory on the DRU" in SRC and "DE returns to its plain value" in SRC
-      and "rectangle selects DIGMOD baseopt" in SRC)
-check("meta: PARAM_API carries digmod_form / digmod_readback / dspfirm_readback "
-      "/ digmod_mismatch and the schema documents them",
-      all(('"%s":' % k) in SRC for k in ("digmod_form", "digmod_readback",
+      and "rectangle selects DIGMOD baseopt" in SRC
+      and "2026-10-02" in SRC
+      and "GetEnuOrd[DSPFIRM]: enumeration name sharp not found" in SRC
+      and "decide by readback, never by the absence of an" in SRC)
+check("meta: PARAM_API carries digmod_form / dspfirm_form / digmod_readback / "
+      "dspfirm_readback / digmod_mismatch and the schema documents them",
+      all(('"%s":' % k) in SRC for k in ("digmod_form", "dspfirm_form",
+                                         "digmod_readback",
                                          "dspfirm_readback", "digmod_mismatch"))
       and all(k in schema["properties"]["software"]["properties"]["param_api"]["description"]
-              for k in ("digmod_form", "digmod_readback", "dspfirm_readback",
-                        "digmod_mismatch")))
+              for k in ("digmod_form", "dspfirm_form", "digmod_readback",
+                        "dspfirm_readback", "digmod_mismatch", "coupled",
+                        "sharp(standard)", "GetEnuOrd[DSPFIRM]")))
 check("stub: models DIGMOD / DSPFIRM as enums (name written, ordinal read "
-      "back, ts44-strict rejects the names, the documented coupling) and the "
-      "harness template carries Oulu's baseopt / rectangle and checks every "
-      "dataset's mode",
+      "back, ts44-strict rejects the names, the documented coupling), Oulu's "
+      "3.7.0 of 2026-10-02 (PUTPAR DSPFIRM sharp -> GetEnuOrd dialog, write "
+      "dropped, no exception; sharp(standard) accepted) and the non-coupling "
+      "legacy-nocouple console; the harness template carries Oulu's baseopt "
+      "/ rectangle, checks every dataset's mode and runs legacy-nocouple",
       "_DIGMOD_TO_ORDINAL" in STUB_SRC and "_DSPFIRM_TO_ORDINAL" in STUB_SRC
       and "def _couple_acq_mode" in STUB_SRC
       and 'n in (u"DIGMOD", u"DSPFIRM")' in STUB_SRC
+      and "_DSPFIRM_NAMES_TS3" in STUB_SRC and "_DSPFIRM_NAMES_TS44" in STUB_SRC
+      and 'u"sharp(standard)"' in STUB_SRC
+      and "GetEnuOrd[DSPFIRM]: enumeration name %s not found" in STUB_SRC
+      and '"legacy-nocouple"' in STUB_SRC
       and '"DIGMOD": u"baseopt"' in ENTRY_SRC
       and '"DSPFIRM": u"rectangle"' in ENTRY_SRC
       and "acquisition mode[" in ENTRY_SRC
-      and '"DIGMOD:name", "PARMODE:name"' in ENTRY_SRC)
+      and '"legacy-nocouple"' in ENTRY_SRC
+      and '"DIGMOD:name", "PARMODE:name"' in ENTRY_SRC
+      and '"legacy-nocouple desktest"' in SH_SRC)
 check("report: the software-test report runs the raw-data content check "
       "(report.json raw_data_check: the shared refusal / rows / all-zeros "
       "flags) and the harness reads it for the legacy-dru-refused bundle",
@@ -1114,14 +1153,18 @@ with open(os.path.join(REPO, "docs", "TROUBLESHOOTING.md"), encoding="utf-8") as
     _TS = fh.read()
 _INST = open(os.path.join(REPO, "topspin", "INSTALL.md"), encoding="utf-8").read()
 check("docs: TROUBLESHOOTING has the DRUCONTR entry (evidence stated: first "
-      "row acquired, abort mid-second-row, baseopt vs digital leading, d11 "
-      "insurance, probe safety net, the operator's manual check on expno 12 "
-      "of SPINNOISE_20260930_1201) and the rga 'acqt0 not set' entry; "
-      "INSTALL.md maps expno 17 and names DIGMOD",
+      "row acquired, abort mid-second-row, baseopt vs digital confirmed by "
+      "the operator's manual check on expno 12 of SPINNOISE_20260930_1201 "
+      "on 2026-10-02, d11 insurance, probe safety net), the rga 'acqt0 not "
+      "set' entry and the GetEnuOrd[DSPFIRM] entry keyed on the exact dialog "
+      "text; INSTALL.md maps expno 17, names DIGMOD and the dialog",
       "DRUCONTR" in _TS and "acqt0 not set" in _TS and "baseopt" in _TS
       and "SPINNOISE_20260930_1201" in _TS and "digmod" in _TS
       and "insurance" in _TS and "safety net" in _TS
-      and "| 17 |" in _INST and "DIGMOD" in _INST)
+      and "2026-10-02" in _TS
+      and "GetEnuOrd[DSPFIRM]: enumeration name sharp not found" in _TS
+      and "| 17 |" in _INST and "DIGMOD" in _INST
+      and "GetEnuOrd[DSPFIRM]" in _INST)
 
 
 # --------------------------------------------------------------------------

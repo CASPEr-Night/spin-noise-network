@@ -30,7 +30,10 @@
 #      since v0.7.7 also the row probe (expno 17), the raw-data files the
 #      mocked acquisitions leave, the data-content check of every
 #      pseudo-2D block and, under the legacy-dru flavors, the script's
-#      handling of a receiver unit that refuses blocks.
+#      handling of a receiver unit that refuses blocks; since v0.7.8 the
+#      acquisition-mode writes per flavor (DIGMOD once per session, no
+#      DSPFIRM write on a coupling console, the name ladder on
+#      legacy-nocouple) and zero GetEnuOrd[DSPFIRM] dialogs.
 #
 # The template parameter values are plausible reals taken from the 2020
 # archival 600 MHz cryoprobe dataset that motivated this project
@@ -67,7 +70,7 @@ import topspin_stub
 FLAVORS = ("legacy", "ts44", "ts44-stale", "ts44-strict", "ts44-f1echo",
            "ts44-dimlie", "ts44-f1route", "ts44-f1mismatch",
            "legacy-2dtemplate", "legacy-noacqu2",
-           "legacy-dru", "legacy-dru-refused")
+           "legacy-dru", "legacy-dru-refused", "legacy-nocouple")
 DRU_FLAVORS = ("legacy-dru", "legacy-dru-refused")
 # legacy-dru / legacy-dru-refused (v0.7.7): legacy-noacqu2 on an Avance III
 # HD whose AQS DRU refuses a pseudo-2D block (Oulu, 2026-09-30: "too much
@@ -92,6 +95,12 @@ DRU_FLAVORS = ("legacy-dru", "legacy-dru-refused")
 # console's own parameter library, exp/stan/nmr/par) at the attended
 # probe, BEFORE any F1 access, and later pseudo-2D datasets inherit the
 # file via WR(); no dialog anywhere, every write verified.
+# legacy-nocouple (v0.7.8): legacy-noacqu2 on a 3.x console that does NOT
+# move DSPFIRM to sharp when DIGMOD is set to digital (Oulu's 3.7.0 did,
+# 2026-10-02; this is the hypothetical the DSPFIRM name ladder exists
+# for).  Every other expectation is legacy-noacqu2's; the acquisition-mode
+# check wants the ladder's first name, "sharp(standard)", written once
+# and accepted, "sharp" never reached, no dialog.
 
 
 # The F1 parameter file the fake TopSpin home's standard parameter library
@@ -665,13 +674,22 @@ def main():
     # dataset without acqu2 -- the candidate the script can avoid.  Like a
     # rejected PUTPAR, each one is a dialog the operator saw and possibly
     # a modal stop in an unattended run: none is acceptable.
-    _stray = ["%s %s" % (a, n) for a, n, t in topspin_stub.STRAY_DIALOGS]
-    check("no stray console dialogs (the stub's model of the Oulu dialog: "
-          "F1 GETPAR/PUTPAR on a 2D dataset without acqu2, TopSpin 3.7.0)",
-          not _stray, "; ".join(_stray)[:400])
+    # Since v0.7.8 the stub's legacy flavors also pop Oulu's second
+    # dialog, "GetEnuOrd[DSPFIRM]: enumeration name sharp not found", on
+    # PUTPAR("DSPFIRM", "sharp") -- the write dropped, no exception (Oulu,
+    # 2026-10-02: nine dialogs across the v0.7.7 desktest, putpar_failures
+    # 0) -- so this check is also the one that fails the v0.7.7 script.
+    _stray = ["%s %s: %s" % (a, n, t[:60])
+              for a, n, t in topspin_stub.STRAY_DIALOGS]
+    check("no stray console dialogs (the stub's models of Oulu's two "
+          "dialogs: F1 GETPAR/PUTPAR on a 2D dataset without acqu2, "
+          "2026-09-25, and GetEnuOrd[DSPFIRM] on PUTPAR DSPFIRM sharp, "
+          "2026-10-02; TopSpin 3.7.0)",
+          not _stray, "; ".join(_stray)[:600])
     _dropped = [s for a, s in _log if a == "PUTPAR-DROPPED"]
-    check("no parameter write was silently lost by the console (PUTPAR on "
-          "a 2D dataset without acqu2)", not _dropped,
+    check("no parameter write was dropped by the console without an "
+          "exception (PUTPAR on a 2D dataset without acqu2; PUTPAR DSPFIRM "
+          "by a name the console's enum table lacks)", not _dropped,
           "; ".join(_dropped)[:400])
     check("param_api: every rejected parameter was probed EXACTLY once "
           "(no stray dialog repeats) and failed_forms has no duplicates",
@@ -770,6 +788,12 @@ def main():
                                    verified=1, src="getpar", already_min=3,
                                    unverified_min=0, c2d=0, cf1=0, msg=0,
                                    notice=None, pm="1", acqudim=2),
+        # The non-coupling 3.x console (v0.7.8): Oulu's dialect again; the
+        # DSPFIRM name ladder is what differs (checked with the mode).
+        "legacy-nocouple": dict(form="name", f1form="1 TD", failed=[],
+                                verified=1, src="getpar", already_min=3,
+                                unverified_min=0, c2d=0, cf1=0, msg=0,
+                                notice=None, pm="1", acqudim=2),
     }[flavor]
     # F1 parameter files (v0.7.5).  No console is known to create acqu2 on
     # a scripted PARMODE write -- TopSpin 3.7.0 (Oulu, 2026-09-25) and
@@ -836,7 +860,8 @@ def main():
                      "ts44-strict": 1, "ts44-dimlie": 11,
                      "ts44-f1route": 6, "ts44-f1mismatch": 4,
                      "legacy-2dtemplate": 3,
-                     "legacy-dru": 2, "legacy-dru-refused": 2}[flavor]
+                     "legacy-dru": 2, "legacy-dru-refused": 2,
+                     "legacy-nocouple": 2}[flavor]
     # Every dataset must have the dimensionality its role needs at
     # acquisition time, whatever the template was: the stub's parameter
     # store is inspected per expno (PARMODE ordinal "0"/"1" or name).
@@ -852,62 +877,123 @@ def main():
     check("dimensionality: 1D roles are 1D and pseudo-2D roles are 2D at "
           "acquisition, whatever the template was", not _bad_dims,
           "; ".join(_bad_dims))
-    # ---- acquisition mode (v0.7.7).  Oulu, 2026-09-30: every expno ran
-    # DIGMOD baseopt / DSPFIRM rectangle from the operator's parameter set
-    # and the DRU aborted every 262144-point pseudo-2D row after the first
-    # ("too much data for the LAN capacity"); Torino's digital / sharp
-    # rows acquired.  The template here carries Oulu's mode, so every
-    # dataset the script acquires with must read digital / sharp at
-    # acquisition, written by enum name and read back as the ordinals "1"
-    # / "0"; ts44-strict rejects the names (like PARMODE's): the script
-    # probes DIGMOD once, records DIGMOD:name in failed_forms, never
-    # writes DSPFIRM, and leaves the mode as the template had it.
+    # ---- acquisition mode (v0.7.7; read before written since v0.7.8).
+    # Oulu, 2026-09-30: every expno ran DIGMOD baseopt / DSPFIRM rectangle
+    # from the operator's parameter set and the DRU aborted every
+    # 262144-point pseudo-2D row after the first ("too much data for the
+    # LAN capacity"); Torino's digital / sharp rows acquired.  Oulu,
+    # 2026-10-02: the operator's manual check in digital mode acquired the
+    # refused row (the mode is confirmed), and the v0.7.7 desktest on the
+    # same console showed the DIGMOD write alone moving DSPFIRM to sharp
+    # while PUTPAR DSPFIRM "sharp" popped "GetEnuOrd[DSPFIRM]: enumeration
+    # name sharp not found" on every acquired expno WITHOUT raising.  The
+    # template here carries Oulu's mode, so every dataset the script
+    # acquires with must read digital / sharp at acquisition (compared as
+    # the ordinals "1" / "0" through the stub's enum maps, whichever
+    # spelling the store holds), and the way there is pinned per flavor:
+    #   * coupling consoles (every flavor but the two below): DIGMOD =
+    #     digital written EXACTLY ONCE, at the setup expno -- between the
+    #     first WR (the setup expno, from the template) and the second
+    #     (the first rung); WR carries the mode to every later expno and
+    #     the script must see that by READING first -- no DSPFIRM write of
+    #     any kind, digmod_form "name", dspfirm_form "coupled", readbacks
+    #     "1" / "0", no mismatch, a DIGMOD readback on every dataset;
+    #   * legacy-nocouple: the same single DIGMOD write, then the ladder:
+    #     "sharp(standard)" written once and accepted, "sharp" never
+    #     reached, dspfirm_form "sharp(standard)", failed_forms empty;
+    #   * ts44-strict: DIGMOD's name probed once at the setup expno and
+    #     rejected (a raised PUTPAR), never again, DSPFIRM never written,
+    #     digmod_form "" and dspfirm_form "" with the template's readbacks
+    #     "3" / "4" (read before write), DIGMOD:name in failed_forms, the
+    #     mode left as the template had it.
+    # In every case zero stray dialogs (checked above): the v0.7.7 script
+    # fails every legacy flavor there with nine GetEnuOrd[DSPFIRM] dialogs.
     _bad_mode = []
-    _want_mode = (u"digital", u"sharp")
+    _want_mode = (u"1", u"0")
     if flavor == "ts44-strict":
-        _want_mode = (u"baseopt", u"rectangle")
+        _want_mode = (u"3", u"4")
     for _e, _role in zip(expected_expnos, expected_roles):
         _pp = topspin_stub._PARAMS.get(os.path.join(name_dir, str(_e)), {})
-        _got_mode = (_pp.get("DIGMOD"), _pp.get("DSPFIRM"))
+        _got_mode = (topspin_stub._DIGMOD_TO_ORDINAL.get(_pp.get("DIGMOD"),
+                                                         _pp.get("DIGMOD")),
+                     topspin_stub._DSPFIRM_TO_ORDINAL.get(_pp.get("DSPFIRM"),
+                                                          _pp.get("DSPFIRM")))
         if _got_mode != _want_mode:
-            _bad_mode.append("expno %d (%s): DIGMOD/DSPFIRM %r"
-                             % (_e, _role, _got_mode))
+            _bad_mode.append("expno %d (%s): DIGMOD/DSPFIRM %r (store %r / %r)"
+                             % (_e, _role, _got_mode, _pp.get("DIGMOD"),
+                                _pp.get("DSPFIRM")))
     check("acquisition mode[%s]: every acquired dataset reads DIGMOD/DSPFIRM "
-          "%r at acquisition (template: baseopt/rectangle, Oulu's)"
+          "ordinals %r at acquisition (template: baseopt/rectangle, Oulu's)"
           % (flavor, _want_mode), not _bad_mode, "; ".join(_bad_mode)[:500])
     _n_dm = len([1 for a, s in _log
                  if a == "PUTPAR" and s == u"DIGMOD = digital"])
-    _n_df = len([1 for a, s in _log
-                 if a == "PUTPAR" and s == u"DSPFIRM = sharp"])
     _n_dm_rej = len([1 for a, s in _log
                      if a == "PUTPAR-REJECTED" and s.startswith(u"DIGMOD = ")])
-    _n_df_any = len([1 for a, s in _log
-                     if a in ("PUTPAR", "PUTPAR-REJECTED", "PUTPAR-DROPPED")
-                     and s.startswith(u"DSPFIRM = ")])
+    _df_any = [s for a, s in _log
+               if a in ("PUTPAR", "PUTPAR-REJECTED", "PUTPAR-DROPPED")
+               and s.startswith(u"DSPFIRM = ")]
+    _df_ok = [s for a, s in _log
+              if a == "PUTPAR" and s.startswith(u"DSPFIRM = ")]
+    _n_gm = len([1 for a, s in _log
+                 if a == "GETPAR" and s.startswith(u"DIGMOD = ")])
+    _i_wr = [k for k, (a, s) in enumerate(_log) if a == "WR"]
+    _i_dm = [k for k, (a, s) in enumerate(_log)
+             if a in ("PUTPAR", "PUTPAR-REJECTED")
+             and s.startswith(u"DIGMOD = ")]
+    _dm_at_setup = (len(_i_dm) == 1 and len(_i_wr) >= 2
+                    and _i_wr[0] < _i_dm[0] < _i_wr[1])
+    _mode_state = repr((_n_dm, _n_dm_rej, _df_any, _n_gm, _dm_at_setup,
+                        _pa.get("digmod_form"), _pa.get("dspfirm_form"),
+                        _pa.get("digmod_readback"),
+                        _pa.get("dspfirm_readback"),
+                        _pa.get("digmod_mismatch")))
+    check("acquisition mode[%s]: DIGMOD read back before any write on every "
+          "dataset (GETPAR DIGMOD %d times for %d datasets)"
+          % (flavor, _n_gm, len(expected_expnos)),
+          _n_gm >= len(expected_expnos), _mode_state)
     if flavor == "ts44-strict":
         check("acquisition mode[ts44-strict]: DIGMOD's enum name probed "
-              "exactly once and rejected, DSPFIRM never written, digmod_form "
-              "'' with empty readbacks, DIGMOD:name in failed_forms",
-              _n_dm == 0 and _n_dm_rej == 1 and _n_df_any == 0
+              "exactly once, at the setup expno, and rejected; DSPFIRM never "
+              "written; digmod_form '' / dspfirm_form '' with the template's "
+              "readbacks '3' / '4'; DIGMOD:name in failed_forms; no mismatch",
+              _n_dm == 0 and _n_dm_rej == 1 and _dm_at_setup
+              and not _df_any
               and _pa.get("digmod_form") == "" and "DIGMOD:name" in _failed
-              and _pa.get("digmod_readback") == "" and _pa.get("dspfirm_readback") == ""
-              and _pa.get("digmod_mismatch") == 0,
-              repr((_n_dm, _n_dm_rej, _n_df_any, _pa.get("digmod_form"),
-                    _pa.get("digmod_readback"), _pa.get("dspfirm_readback"))))
-    else:
-        check("acquisition mode[%s]: DIGMOD = digital and DSPFIRM = sharp "
-              "written by enum name at every set_common_acq (%d / %d writes "
-              "for %d datasets), never rejected, read back as '1' / '0', "
-              "digmod_form 'name', no mismatch" % (flavor, _n_dm, _n_df,
-                                                    len(expected_expnos)),
-              _n_dm >= len(expected_expnos) and _n_df == _n_dm
-              and _n_dm_rej == 0 and _pa.get("digmod_form") == "name"
+              and _pa.get("dspfirm_form") == ""
+              and _pa.get("digmod_readback") == u"3"
+              and _pa.get("dspfirm_readback") == u"4"
+              and _pa.get("digmod_mismatch") == 0, _mode_state)
+    elif flavor == "legacy-nocouple":
+        check("acquisition mode[legacy-nocouple]: DIGMOD = digital written "
+              "exactly once at the setup expno, the console did not couple, "
+              "the ladder wrote DSPFIRM = sharp(standard) exactly once and it "
+              "took ('sharp' never reached, no dialog, no failed form); "
+              "digmod_form 'name', dspfirm_form 'sharp(standard)', readbacks "
+              "'1' / '0', no mismatch",
+              _n_dm == 1 and _dm_at_setup and _n_dm_rej == 0
+              and _df_any == [u"DSPFIRM = sharp(standard)"]
+              and _df_ok == [u"DSPFIRM = sharp(standard)"]
+              and _pa.get("digmod_form") == "name"
+              and _pa.get("dspfirm_form") == "sharp(standard)"
+              and not [f for f in _failed if f.startswith("DSPFIRM:")]
               and _pa.get("digmod_readback") == u"1"
               and _pa.get("dspfirm_readback") == u"0"
-              and _pa.get("digmod_mismatch") == 0,
-              repr((_n_dm, _n_df, _n_dm_rej, _pa.get("digmod_form"),
-                    _pa.get("digmod_readback"), _pa.get("dspfirm_readback"),
-                    _pa.get("digmod_mismatch"))))
+              and _pa.get("digmod_mismatch") == 0, _mode_state)
+    else:
+        check("acquisition mode[%s]: DIGMOD = digital written exactly once, "
+              "at the setup expno (%d write(s) for %d datasets: WR carried "
+              "the mode, the script read it), the console coupled DSPFIRM to "
+              "sharp by itself and NO DSPFIRM write of any kind was issued "
+              "(%d); digmod_form 'name', dspfirm_form 'coupled', readbacks "
+              "'1' / '0', no mismatch" % (flavor, _n_dm, len(expected_expnos),
+                                          len(_df_any)),
+              _n_dm == 1 and _dm_at_setup and _n_dm_rej == 0
+              and not _df_any
+              and _pa.get("digmod_form") == "name"
+              and _pa.get("dspfirm_form") == "coupled"
+              and _pa.get("digmod_readback") == u"1"
+              and _pa.get("dspfirm_readback") == u"0"
+              and _pa.get("digmod_mismatch") == 0, _mode_state)
     # What the pseudo-2D blocks would ACQUIRE with: Oulu's v0.7.4 bundle
     # recorded td 16384 / rg 1.0 / pulprog zg2d for the noise block (the
     # values inherited from the 1D setup expno) although the script had
@@ -999,7 +1085,8 @@ def main():
           "; ".join(_rgl_bad))
     _n_pm_writes = len([1 for a, s in _log
                         if a == "PUTPAR" and s.startswith(u"PARMODE = ")])
-    if flavor in ("legacy", "legacy-noacqu2") or flavor in DRU_FLAVORS:
+    if flavor in ("legacy", "legacy-noacqu2", "legacy-nocouple") \
+            or flavor in DRU_FLAVORS:
         check("PARMODE written exactly once (the dialect probe's 2D; setup "
               "already 1D; the row probe is WR-copied from expno 11)",
               _n_pm_writes == 1, "writes %d" % _n_pm_writes)

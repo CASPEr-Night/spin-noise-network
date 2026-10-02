@@ -122,7 +122,7 @@ AUTOSTEP = False          # True (with SWEEP): TIER-2 programmatic field
 
 # Single source of truth for the script version.  KEEP IN SYNC with the
 # repository VERSION file (testing/static_check.py enforces the match).
-SCRIPT_VERSION  = "0.7.7"
+SCRIPT_VERSION  = "0.7.8"
 # NOTE: no module constant named PROGRAM_VERSION -- TopSpin's TopCmds
 # exports a FUNCTION of that name and `from TopCmds import *` (below)
 # overwrote the alias, so v0.7.3 bundles carry "<function PROGRAM_VERSION
@@ -172,9 +172,11 @@ EXP_ROW_PROBE = 17
 # produces too much data for the LAN capacity. ->Experiment aborted by
 # DRU1!" -- after each had acquired its first row completely, while the
 # 64 kB 1D rungs passed, and TopSpin left full-size ser files holding one
-# acquired row and zeros.  The leading explanation is the acquisition
-# MODE (DIGMOD baseopt, see set_digital_mode below), which the script now
-# sets to digital; the probe is the safety net if that is not enough.
+# acquired row and zeros.  The cause is the acquisition MODE (DIGMOD
+# baseopt, see set_digital_mode below) -- confirmed on that console on
+# 2026-10-02, when the refused row acquired at the first try in digital
+# -- which the script now sets to digital; the probe is the safety net if
+# that is not enough.
 TD_ROW      = 262144        # complex-pair points per row (TD, F2)
 SWH_HZ      = 6900.0        # -> AQ = TD/(2*SWH) ~ 19.0 s per row
 TD_LADDER   = 16384         # quick 1D ladder acquisitions (~1.2 s)
@@ -220,11 +222,12 @@ ROW_PROBE_MIN_ROWS = 2      # Oulu's DRU acquired the FIRST row of every
 ROW_PROBE_MIN_SECS = 40.0   # ... and covers at least this much acquisition
                             # (a 19 s row: two rows; a 2.4 s row: many)
 RAW_SAMPLE_BYTES = 65536    # bytes read per window by ser_row_has_data
-# Acquisition mode (v0.7.7): DIGMOD digital and DSPFIRM sharp on every
-# experiment the script acquires with -- the setup expno, the rungs, the
-# row probe, the references, the noise block, the sweep -- written by
-# enum NAME like PARMODE and read back (GETPAR returns the ORDINAL on
-# 3.x/4.x: "1" is digital, "0" is sharp; the names are accepted too).
+# Acquisition mode (v0.7.7; read before written since v0.7.8): DIGMOD
+# digital and DSPFIRM sharp on every experiment the script acquires with
+# -- the setup expno, the rungs, the row probe, the references, the noise
+# block, the sweep -- written by enum NAME like PARMODE and read back
+# (GETPAR returns the ORDINAL on 3.x/4.x: "1" is digital, "0" is sharp;
+# the names are accepted too).
 # WHY: at Oulu (Avance III HD 500, AQS DRU-E, TopSpin 3.7.0, 2026-09-30,
 # the first live run) every pseudo-2D block acquired its first 262144-
 # point row completely and was aborted by the receiver unit 12-18 s into
@@ -247,18 +250,49 @@ RAW_SAMPLE_BYTES = 65536    # bytes read per window by ser_row_has_data
 # rows), so d11 stays as insurance and the row probe as the safety net.
 # Digital mode is also what this protocol wants: no baseline optimisation
 # of a pulse-free record, and DE returns to its plain value (Oulu ran DE
-# 13.55 us in baseopt, Torino 6.5 us in digital).  Bruker documents that
-# setting DSPFIRM rectangle selects DIGMOD baseopt and vice versa, so
-# both are written, DIGMOD first.  A console that rejects the enum name
-# (PUTPAR raises -> putpar_failures, failed_forms) or whose readback
-# keeps another mode is recorded in param_api (digmod_form,
+# 13.55 us in baseopt, Torino 6.5 us in digital).  CONFIRMED on the
+# hardware on 2026-10-02: the operator's manual check on the refused
+# noise block (expno 12 of SPINNOISE_20260930_1201 -- 1 TD set to 1,
+# digmod set to digital, zg) acquired the 262144-point row at the first
+# try on the console that had refused that very row in baseopt two days
+# before.  The mode is the cause, no longer only the leading explanation.
+# Bruker documents that setting DSPFIRM rectangle selects DIGMOD baseopt
+# and vice versa, and the same 2026-10-02 session showed the other half
+# of that coupling on TopSpin 3.7.0: the DIGMOD digital write ALONE moved
+# DSPFIRM to sharp (ordinal 0 read back on every expno of the v0.7.7
+# desktest), while the explicit PUTPAR("DSPFIRM", "sharp") that v0.7.7
+# then issued on every dataset was refused by the console with its own
+# dialog -- "GetEnuOrd[DSPFIRM]: enumeration name sharp not found" --
+# which never raised into Jython (putpar_failures 0, failed_forms []), so
+# the script repeated it on every acquired expno and the dialogs piled up
+# on the unattended screen (cosmetic: the run finished; alarming: the
+# operator saw them).  Bruker's Acquisition Reference spells the enum
+# "sharp"; TopSpin 3.x's parameter editor spells it "sharp(standard)";
+# the console's own enum table decides, and only a readback can tell.
+# Since v0.7.8 set_digital_mode therefore reads before it writes, writes
+# DIGMOD only when the readback is not digital, writes DSPFIRM only when
+# the readback after the DIGMOD write is still not sharp (then by the
+# names of DSPFIRM_NAME_LADDER, each at most once per session), and
+# judges every write by its readback, never by the absence of an
+# exception.  A name that does not take (PUTPAR raises, or the readback
+# keeps its value) goes into failed_forms and is never asked again; a
+# console whose readback keeps another mode is counted (digmod_mismatch);
+# all of it is recorded in param_api (digmod_form, dspfirm_form,
 # digmod_readback, dspfirm_readback, digmod_mismatch) and never insisted
 # on -- the row probe then finds a row the unit takes in whatever mode it
 # kept.
-DIGMOD_NAME  = "digital"           # documented enum name (DIGMOD)
-DSPFIRM_NAME = "sharp"             # documented enum name (DSPFIRM)
+DIGMOD_NAME  = "digital"           # documented enum name (DIGMOD):
+                                   # accepted on 3.7.0 and 4.4.0
+DSPFIRM_NAME_LADDER = ["sharp(standard)", "sharp"]
+                                   # DSPFIRM names tried, in this order,
+                                   # ONLY when the DIGMOD write did not
+                                   # move DSPFIRM to sharp by itself: the
+                                   # parameter editor's spelling on
+                                   # TopSpin 3.x first, then the
+                                   # Acquisition Reference's -- the one
+                                   # 3.7.0 refused (Oulu, 2026-10-02)
 DIGMOD_DIGITAL_READBACKS = ("1", "digital")   # GETPAR: ordinal on 3.x/4.x
-DSPFIRM_SHARP_READBACKS  = ("0", "sharp")
+DSPFIRM_SHARP_READBACKS  = ("0", "sharp", "sharp(standard)")
 SMALL_FLIP_EXTRA_DB = 39.08 # 20*log10(90): attenuate calibrated 90-deg
                             # power by this much -> ~1 degree tip at P1=P90
 
@@ -1336,18 +1370,36 @@ PARAM_API = {
                                    # refused them (Oulu, 2026-09-30); the
                                    # details are in calibration.row_probe
     "digmod_form": "",             # acquisition mode (v0.7.7): "name" =
-                                   # DIGMOD digital / DSPFIRM sharp written
-                                   # by enum name and read back |
-                                   # "unverified" = accepted, no usable
-                                   # readback | "mismatch" = accepted but
-                                   # the readback kept another mode | ""
-                                   # = never written, or rejected
-                                   # (failed_forms DIGMOD:name or
-                                   # DSPFIRM:name)
+                                   # DIGMOD digital written by enum name
+                                   # and digital / sharp read back |
+                                   # "already" (v0.7.8) = every dataset
+                                   # read digital / sharp before anything
+                                   # was written | "unverified" =
+                                   # accepted, no usable readback |
+                                   # "mismatch" = the readback kept
+                                   # another mode after everything the
+                                   # script may write | "" = never
+                                   # written, or rejected (failed_forms
+                                   # DIGMOD:name)
+    "dspfirm_form": "",            # how DSPFIRM came to read sharp
+                                   # (v0.7.8): "coupled" = the DIGMOD
+                                   # write moved it by itself (Oulu,
+                                   # TopSpin 3.7.0, 2026-10-02) |
+                                   # "sharp(standard)" / "sharp" = the
+                                   # name of DSPFIRM_NAME_LADDER that
+                                   # took when the coupling did not |
+                                   # "unverified" = a write accepted with
+                                   # no usable readback | "" = never
+                                   # written: already sharp, DIGMOD
+                                   # rejected, or no name took
+                                   # (failed_forms DSPFIRM:<name>)
     "digmod_readback": "",         # last raw GETPAR("DIGMOD"): "1" digital
     "dspfirm_readback": "",        # last raw GETPAR("DSPFIRM"): "0" sharp
-    "digmod_mismatch": 0,          # datasets whose readback disagreed with
-                                   # the accepted digital/sharp write
+    "digmod_mismatch": 0,          # datasets whose readback kept another
+                                   # mode after everything the script may
+                                   # write for it (v0.7.8: the DIGMOD
+                                   # write and, when the console did not
+                                   # couple, the DSPFIRM name ladder)
 }
 
 # The operator's template dataset (CURDATA() at start), set by main():
@@ -2175,66 +2227,178 @@ def set_rg(rg):
     return verify_acq_write("RG", rg, "gain")
 
 
-def set_digital_mode():
-    """DIGMOD := digital and DSPFIRM := sharp on the current dataset, by
-    the documented enum names (like PARMODE), read back afterwards; see
-    the WHY at DIGMOD_NAME (Oulu, 2026-09-30: baseopt / rectangle rows
-    of 262144 points were aborted by the DRU, Torino's digital / sharp
-    rows were not).  Never insisted on: a console that rejects a name has
-    that form marked failed (failed_forms, one console dialog at most,
-    never repeated), a readback that keeps another mode is counted
-    (digmod_mismatch) and announced, and in both cases the run goes on --
-    the row probe then decides the row geometry in whatever mode the
-    console kept.  DIGMOD is written first because Bruker couples the two
-    (rectangle selects baseopt and vice versa); a console that rejected
-    only the DSPFIRM name still gets the DIGMOD write on every dataset
-    (the mode is the fix, the filter follows it by that coupling), and
-    its readback then decides.  Returns 1 when both readbacks agree with
-    the write."""
-    if _form_has_failed("DIGMOD", "name"):
-        return 0
-    if not putpar("DIGMOD", DIGMOD_NAME):
-        _form_failed("DIGMOD", "name")
-        say("DIGMOD=%s rejected by this console -- leaving the acquisition "
-            "mode as the parameter set has it; the row probe decides the "
-            "row geometry" % DIGMOD_NAME)
-        return 0
-    if not _form_has_failed("DSPFIRM", "name"):
-        if not putpar("DSPFIRM", DSPFIRM_NAME):
-            _form_failed("DSPFIRM", "name")
-            say("DSPFIRM=%s rejected by this console -- leaving the filter "
-                "as the parameter set has it (DIGMOD=%s is still written on "
-                "every dataset); the row probe decides the row geometry"
-                % (DSPFIRM_NAME, DIGMOD_NAME))
+def _read_acq_mode():
+    """Raw GETPAR of DIGMOD and DSPFIRM (the ordinal on 3.x/4.x: "1" is
+    digital, "0" is sharp; the names are accepted too), recorded in
+    param_api as the last readbacks.  Every decision in set_digital_mode
+    rests on these two strings and on nothing else."""
     dm = getpar("DIGMOD").strip()
     df = getpar("DSPFIRM").strip()
     PARAM_API["digmod_readback"] = dm
     PARAM_API["dspfirm_readback"] = df
-    if dm in DIGMOD_DIGITAL_READBACKS and df in DSPFIRM_SHARP_READBACKS:
+    return dm, df
+
+
+def _acq_mode_is_digital(dm, df):
+    return dm in DIGMOD_DIGITAL_READBACKS and df in DSPFIRM_SHARP_READBACKS
+
+
+def set_digital_mode():
+    """DIGMOD digital / DSPFIRM sharp on the current dataset, decided by
+    READBACK: read both first, write only what the readback says is
+    missing, read back again, and never take the absence of an exception
+    for success.  The WHY of the mode itself is at DIGMOD_NAME (Oulu,
+    2026-09-30: baseopt / rectangle rows of 262144 points aborted by the
+    DRU, Torino's digital / sharp rows not; 2026-10-02: the operator's
+    manual check on expno 12 of SPINNOISE_20260930_1201 -- 1 TD 1, digmod
+    digital, zg -- acquired at the first try on the same console).
+
+    The order of business, and why (v0.7.8):
+      1. Read DIGMOD and DSPFIRM.  Both already digital / sharp: record
+         it and return without writing.  WR copies the mode from the
+         previous expno, so from the second expno of a session on this is
+         the normal case; a console whose template is digital already
+         (Torino's Neo) is never written to at all.
+      2. Otherwise write DIGMOD digital (the documented name, accepted on
+         3.7.0 and 4.4.0) and read BOTH back.  Bruker documents the
+         coupling -- DSPFIRM rectangle selects DIGMOD baseopt and vice
+         versa -- and Oulu's 3.7.0 showed its other half: the DIGMOD write
+         alone moved DSPFIRM to sharp (dspfirm_readback "0" on every expno
+         of the 2026-10-02 desktest).  When the readback shows that, the
+         job is done: NO DSPFIRM write.
+      3. Only when DSPFIRM still does not read sharp is a DSPFIRM write
+         tried, by the names of DSPFIRM_NAME_LADDER, each at most once per
+         session, readback after each, stopping at the first that reads
+         sharp (recorded as dspfirm_form).  A name that does not take --
+         whether PUTPAR raised or the readback simply kept its value --
+         goes into failed_forms and is never tried again this session.
+         "sharp(standard)" goes first because that is how TopSpin 3.x's
+         parameter editor spells the enum; "sharp", the spelling of
+         Bruker's Acquisition Reference, is what 3.7.0 refused.
+
+    WHY read before write, and decide by readback: on 2026-10-02 (Oulu,
+    Avance III HD 500, TopSpin 3.7.0) the v0.7.7 desktest completed with
+    putpar_failures 0 and failed_forms [] while the console popped
+    "GetEnuOrd[DSPFIRM]: enumeration name sharp not found" on the screen
+    once per acquired expno -- the setup expno, the four rungs, the row
+    probe, 11, 12 and 13 -- because v0.7.7 wrote DSPFIRM sharp after
+    every DIGMOD write and judged the write by the absence of an
+    exception.  The console's dialog did not raise into Jython; the
+    DIGMOD write alone had already set DSPFIRM to sharp; the dialogs were
+    cosmetic (the run finished) and piled up on an unattended screen.
+    Same class as the acqu2 dialog of v0.7.4 (Oulu, 2026-09-25; Torino,
+    2026-09-22), and the rule learned since: a console dialog is not a
+    Python exception, so decide by readback, never by the absence of an
+    exception.  Net effect on Oulu's console: one DIGMOD write at the
+    setup expno, zero DSPFIRM writes, zero dialogs.
+
+    Never insisted on: a console that rejects DIGMOD's name has that form
+    marked failed (one dialog at most, never repeated), a readback that
+    keeps another mode after everything this function may write is
+    counted (digmod_mismatch) and announced, and in both cases the run
+    goes on -- the row probe then decides the row geometry in whatever
+    mode the console kept.  Returns 1 when both readbacks agree with the
+    wanted mode."""
+    dm, df = _read_acq_mode()
+    if _acq_mode_is_digital(dm, df):
+        # WR carried the mode over (every expno after the first), or the
+        # operator's template was digital / sharp to begin with.
         if PARAM_API["digmod_form"] == "":
-            PARAM_API["digmod_form"] = "name"
+            PARAM_API["digmod_form"] = "already"
         return 1
-    if dm == "" and df == "":
-        if PARAM_API["digmod_form"] == "":
-            PARAM_API["digmod_form"] = "unverified"
-            say("DIGMOD=%s / DSPFIRM=%s accepted; this console offers no "
-                "usable readback, trusting it" % (DIGMOD_NAME, DSPFIRM_NAME))
-        return 0
+    if _form_has_failed("DIGMOD", "name"):
+        return 0        # said once, at the setup expno; the row probe decides
+    if dm not in DIGMOD_DIGITAL_READBACKS:
+        if not putpar("DIGMOD", DIGMOD_NAME):
+            _form_failed("DIGMOD", "name")
+            say("DIGMOD=%s rejected by this console -- leaving the acquisition "
+                "mode as the parameter set has it; the row probe decides the "
+                "row geometry" % DIGMOD_NAME)
+            return 0
+        dm, df = _read_acq_mode()
+        if _acq_mode_is_digital(dm, df):
+            # The documented coupling did the DSPFIRM half, as it did on
+            # Oulu's 3.7.0 (2026-10-02): nothing more to write.
+            if PARAM_API["digmod_form"] == "":
+                PARAM_API["digmod_form"] = "name"
+            if PARAM_API["dspfirm_form"] == "":
+                PARAM_API["dspfirm_form"] = "coupled"
+            return 1
+        if dm == "" and df == "":
+            # No usable readback at all: the write was accepted and Bruker
+            # documents the coupling -- trust both and write nothing more
+            # (a DSPFIRM write here could only be judged by the absence of
+            # an exception, which 3.7.0 showed proves nothing).
+            if PARAM_API["digmod_form"] == "":
+                PARAM_API["digmod_form"] = "unverified"
+                say("DIGMOD=%s accepted; this console offers no usable "
+                    "readback, trusting it and the documented DSPFIRM "
+                    "coupling" % DIGMOD_NAME)
+            if PARAM_API["dspfirm_form"] == "":
+                PARAM_API["dspfirm_form"] = "unverified"
+            return 0
+    if dm not in DIGMOD_DIGITAL_READBACKS:
+        # The DIGMOD write was accepted without an exception and the
+        # readback still shows another mode: the same shape as the
+        # DSPFIRM dialog of 2026-10-02 (a console dialog is not an
+        # exception).  Mark the form failed so it is tried ONCE per
+        # session, not once per expno with a dialog each time.
+        _form_failed("DIGMOD", "name")
+        say("DIGMOD=%s did not take on this console (accepted without an "
+            "exception, readback '%s') -- the readback decides; not tried "
+            "again this session" % (DIGMOD_NAME, dm))
+    if dm in DIGMOD_DIGITAL_READBACKS:
+        # DIGMOD reads digital and DSPFIRM does not read sharp: this
+        # console did not couple.  Try the names, each at most once per
+        # session; a name this console already took is the only one
+        # written again (no probing of unknown names after the first).
+        names = DSPFIRM_NAME_LADDER
+        if PARAM_API["dspfirm_form"] in DSPFIRM_NAME_LADDER:
+            names = [PARAM_API["dspfirm_form"]]
+        for name in names:
+            if _form_has_failed("DSPFIRM", name):
+                continue
+            accepted = putpar("DSPFIRM", name)
+            dm, df = _read_acq_mode()
+            if _acq_mode_is_digital(dm, df):
+                if PARAM_API["digmod_form"] == "":
+                    PARAM_API["digmod_form"] = "name"
+                if PARAM_API["dspfirm_form"] == "":
+                    PARAM_API["dspfirm_form"] = name
+                return 1
+            if accepted and df == "":
+                if PARAM_API["dspfirm_form"] == "":
+                    PARAM_API["dspfirm_form"] = "unverified"
+                    say("DSPFIRM=%s accepted; this console offers no usable "
+                        "readback, trusting it" % name)
+                if PARAM_API["digmod_form"] == "":
+                    PARAM_API["digmod_form"] = "unverified"
+                return 0
+            _form_failed("DSPFIRM", name)
+            if accepted:
+                why = "accepted without an exception, readback '%s'" % df
+            else:
+                why = "rejected"
+            say("DSPFIRM=%s did not take on this console (%s) -- a console "
+                "dialog is not an exception, the readback decides; not "
+                "tried again this session" % (name, why))
     PARAM_API["digmod_mismatch"] = PARAM_API["digmod_mismatch"] + 1
     PARAM_API["digmod_form"] = "mismatch"
-    say("WARNING: DIGMOD/DSPFIRM read back '%s'/'%s' after writing %s/%s "
-        "-- the console kept its acquisition mode (Oulu's baseopt rows "
-        "were aborted by the DRU, 2026-09-30); continuing, the row probe "
-        "decides the row geometry and meta.json records this"
-        % (dm, df, DIGMOD_NAME, DSPFIRM_NAME))
+    say("WARNING: DIGMOD/DSPFIRM read back '%s'/'%s' after everything this "
+        "script may write for them -- the console kept its acquisition "
+        "mode (Oulu's baseopt rows were aborted by the DRU, 2026-09-30); "
+        "continuing, the row probe decides the row geometry and meta.json "
+        "records this" % (dm, df))
     return 0
 
 
 def set_common_acq(o1_hz, td, swh, ns, d1_s, d11_s):
     """The acquisition parameters every experiment of the session gets.
     The acquisition mode goes first (set_digital_mode: DIGMOD digital,
-    DSPFIRM sharp -- the fix for Oulu's aborted rows, 2026-09-30; the
-    console re-derives DE and the filter from it before TD/SWH are set).
+    DSPFIRM sharp -- the fix for Oulu's aborted rows, 2026-09-30, confirmed
+    2026-10-02; read before written since v0.7.8, so from the second expno
+    on it writes nothing; the console re-derives DE and the filter from it
+    before TD/SWH are set).
     d11_s is the data-transfer delay of the 'd11 wr' line (zgnoise2d,
     zgref2d; unused by the zg rungs, set anyway so one code path serves
     all); it is read back like TD because the receiver unit's acceptance

@@ -157,21 +157,47 @@ DRU_REFUSALS = []      # (expno_dir, td, rows, d11_s) per pseudo-2D block the
 #                   TD / d11.  The script must WARN (never dialog), record
 #                   the failure, continue with the first setting, retry the
 #                   noise block once, and still produce a bundle.
+#   "legacy-nocouple": legacy-noacqu2 (TopSpin 3.x) on a console that does
+#                   NOT couple DSPFIRM to DIGMOD: the DIGMOD digital write
+#                   is accepted and DSPFIRM stays rectangle (v0.7.8).  Not
+#                   observed on any console -- Oulu's 3.7.0 coupled -- but
+#                   the case the DSPFIRM name ladder exists for: the
+#                   script must then try "sharp(standard)" first (accepted
+#                   here, as the 3.x parameter editor spells it), never
+#                   reach "sharp", record dspfirm_form "sharp(standard)",
+#                   and raise no dialog.
 #   In "legacy" and "legacy-2dtemplate", GETACQUDIM does not exist (old
 #   TopSpin), so the GETPAR("PARMODE") ordinal path is what gets
 #   exercised there.
-# Acquisition mode (v0.7.7).  DIGMOD and DSPFIRM are enumerated like
-# PARMODE: written by NAME (analog / digital / homodecoupling-digital /
-# baseopt; sharp / smooth / medium / user_defined / rectangle), read back
-# as the ORDINAL, an ordinal written is rejected with the GetEnuOrd text.
-# Bruker couples the two -- DSPFIRM rectangle selects DIGMOD baseopt and
-# vice versa -- and the stub does the same (PUTPAR-COUPLED log entries).
-# The harness template carries Oulu's baseopt / rectangle (every Oulu
-# acquisition of 2026-09-30 ran DIGMOD 3 / DSPFIRM 4, the mode in which
-# the DRU aborted the 262144-point rows; Torino's Neo ran digital /
-# sharp and acquired them), so every flavor exercises the switch; under
-# "ts44-strict" the names are rejected like PARMODE's, and the script
-# must record that once and go on without them.
+# Acquisition mode (v0.7.7, Oulu's 3.7.0 modelled faithfully since
+# v0.7.8).  DIGMOD and DSPFIRM are enumerated like PARMODE: written by
+# NAME (analog / digital / homodecoupling-digital / baseopt; sharp /
+# smooth / medium / user_defined / rectangle), read back as the ORDINAL,
+# an ordinal written is rejected with the GetEnuOrd text.  Bruker couples
+# the two -- DSPFIRM rectangle selects DIGMOD baseopt and vice versa --
+# and the stub does the same (PUTPAR-COUPLED log entries) on every flavor
+# but legacy-nocouple.  The harness template carries Oulu's baseopt /
+# rectangle (every Oulu acquisition of 2026-09-30 ran DIGMOD 3 / DSPFIRM
+# 4, the mode in which the DRU aborted the 262144-point rows; Torino's
+# Neo ran digital / sharp and acquired them), so every flavor exercises
+# the switch; under "ts44-strict" the names are rejected like PARMODE's,
+# and the script must record that once and go on without them.
+# What Oulu's TopSpin 3.7.0 did on 2026-10-02 with the v0.7.7 script, now
+# the model for every legacy flavor: PUTPAR("DIGMOD", "digital") accepted
+# and DSPFIRM moved to sharp (ordinal 0) by the console itself;
+# PUTPAR("DSPFIRM", "sharp") -- the Acquisition Reference's spelling --
+# answered with the console's OWN dialog, "GetEnuOrd[DSPFIRM]:
+# enumeration name sharp not found", the write dropped and NO exception
+# raised into Jython (meta.json: putpar_failures 0, failed_forms []),
+# once per acquired expno.  The enum name 3.x accepts is taken to be the
+# parameter editor's "sharp(standard)" (not console-confirmed: the
+# v0.7.8 script never needs it on a coupling console, so a live bundle
+# with dspfirm_form "coupled" settles nothing about it; one with
+# dspfirm_form "sharp(standard)" or "sharp" would).  The ts44 flavors
+# keep accepting "sharp" as in v0.7.7: Torino's 4.4.0 ran digital /
+# sharp from its template and the script never wrote DSPFIRM there, so
+# its behaviour for either spelling is UNKNOWN; "ts44-strict" rejects
+# both names, as it rejects every enum name the script writes.
 # F1 parameter FILES -- the observed consoles (3.7.0 Oulu, 4.4.0 Torino)
 # are the model for ALL flavors: no console creates acqu2 on a scripted
 # PARMODE write.  While a dataset says 2D and has no acqu2, a GETPAR or
@@ -197,8 +223,18 @@ _TS44_F1_MAP = (u"TD", u"SW", u"SWH", u"SFO1", u"BF1", u"O1", u"NUC1",
 _PARMODE_TO_ORDINAL = {u"1D": u"0", u"2D": u"1", u"3D": u"2"}
 _DIGMOD_TO_ORDINAL = {u"analog": u"0", u"digital": u"1",
                       u"homodecoupling-digital": u"2", u"baseopt": u"3"}
-_DSPFIRM_TO_ORDINAL = {u"sharp": u"0", u"smooth": u"1", u"medium": u"2",
+_DSPFIRM_TO_ORDINAL = {u"sharp": u"0", u"sharp(standard)": u"0",
+                       u"smooth": u"1", u"medium": u"2",
                        u"user_defined": u"3", u"rectangle": u"4"}
+# DSPFIRM enum names a PUTPAR takes, per console generation (see the
+# acquisition-mode note above): TopSpin 3.x refused "sharp" with a
+# dialog (Oulu, 2026-10-02) and is taken to spell it "sharp(standard)";
+# 4.4.0 is unknown for DSPFIRM and keeps the v0.7.7 model.
+_DSPFIRM_NAMES_TS3 = (u"sharp(standard)", u"smooth", u"medium",
+                      u"user_defined", u"rectangle")
+_DSPFIRM_NAMES_TS44 = (u"sharp", u"smooth", u"medium",
+                       u"user_defined", u"rectangle")
+_GETENUORD_DSPFIRM = u"GetEnuOrd[DSPFIRM]: enumeration name %s not found"
 _F1_FRESH = {}    # dsdir -> 1 once RE()-loaded after its last PARMODE write
 
 _CUR = [None]             # current dataset, CURDATA()-shaped list
@@ -366,9 +402,14 @@ def _f1_broken(dsdir, params):
     return _is_2d(params) and not _has_acqu2(dsdir)
 
 
-def _stray_dialog(dsdir, api, name):
-    text = (u"The requested format file is invalid: %s/acqu2: getpar: "
-            u"No such file or directory" % _u(dsdir))
+def _stray_dialog(dsdir, api, name, text=None):
+    """A dialog the console pops on its own, with NO exception reaching
+    the script: the acqu2 'format file' dialog (default text; Oulu,
+    2026-09-25) or whatever text the caller passes (the GetEnuOrd[DSPFIRM]
+    dialog of 2026-10-02)."""
+    if text is None:
+        text = (u"The requested format file is invalid: %s/acqu2: getpar: "
+                u"No such file or directory" % _u(dsdir))
     STRAY_DIALOGS.append((api, _u(name), text))
     LOG.append(("STRAY-DIALOG", u"%s %s" % (api, _u(name))))
     _say("STRAY CONSOLE DIALOG (%s %s): %s" % (api, name, text))
@@ -552,7 +593,11 @@ def _validate_putpar(name, value, dsdir):
     elif n in (u"DIGMOD", u"DSPFIRM"):
         names_ok = tuple(_DIGMOD_TO_ORDINAL)
         if n == u"DSPFIRM":
-            names_ok = tuple(_DSPFIRM_TO_ORDINAL)
+            names_ok = _DSPFIRM_NAMES_TS44
+            if FLAVOR[0].startswith("legacy"):
+                names_ok = _DSPFIRM_NAMES_TS3   # a name outside it never
+                                                # gets here: PUTPAR drops
+                                                # it with the 3.7.0 dialog
         if FLAVOR[0] == "ts44-strict":
             names_ok = ()                       # rejected like PARMODE's
         if v not in names_ok:
@@ -574,7 +619,11 @@ def _validate_putpar(name, value, dsdir):
 def _couple_acq_mode(name, params):
     """Bruker's documented coupling: DSPFIRM rectangle selects DIGMOD
     baseopt and DIGMOD baseopt selects DSPFIRM rectangle; leaving either
-    leaves the other (digital / sharp, the defaults)."""
+    leaves the other (digital / sharp, the defaults).  Oulu's 3.7.0 did
+    exactly this on 2026-10-02 (DIGMOD digital written, DSPFIRM read back
+    0).  legacy-nocouple is the console that does not."""
+    if FLAVOR[0] == "legacy-nocouple":
+        return
     n = _u(name)
     if n == u"DIGMOD":
         if params.get("DIGMOD") == u"baseopt" \
@@ -616,6 +665,20 @@ def PUTPAR(name, value):
             _stray_dialog(dsdir, "PUTPAR", _u(name))
         LOG.append(("PUTPAR-DROPPED", u"%s = %s" % (_u(name), _u(value))))
         _say("PUTPAR silently LOST (%s, no acqu2) [%s = %s]"
+             % (FLAVOR[0], name, value))
+        return
+    if _u(name) == u"DSPFIRM" and FLAVOR[0].startswith("legacy") \
+            and _u(value) not in _DSPFIRM_NAMES_TS3:
+        # Oulu, TopSpin 3.7.0, 2026-10-02: PUTPAR("DSPFIRM", "sharp")
+        # popped the console's own dialog -- "GetEnuOrd[DSPFIRM]:
+        # enumeration name sharp not found" -- and dropped the write, with
+        # NO exception into Jython (the v0.7.7 desktest's meta.json says
+        # putpar_failures 0, failed_forms []), once per acquired expno.
+        # A stray dialog, like the acqu2 one: the harness fails on any.
+        _stray_dialog(dsdir, "PUTPAR", _u(name),
+                      _GETENUORD_DSPFIRM % _u(value))
+        LOG.append(("PUTPAR-DROPPED", u"%s = %s" % (_u(name), _u(value))))
+        _say("PUTPAR dropped with a console dialog (%s) [%s = %s]"
              % (FLAVOR[0], name, value))
         return
     _validate_putpar(name, value, dsdir)

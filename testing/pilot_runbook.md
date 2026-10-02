@@ -2,7 +2,7 @@
 
 Operational script for the remote supervised pilot: we screen-share (or
 NoMachine) into the facility's TopSpin workstation while a local colleague
-sits at the console. `topspin/spin_noise_run.py` (v0.7.7) has not yet run a
+sits at the console. `topspin/spin_noise_run.py` (v0.7.8) has not yet run a
 complete session on a real spectrometer. Its live contacts so far: two
 unsupervised desktests at Torino (TopSpin 4.4.0) — the first (2026-09-17)
 stopped on a namespace bug fixed in v0.7.2; the second (2026-09-18, v0.7.2)
@@ -23,12 +23,17 @@ passed, and TopSpin left full-size `ser` files holding one acquired row
 and zeros, which the script took for data. Every Oulu expno ran `DIGMOD`
 `baseopt` from the operator's parameter set (16x the points inside the
 DRU, per Bruker; Torino's Neo acquired the same rows in `digital`) — the
-leading explanation. v0.7.7 sets `DIGMOD` `digital` / `DSPFIRM` `sharp`
+cause, confirmed on 2026-10-02 when the refused row acquired at the first
+try once set to `digital` by hand. v0.7.7 sets `DIGMOD` `digital` / `DSPFIRM` `sharp`
 on every experiment, writes each row during a 1 s data-transfer delay
 `d11` (insurance), adds the attended **row probe** (expno 17: the row
 comes back with data, or a shorter row is found — the safety net) and
-checks every block's content afterwards. Tier −1 and Tier 0 are green
-(`testing/tier0_desktest.md`).
+checks every block's content afterwards. v0.7.8 reads the mode before
+writing it: one `DIGMOD` write per session and no `DSPFIRM` write on a
+console that couples the two (the v0.7.7 desktest at Oulu, 2026-10-02,
+completed cleanly but popped `GetEnuOrd[DSPFIRM]: enumeration name sharp
+not found` once per experiment — harmless, gone). Tier −1 and Tier 0 are
+green (`testing/tier0_desktest.md`).
 
 The pilot runs the plain default session only. The optional modes that
 exist as of v0.6 (`rdopt`, `sweep`, `AUTOSTEP`) stay OFF — each has its
@@ -154,8 +159,9 @@ console. Contact for everything: John W. Blanchard, jwbquantum@gmail.com.
    dialog-guided manual flow otherwise — §6), `topshim`, `pulsecal` P90.
    Sanity-check the reported P90 (~7–15 µs typical) before confirming.
    Then the RG ladder (~30 s) and the **row probe** (expno 17, ~1 min when
-   the first attempt passes; the script has set `DIGMOD` `digital` by
-   then — `digmod` in TopSpin shows it): watch the status line for `row
+   the first attempt passes; the script has set `DIGMOD` `digital` at the
+   setup expno — `digmod` in TopSpin shows it, and `dspfirm` shows `sharp`
+   without the script having written it): watch the status line for `row
    probe: attempt N passed` and note N and the setting in the pilot log —
    a console that needs the second attempt or a shorter row is recorded,
    not at fault; only `WARNING: row probe -- none of the 5 settings` is a
@@ -314,21 +320,30 @@ directory of the template dataset they had open. Nothing else was written.
   (script v0.7.6 or earlier; Avance III HD, Oulu 2026-09-30):** the
   receiver unit acquired the first 1 MB row of each block and aborted the
   block 12–18 s into the second; the `ser` files it leaves are full-size
-  zeros with one acquired row — not data. Leading explanation: the
-  acquisition mode (`DIGMOD` `baseopt` on every Oulu expno; Torino's
-  `digital` rows acquired); the 30–50 ms write window is the weaker one.
-  Install v0.7.7 (`DIGMOD` `digital` / `DSPFIRM` `sharp` set by the
-  script, transfer delay `d11` as insurance, row probe as safety net,
-  content checks). To settle it on the old dataset, two minutes at the
-  console: expno 12 of `SPINNOISE_20260930_1201`, `1 td` → 1, `digmod` →
-  digital, `zg`; if still refused, `d1 1` and `zg` once more
-  (`docs/TROUBLESHOOTING.md`). On v0.7.7 the row probe walks its ladder
+  zeros with one acquired row — not data. The cause, confirmed at Oulu
+  on 2026-10-02: the acquisition mode (`DIGMOD` `baseopt` on every Oulu
+  expno; Torino's `digital` rows acquired; the refused expno 12 of
+  `SPINNOISE_20260930_1201` acquired at the first try once set to `1 td`
+  1, `digmod` digital by hand); the 30–50 ms write window was the weaker
+  one. Install v0.7.8 (`DIGMOD` `digital` set by the script at the setup
+  expno, read before written; transfer delay `d11` as insurance, row
+  probe as safety net, content checks; `docs/TROUBLESHOOTING.md`). On
+  v0.7.8 the row probe walks its ladder
   by itself; if it says `WARNING: row probe -- none of the 5 settings came
   back with data`, let the session finish (it will, without dialogs),
   send the bundle and the console's error text — `software.param_api.
   digmod_form` and the `calibration.row_probe.attempts` list are the
   evidence. `rga: acqt0 not set in pulse program` on the noise block was
   a harmless v0.7.6 warning; v0.7.7's `zgnoise2d` defines `acqt0=0`.
+- **`GetEnuOrd[DSPFIRM]: enumeration name sharp not found` dialogs piling
+  up, one per experiment (script v0.7.7; TopSpin 3.7.0 at Oulu,
+  2026-10-02):** harmless — the console had already coupled `DSPFIRM` to
+  `sharp` when `DIGMOD` went `digital`, and refused the script's explicit
+  `DSPFIRM` `sharp` (its enum table spells it `sharp(standard)`) with a
+  dialog that raised no exception, so the script repeated it on every
+  expno. Close them; every dataset is in `digital` / `sharp`. v0.7.8
+  reads the mode before writing it and does not write `DSPFIRM` on such
+  a console.
 - **No ATM probe:** the tune/match step falls back to a dialog — L wobbles
   and tunes manually (`wobb`), then confirms in the dialog. Same for a
   missing `rga`: the script asks L to run rga / set RG manually and type

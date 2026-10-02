@@ -23,7 +23,7 @@ This executes `topspin/spin_noise_run.py` **unmodified** end to end
 buffers, and unicode dialog strings exactly as TopSpin's embedded Jython
 delivers them). Requires `jython` (2.7.x) and `python3` on PATH.
 
-The harness runs the script under twelve modelled consoles
+The harness runs the script under thirteen modelled consoles
 (`HARNESS_TS_FLAVOR` in `testing/run_jython_harness.sh`; up to a minute
 each since the mocked acquisitions write raw-data files of the blocks'
 real size, ~25 min for the whole suite including the report and
@@ -68,10 +68,19 @@ second for every pseudo-2D row, so the probe fails five times, every block
 is recorded as not acquired, the noise block is retried once, only
 WARNINGs are said, and a bundle is still produced. Every flavor's template
 also carries Oulu's acquisition mode (`DIGMOD` `baseopt` / `DSPFIRM`
-`rectangle`, the leading explanation of those aborts), so the script must
-switch every dataset it acquires with to `digital` / `sharp` by enum name
-and read it back; `ts44-strict` rejects those names as it rejects
-`PARMODE`'s, and the script must record that once and go on. On
+`rectangle`, the cause of those aborts, confirmed on 2026-10-02), so the
+script must read the mode on every dataset, switch the setup expno to
+`digital` by enum name — exactly one `DIGMOD` write per session, `WR`
+carries it to every later expno — and write `DSPFIRM` only where the
+console does not couple the two: every legacy flavor models Oulu's TopSpin
+3.7.0 of 2026-10-02, which coupled `DSPFIRM` to `sharp` by itself and
+answered `PUTPAR` `DSPFIRM` `sharp` with its own `GetEnuOrd[DSPFIRM]`
+dialog without raising (so the v0.7.7 script, which wrote it on every
+expno, fails every legacy flavor with nine stray dialogs);
+`legacy-nocouple` (v0.7.8) does not couple, and the script must write
+`sharp(standard)` once, accepted, and never reach `sharp`; `ts44-strict`
+rejects the names as it rejects `PARMODE`'s, and the script must record
+that once and go on. On
 every 1D-template flavor the script must therefore create the file
 itself from the console's parameter library at the attended probe,
 before touching F1 (copying `acqu2` and `proc2` only, never a status
@@ -112,7 +121,10 @@ Pass criteria (the wrapper enforces all of them; exit code 0 = pass):
    raw-data files the mocked acquisitions leave holding data in their
    first and last rows exactly where `calibration.row_probe.blocks` says
    `acquired`, every acquired dataset in `DIGMOD` `digital` / `DSPFIRM`
-   `sharp` (`software.param_api.digmod_form` `name`), `meta.json` written twice with
+   `sharp` (`software.param_api.digmod_form` `name`, `dspfirm_form`
+   `coupled` — `sharp(standard)` on `legacy-nocouple`), `DIGMOD` written
+   exactly once per session and `DSPFIRM` only on `legacy-nocouple`, no
+   `GetEnuOrd[DSPFIRM]` dialog, `meta.json` written twice with
    `run_mode` equal to the mode (so the bundle can never pass as data)
    and a real `sha256:<64 hex>` script self-fingerprint, and a bundle
    zip readable back through `java.util.zip.ZipFile`.
