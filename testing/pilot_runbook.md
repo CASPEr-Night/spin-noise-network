@@ -2,8 +2,10 @@
 
 Operational script for the remote supervised pilot: we screen-share (or
 NoMachine) into the facility's TopSpin workstation while a local colleague
-sits at the console. `topspin/spin_noise_run.py` (v0.7.8) has not yet run a
-complete session on a real spectrometer. Its live contacts so far: two
+sits at the console. `topspin/spin_noise_run.py` (v0.7.9; v0.7.8 completed
+three live sessions at Oulu on 2026-10-05/06, the longest 9.5 h — the first
+complete Bruker sessions, so this runbook now serves the first run at a NEW
+facility). Its live contacts before that: two
 unsupervised desktests at Torino (TopSpin 4.4.0) — the first (2026-09-17)
 stopped on a namespace bug fixed in v0.7.2; the second (2026-09-18, v0.7.2)
 ran to a bundle, with TopSpin's name-only validation of enumerated

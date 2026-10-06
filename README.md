@@ -67,7 +67,7 @@ commands mocked — runnable on a free processing-only TopSpin install
 | `topspin/pp/zgnoise2d` | no-pulse pseudo-2D pulse program for the noise blocks (and the row probe); since v0.7.7 it defines `acqt0=0` (Bruker's pulse-free idiom) and writes each row during a data-transfer delay `d11`, and the script acquires it in `DIGMOD` `digital` — Oulu's Avance III HD, in `baseopt`, had every 1 MB row aborted by its DRU after the first |
 | `topspin/pp/zgref2d` | small-flip pseudo-2D pulse program for the reference blocks (Bruker's `zg2d` without the `d20`-computed pacing delay that refused to compile at Torino, v0.7.6) |
 | `topspin/INSTALL.md` | install paths, expno map, troubleshooting |
-| `analysis/facility_report.py` | the per-facility report (`report.html` + `report.json`) from one bundle; noise rows are streamed, so memory does not grow with the block length (v0.7.4); the clock audit reads each block's pulse program from `pulseprogram` (TopSpin 2.x/3.x) or `pulseprogram.precomp` (TopSpin 4.x Neo consoles, v0.7.6); rows that are all zeros are dropped, counted and FAILed — a refused block leaves a full-size `ser` of zeros on TopSpin 3.x (v0.7.7) |
+| `analysis/facility_report.py` | the per-facility report (`report.html` + `report.json`) from one bundle; noise rows are streamed, so memory does not grow with the block length (v0.7.4); the clock audit reads each block's pulse program from `pulseprogram` (TopSpin 2.x/3.x) or `pulseprogram.precomp` (TopSpin 4.x Neo consoles, v0.7.6); rows that are all zeros are dropped, counted and FAILed — a refused block leaves a full-size `ser` of zeros on TopSpin 3.x (v0.7.7); the Bruker reference tip angle reads the channel power from `PLW` before the legacy `PL` array (whose 120 dB is TopSpin 3.x's 'never set' sentinel), and the clock audit models TopSpin 3.x's auto-inserted `dccorr`, corrects script-recorded expectations for the console's rounded `SW_h`, and reports a significant offset beyond 1e-5 as 'expectation model incomplete' rather than as a console-clock verdict (v0.7.9) |
 | `packer/pack_bundle.py` | Python 3 stdlib-only standalone packer: a directory of vendor data files + `answers.json` (the operator questionnaire) → a validated bundle zip, identical in layout to the orchestrator's. Pluggable vendor readers: Bruker implemented (round-trip tested); JEOL/Magritek adapter interface defined |
 | `packer/answers.example.json` | the questionnaire template for the packer (same questions as the TopSpin dialogs) |
 | `uploader/upload_bundle.py` | Python 3 stdlib-only uploader — auto-selects single-shot vs. chunked-resumable upload by size (+ `--selftest` bundle validator; accepts schema v1.0–v2.0 bundles) |
@@ -106,7 +106,7 @@ covers ~10 GB), set the shared token, and hand facilities the endpoint + token p
 
 ## Status and known caveats
 
-- **One live session on Bruker hardware so far, not yet a complete one.** The script
+- **Three complete live sessions on Bruker hardware (Oulu, 5–6 October 2026, v0.7.8), including a 9.5 h overnight run.** The script
   has been executed end-to-end under a real Jython 2.7 interpreter with a stubbed
   TopSpin API modelling thirteen console behaviours — simulate and desktest modes, bundle
   validated by the uploader (`testing/run_jython_harness.sh`) — and has completed
@@ -142,8 +142,21 @@ covers ~10 GB), set the shared token, and hand facilities the endpoint + token p
   session, no `DSPFIRM` write on a console that couples the two, as TopSpin 3.7.0 does:
   the v0.7.7 desktest at Oulu (2 October 2026) completed cleanly but popped the
   console's own `GetEnuOrd[DSPFIRM]: enumeration name sharp not found` dialog once per
-  experiment (harmless, and gone). A complete live session, references included, is
-  still pending.
+  experiment (harmless, and gone). With v0.7.8 the University of Oulu then ran the
+  first complete Bruker sessions — 30 min (85 noise rows), 3 h (513 rows) and 9.5 h
+  overnight (1710 rows), references and RG ladder included, on 5–6 October 2026 — and
+  the reports of those bundles exposed two defects in the *analysis*, not the
+  acquisition, both fixed in v0.7.9: the Bruker reference tip angle read the channel
+  power from the legacy `PL` array, which TopSpin 3.x leaves at its 120 dB
+  'never set' sentinel while the real power sits in `PLW` (the 1° small flip came out
+  as 1.8×10⁻⁵°, the exclusion 5.7×10⁴ too strong); and the clock audit's pulse-program
+  parser refused the `dccorr` statement TopSpin 3.x inserts into every stored
+  program, so every block fell back to the script's recorded expectation — `AQ` from
+  the requested 6900 Hz, not the console's 6893.38 Hz — and a 10⁻³ 'console-clock
+  offset' was declared conclusive. The audit now says 'expectation model incomplete'
+  for any significant offset no OCXO can have, and quotes the per-block excess
+  (about 2–3 s per block plus a few ms per row of receiver/transfer overhead at Oulu)
+  that remains unmodelled.
   The Agilent/VnmrJ path has run three real sessions (SIU Carbondale).
   Every TopSpin call is pinned to
   Bruker's *Python Programming in TopSpin* manual, with operator-dialog fallbacks

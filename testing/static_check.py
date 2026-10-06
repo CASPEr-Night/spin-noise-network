@@ -1168,6 +1168,63 @@ check("docs: TROUBLESHOOTING has the DRUCONTR entry (evidence stated: first "
 
 
 # --------------------------------------------------------------------------
+# 7. Report: Bruker reference power and the clock audit (v0.7.9).  Oulu,
+# Avance III HD 500, TopSpin 3.7.0, the first complete Bruker sessions
+# (2026-10-05/06, script v0.7.8).  (a) TopSpin 3.x/4.x set the channel
+# power through PLW (watts) and leave the legacy PL array at its 120 dB
+# 'never set' sentinel; the v0.7.8 report read PL first and derived a
+# 1.77e-5 degree reference tip (kappa*M0 5.7e4 too large, the exclusion
+# 5.7e4 too strong).  (b) TopSpin 3.x's preprocessor inserts 'dccorr'
+# into every stored pulse program; the timing parser refused it, every
+# usable block kept the script-recorded expectation (AQ from the
+# REQUESTED SWH) and +1.06e-3 was declared a conclusive clock offset.
+_rep_fn = re.search(r"def bruker_power_level_db\(acq, idx\):.*?\n(?=\n\ndef )",
+                    REPORT_SRC, re.S)
+_rep_fn = _rep_fn.group(0) if _rep_fn else ""
+check("report: Bruker channel power read PLW (watts) -> PLdB -> legacy PL, "
+      "the 120 dB sentinel never taken for an attenuation; "
+      "analyze_reference_exp uses it and records pl1_source",
+      "BRUKER_PL_UNSET_DB = 120.0" in REPORT_SRC
+      and _rep_fn.index('_jcamp_array(acq, "PLW")')
+      < _rep_fn.index('_jcamp_array(acq, "PLdB")')
+      < _rep_fn.index('_jcamp_array(acq, "PL")')
+      and "BRUKER_PL_UNSET_DB" in _rep_fn
+      and "pl1_db, pl1_src = bruker_power_level_db(acq, 1)" in REPORT_SRC
+      and 'res["pl1_source"] = pl1_src' in REPORT_SRC
+      and '"power_source":' in REPORT_SRC)
+_zero = re.search(r"_PP_ZERO = re\.compile\((.*?)\)\n", REPORT_SRC, re.S)
+check("report: the timing parser knows TopSpin 3.x's auto-inserted dccorr "
+      "as a zero-duration pre-loop statement",
+      _zero is not None and "dccorr" in _zero.group(1))
+_m_rep = re.search(r"^PROTOCOL_SWH_HZ\s*=\s*([0-9.]+)", REPORT_SRC, re.M)
+_m_scr = re.search(r"^SWH_HZ\s*=\s*([0-9.]+)", SRC, re.M)
+check("report: PROTOCOL_SWH_HZ (%s) == the script's SWH_HZ (%s) -- the SW_h "
+      "correction of script-recorded clock expectations rests on it"
+      % (_m_rep.group(1) if _m_rep else None,
+         _m_scr.group(1) if _m_scr else None),
+      _m_rep is not None and _m_scr is not None
+      and float(_m_rep.group(1)) == float(_m_scr.group(1)))
+check("report: clock audit SW_h-corrects unmodelable blocks, gates an "
+      "implausible significant offset as 'expectation model incomplete' "
+      "(CLOCK_OFFSET_PLAUSIBLE_MAX 1e-5) and lists the per-block excess",
+      "def swh_corrected_expectation(bundle, exps_by_no, block):" in REPORT_SRC
+      and "CLOCK_OFFSET_PLAUSIBLE_MAX = 1e-5" in REPORT_SRC
+      and '"SW_h-corrected"' in REPORT_SRC
+      and "expectation model incomplete" in REPORT_SRC
+      and "unassessed (expectation model incomplete)" in REPORT_SRC
+      and 'out["per_block_excess"]' in REPORT_SRC
+      and 'out["model_incomplete"] = bool(significant and implausible)'
+      in REPORT_SRC)
+_HARN = open(os.path.join(REPO, "testing", "run_jython_harness.sh"),
+             encoding="utf-8").read()
+check("tests: testing/test_report_bruker_refs.py exists and the harness "
+      "runs it",
+      os.path.exists(os.path.join(REPO, "testing",
+                                  "test_report_bruker_refs.py"))
+      and "test_report_bruker_refs.py" in _HARN)
+
+
+# --------------------------------------------------------------------------
 print("")
 if FAILURES:
     print("%d CHECK(S) FAILED" % len(FAILURES))

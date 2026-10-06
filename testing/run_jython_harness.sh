@@ -258,6 +258,15 @@ echo ""
 echo "--- report QA flags (test_report_qa_flags) ---"
 python3 "$TESTING/test_report_qa_flags.py" --out-dir "$CLOCKWORK/qaflags"
 
+# Report: Bruker reference power (PLW before the 120 dB PL sentinel) and
+# the clock audit on TopSpin 3.x text (dccorr), the SW_h correction of
+# unmodelable blocks and the 'expectation model incomplete' gate -- the
+# two defects of the first complete Bruker sessions (Oulu, 2026-10-05/06,
+# v0.7.8 report).  See test_report_bruker_refs.py.
+echo ""
+echo "--- report Bruker references + clock audit (test_report_bruker_refs) ---"
+python3 "$TESTING/test_report_bruker_refs.py" --out-dir "$CLOCKWORK/brukerrefs"
+
 echo ""
 echo "JYTHON HARNESS: ALL PASS (simulate + desktest x 13 console flavors"
 echo "                + selftest"
@@ -265,4 +274,5 @@ echo "                + packer round-trip"
 echo "                + clock-offset recovery: realism, powered, null,"
 echo "                  DE discrimination"
 echo "                + static"
-echo "                + report QA flags)"
+echo "                + report QA flags"
+echo "                + report Bruker references / clock audit)"
