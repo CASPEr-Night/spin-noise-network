@@ -281,6 +281,27 @@ CLOCK_MIN_SPAN_S = 3600.0     # audits spanning less than 1 h are inconclusive
 CLOCK_CONSISTENCY_MAX = 0.05  # blocks whose wall/OCXO ratio is off by more than
                               # this are overhead-dominated (dialogs, tune) and
                               # useless at the 1e-7 level: excluded from the fit
+# A fitted offset no console clock can have (v0.7.9).  A stock OCXO is set
+# to ~1e-7 and ages ~1e-7..1e-6 per year; even a decade-old unserviced
+# one stays below 1e-5.  A SIGNIFICANT (> 3 sigma) fitted offset beyond
+# this is therefore not a clock error but acquisition time the expectation
+# model does not carry -- per-row receiver/transfer overhead, or a
+# per-block constant that differs between pulse programs -- and the audit
+# says 'expectation model incomplete' instead of declaring the number
+# conclusive.  Oulu (Avance III HD 500, TopSpin 3.7.0, 2026-10-05, the 3 h
+# session): v0.7.8 declared +1.06e-3 +/- 1.7e-6 conclusive; that was the
+# requested-vs-rounded spectral width (6900 vs 6893.38 Hz, +9.6e-4 on
+# every AQ) plus ~5 ms of unmodelled overhead per 20 s row, on a
+# chrony-synced workstation and a console whose OCXO is ~1e-7.
+CLOCK_OFFSET_PLAUSIBLE_MAX = 1e-5
+# The run script's requested spectral width (spin_noise_run.py SWH_HZ;
+# static_check pins the two).  The script's recorded expectations take
+# AQ = TD/(2*SWH) from it while the console acquires at its rounded SW_h
+# (6893.38 Hz at Oulu, 6849.32 Hz at Torino).  When a block's
+# pulse-program text is absent or not modelable, the recorded expectation
+# is corrected by exactly that AQ difference -- arithmetic on acqus TD and
+# SW_h, no program structure assumed (swh_corrected_expectation).
+PROTOCOL_SWH_HZ = 6900.0
 
 # Requirement tiers for absolute-frequency (axion-search) use of the data.
 # Each entry: (tier id, name, fractional requirement, note).
@@ -1409,6 +1430,42 @@ def reference_line_quality(rows_ok):
             "why": "; ".join(why) or None}
 
 
+# Bruker channel power levels in acqus (v0.7.9).  TopSpin 3.x/4.x write
+# the power as PLW (watts) and, on 4.x, PLdB (dB = -10 log10(PLW / 1 W),
+# larger = less power); the legacy PL array (dB of attenuation, the only
+# form on TopSpin 2.x) stays at its 'never set' value of 120 dB when the
+# power was set through PLW/PLdB.  Oulu (Avance III HD 500, TopSpin 3.7.0,
+# 2026-10-05): PL[1] = 120 with PLW[1] = 0.00321366 W = 24.9 dB, against a
+# calibrated 90-degree power of 26 W = -14.15 dB.  v0.7.8 read PL first and
+# derived a tip of 90 x 10^(-(120 + 14.1)/20) = 1.77e-5 deg instead of
+# ~1.0 deg, a kappa*M0 5.7e4 too large and an exclusion 5.7e4 too strong.
+BRUKER_PL_UNSET_DB = 120.0
+
+
+def bruker_power_level_db(acq, idx):
+    """(dB, source text) of channel power level `idx` of a Bruker acqus on
+    the PLdB scale (-10 log10(P / 1 W), larger = less power -- the scale
+    calibration.p90_power_db_or_w '... dB (PLdB 1)' is written on), or
+    (None, why).  PLW (watts, finite, > 0) is preferred, then PLdB, then
+    the legacy PL array only when it is not the 120 dB 'never set'
+    sentinel.  The source text says which entry was read, e.g.
+    'PLW1 3.21e-03 W = 24.9 dB'."""
+    plw = _jcamp_array(acq, "PLW")
+    if len(plw) > idx and math.isfinite(plw[idx]) and plw[idx] > 0:
+        db = -10.0 * math.log10(plw[idx])
+        return db, "PLW%d %.3g W = %.3g dB" % (idx, plw[idx], db)
+    pldb = _jcamp_array(acq, "PLdB")
+    if len(pldb) > idx and math.isfinite(pldb[idx]):
+        return pldb[idx], "PLdB%d %.3g dB" % (idx, pldb[idx])
+    pl = _jcamp_array(acq, "PL")
+    if len(pl) > idx and math.isfinite(pl[idx]):
+        if abs(pl[idx] - BRUKER_PL_UNSET_DB) < 1e-9:
+            return None, ("PL%d at the %.0f dB 'never set' sentinel and no "
+                          "PLW/PLdB entry" % (idx, BRUKER_PL_UNSET_DB))
+        return pl[idx], "PL%d %.3g dB (legacy attenuation)" % (idx, pl[idx])
+    return None, "no PLW/PLdB/PL entry %d in acqus" % idx
+
+
 def analyze_reference_exp(bundle, exp, fs_default):
     rows, acq = bundle.read_rows(exp["expno"], exp)
     if rows is None:
@@ -1438,19 +1495,19 @@ def analyze_reference_exp(bundle, exp, fs_default):
         if acq.get(key) is not None:
             res[key.lower()] = acq[key]
     if acq.get("_vendor") != "agilent":
-        # Bruker small-flip record: P1 (us) and the channel-1 power level,
-        # PL in dB of attenuation (TopSpin 2/3) or PLW in watts (TopSpin
-        # 3/4, converted to the same dB scale); the exclusion's tip angle
-        # reads them
+        # Bruker small-flip record: P1 (us) and the channel-1 power level
+        # on the PLdB scale -- PLW (watts) first, then PLdB, then the
+        # legacy PL array unless it sits at its 120 dB 'never set'
+        # sentinel (bruker_power_level_db; v0.7.8 read PL first and took
+        # Oulu's 120 dB sentinel for a real attenuation).  The exclusion's
+        # tip angle reads pl1_db and quotes pl1_source.
         pvals = _jcamp_array(acq, "P")
         if len(pvals) > 1 and pvals[1] > 0:
             res["p1_us"] = pvals[1]
-        plv = _jcamp_array(acq, "PL")
-        plw = _jcamp_array(acq, "PLW")
-        if len(plv) > 1 and math.isfinite(plv[1]):
-            res["pl1_db"] = plv[1]
-        elif len(plw) > 1 and math.isfinite(plw[1]) and plw[1] > 0:
-            res["pl1_db"] = -10.0 * math.log10(plw[1])
+        pl1_db, pl1_src = bruker_power_level_db(acq, 1)
+        if pl1_db is not None:
+            res["pl1_db"] = pl1_db
+        res["pl1_source"] = pl1_src
     if ok:
         res["line_center_hz"] = float(np.mean([r["line_center_hz"] for r in ok]))
         res["line_center_std_hz"] = float(np.std([r["line_center_hz"] for r in ok]))
@@ -3181,8 +3238,10 @@ def reference_tip_deg(ref, cal):
     record and the bundle's p90 calibration; (None, why) when unresolved.
 
     Agilent/Varian: pw and tpwr from procpar (tpwr in dB, larger = more
-    power). Bruker: P1 and PL1 from acqus (PL in dB of attenuation,
-    larger = less power); when the power levels do not resolve, the
+    power). Bruker: P1 and the channel-1 power from acqus (pl1_db on the
+    PLdB scale, larger = less power, read from PLW / PLdB / legacy PL by
+    bruker_power_level_db, whose source text pl1_source the basis
+    quotes); when the power levels do not resolve, the
     protocol's declared small-flip tip (calibration.rg_ladder[].tip_deg
     -- the orchestrator sets P1 = P90 at +39.08 dB for the ladder) scaled
     by the reference's own P1/P90 is used, and failing that the
@@ -3207,10 +3266,13 @@ def reference_tip_deg(ref, cal):
                       "calibration power" % (p90_note, tpwr))
         return tip, basis
     p1, pl1 = ref.get("p1_us"), ref.get("pl1_db")
+    pl1_src = ref.get("pl1_source") if pl1 is not None else None
+    if pl1 is not None and not pl1_src:
+        pl1_src = "PL1 %.3g dB" % pl1
     if p1 and p90 and pl1 is not None and p90_db is not None:
         return (90.0 * p1 / p90 * 10.0 ** (-(pl1 - p90_db) / 20.0),
-                "90 deg x P1 %.4g us / P90 %.4g us x 10^(-(PL1 %.3g dB - "
-                "P90 power %.3g dB)/20)" % (p1, p90, pl1, p90_db))
+                "90 deg x P1 %.4g us / P90 %.4g us x 10^(-(%s - "
+                "P90 power %.3g dB)/20)" % (p1, p90, pl1_src, p90_db))
     tips = [r.get("tip_deg") for r in (cal.get("rg_ladder") or [])
             if isinstance(r.get("tip_deg"), (int, float))
             and r.get("tip_deg") > 0]
@@ -3220,7 +3282,7 @@ def reference_tip_deg(ref, cal):
                  "small flip, P1 = P90 at +39.08 dB attenuation) with the "
                  "reference ASSUMED at the ladder's power level --- %s"
                  % (tips[0], p90_note if pl1 is None else
-                    "acqus PL1 %.3g dB not comparable: %s" % (pl1, p90_note)))
+                    "acqus %s not comparable: %s" % (pl1_src, p90_note)))
         if p1 and p90 and abs(p1 / p90 - 1.0) > 1e-6:
             tip *= p1 / p90
             basis += " --- x P1 %.4g us / P90 %.4g us" % (p1, p90)
@@ -3325,6 +3387,8 @@ def axion_exclusion(meta, noise_res, refs, detection, floor_cal, ladder,
             "rg": r.get("rg"), "A0_counts": float(r["A0_counts"]),
             "pulse_us": r.get("pw_us", r.get("p1_us")),
             "power_db": r.get("tpwr_db", r.get("pl1_db")),
+            "power_source": (r.get("pl1_source")
+                             if r.get("data_format") != "agilent" else None),
             "tip_deg": float(tip), "tip_basis": basis,
             "rg_bridge_amplitude": float(bridge),
             "kappa_M0_counts": float(r["A0_counts"]
@@ -3341,8 +3405,10 @@ def axion_exclusion(meta, noise_res, refs, detection, floor_cal, ladder,
     if matched:
         km0 = float(np.mean(kms))
         km0_note = ("mean of %d reference(s) at one pulse (%s us, power "
-                    "%s), tip %.3g deg" % (
+                    "%s%s), tip %.3g deg" % (
                         len(per_ref), pulses[0][0], _power_txt(pulses[0][1]),
+                        (" from acqus %s" % per_ref[0]["power_source"])
+                        if per_ref[0].get("power_source") else "",
                         per_ref[0]["tip_deg"]))
     else:
         pick = per_ref[int(np.argmin(kms))]
@@ -4085,8 +4151,16 @@ _PP_LITERAL = re.compile(r"^(\d+(?:\.\d+)?)(s|m|u|n)$")
 _PP_UNIT_S = {"s": 1.0, "m": 1e-3, "u": 1e-6, "n": 1e-9}
 # Zero-duration bookkeeping tokens: write/zero/loop control, phase
 # references and phase-program definitions ('ph31' / 'ph31=0' /
-# 'ph1 = 0 2'), loop targets and counts.
-_PP_ZERO = re.compile(r"^(ze|zd|wr|if|mc|lo|to|times|exit|=|"
+# 'ph1 = 0 2'), loop targets and counts.  'dccorr' (v0.7.9) is the
+# receiver DC-offset measurement TopSpin 3.x's preprocessor inserts by
+# itself before the first 'ze' (the stored text marks it '# 1 "mc_line N
+# file ... dc-measurement inserted automatically"'); it runs once per
+# block, before the row loop, so whatever it costs is a per-block
+# constant the fit's intercept absorbs -- not a per-row term.  Oulu
+# (TopSpin 3.7.0, 2026-10-05): every zgref2d / zgnoise2d text carried it,
+# the parser refused all three usable blocks ('unrecognized statement
+# dccorr') and the fit ran on the script-recorded expectations.
+_PP_ZERO = re.compile(r"^(ze|zd|wr|if|mc|lo|to|times|exit|=|dccorr|"
                       r"ph\d+(=.*)?|#\d*|td\d*|\d+|"
                       r"F\d\([A-Za-z0-9_]*\))$")
 # A quoted definition line, "name=expression".  Bruker's zg, zg2d and the
@@ -4306,6 +4380,101 @@ def refined_block_expectation(bundle, exps_by_no, block):
     return refined, info
 
 
+def swh_corrected_expectation(bundle, exps_by_no, block):
+    """The script-recorded expectation of a block whose pulse-program text
+    is absent or not modelable, corrected for the console's ACTUAL
+    spectral width (v0.7.9).
+
+    The run script takes AQ = TD/(2*SWH) from the REQUESTED spectral
+    width (PROTOCOL_SWH_HZ) while the console acquires at its rounded
+    SW_h (acqus): +9.6e-4 on every row at Oulu (6900 vs 6893.38 Hz),
+    +7.4e-3 at Torino (6849.32 Hz) -- a shortfall the offset fit reads
+    as a console-clock error when no pulse-program text refines the
+    block.  The correction is rows*NS*TD/2*(1/SW_h - 1/SWH): arithmetic
+    on acqus TD and SW_h, no program structure assumed.  It is applied
+    only when the recorded per-row value minus the requested-SWH AQ
+    equals one of the delay sums the script's formula can carry (0, D1,
+    D11, D1 + D11, from the acqus D array) -- the arithmetic signature
+    that the recorded value was indeed built from the requested SWH; a
+    recorded value already consistent with the console's SW_h is left
+    alone and said so.  Programmed pulses, DE and pre-loop delays stay
+    unmodelled for such a block (they need the text).
+
+    Returns (corrected_seconds or None, info dict for the report row).
+    """
+    rec = block.get("ocxo_expected_s")
+    if not isinstance(rec, (int, float)) or isinstance(rec, bool) or rec <= 0:
+        return None, {}
+    try:
+        expno = int(block.get("expno"))
+    except (TypeError, ValueError):
+        return None, {}
+    if bundle.experiment_format(expno) != "bruker":
+        return None, {}
+    acq = bundle.acqus(expno)
+    try:
+        td = int(acq["TD"])
+        swh = float(acq["SW_h"])
+        ns = int(acq.get("NS", 1) or 1)
+    except (KeyError, TypeError, ValueError):
+        return None, {"swh_note": "acqus lacks TD/SW_h: no SW_h correction"}
+    exp_meta = exps_by_no.get(block.get("expno")) or {}
+    try:
+        rows = int(exp_meta.get("td1_rows", 0) or 0)
+    except (TypeError, ValueError):
+        rows = 0
+    if rows <= 0:
+        try:
+            rows = int(bundle.acqu2s(expno).get("TD", 0) or 0)
+        except (TypeError, ValueError):
+            rows = 0
+    if rows <= 0 or td <= 0 or swh <= 0 or ns <= 0:
+        return None, {"swh_note": "non-physical acqus parameters or unknown "
+                                  "row count: no SW_h correction"}
+    if abs(swh / PROTOCOL_SWH_HZ - 1.0) > 0.05:
+        return None, {"swh_note": "acqus SW_h %.4g Hz is not the protocol's "
+                                  "requested %.0f Hz rounded by the console: "
+                                  "no SW_h correction" % (swh, PROTOCOL_SWH_HZ)}
+    aq_req = td / (2.0 * PROTOCOL_SWH_HZ)
+    aq_act = td / (2.0 * swh)
+    if abs(aq_act - aq_req) * rows * ns < 1e-9:
+        return None, {"swh_note": "console SW_h equals the requested SWH: "
+                                  "nothing to correct"}
+    dvals = _jcamp_array(acq, "D")
+    d1 = dvals[1] if len(dvals) > 1 else 0.0
+    d11 = dvals[11] if len(dvals) > 11 else 0.0
+    sums = (0.0, ns * d1, d11, ns * d1 + d11)
+    per_row = rec / rows
+
+    def _matches(aq):
+        return any(abs(per_row - ns * aq - s) < 1e-6 for s in sums)
+
+    if not _matches(aq_req):
+        if _matches(aq_act):
+            return None, {"swh_note": "recorded expectation already built "
+                                      "from the console's SW_h %.4f Hz: no "
+                                      "SW_h correction needed" % swh}
+        return None, {"swh_note": "recorded expectation %.6g s per row is "
+                                  "not AQ(SWH %.0f Hz) plus a delay sum the "
+                                  "script's formula carries (0, D1, D11, "
+                                  "D1 + D11): no SW_h correction" %
+                                  (per_row, PROTOCOL_SWH_HZ)}
+    corrected = rec + rows * ns * (aq_act - aq_req)
+    if corrected <= 0:
+        return None, {"swh_note": "non-positive corrected duration"}
+    frac = corrected / rec - 1.0
+    return corrected, {
+        "swh_requested_hz": PROTOCOL_SWH_HZ, "swh_acqus_hz": swh,
+        "swh_correction_s": corrected - rec,
+        "swh_correction_fractional": frac,
+        "swh_note": ("recorded expectation corrected for the console's "
+                     "SW_h: AQ %.6f -> %.6f s per row (requested SWH %.0f "
+                     "Hz, acqus SW_h %.4f Hz), %+.3e of the block; the "
+                     "programmed pulse, DE and any pre-loop delay stay "
+                     "unmodelled without pulse-program text"
+                     % (aq_req, aq_act, PROTOCOL_SWH_HZ, swh, frac))}
+
+
 def analyze_clock_audit(meta, bundle=None):
     """Fit the fractional console-clock offset from the bundle's clock_audit
     blocks.
@@ -4321,10 +4490,19 @@ def analyze_clock_audit(meta, bundle=None):
 
     When `bundle` is given, each block's expected duration is re-derived
     from its bundled pulse-program text plus acqus via
-    refined_block_expectation(); blocks that cannot be modeled with
-    certainty keep the script-recorded value, flagged. When any block is
-    refined, the recorded-model fit is reported alongside for comparison
-    under 'recorded_model'.
+    refined_block_expectation(); a block that cannot be modeled with
+    certainty keeps the script-recorded value corrected for the console's
+    actual SW_h where that arithmetic applies (swh_corrected_expectation,
+    v0.7.9), else the plain recorded value, flagged either way. When any
+    block is refined, the recorded-model fit is reported alongside for
+    comparison under 'recorded_model'.
+
+    Conclusiveness (v0.7.9): besides the session-span minimum, a fitted
+    offset that is significant (> 3 sigma) and beyond
+    CLOCK_OFFSET_PLAUSIBLE_MAX is reported as 'expectation model
+    incomplete' -- unmodelled acquisition overhead, not a clock verdict
+    -- with the per-block excess (wall minus expected, and per row)
+    listed so the residual is visible; the tiers are then unassessed.
     """
     out = {"available": False}
     ca = meta.get("clock_audit")
@@ -4365,9 +4543,22 @@ def analyze_clock_audit(meta, bundle=None):
             refined, rinfo = refined_block_expectation(bundle, exps_by_no, b)
             if refined is not None:
                 exp, src = refined, "acqus-refined"
+            else:
+                corrected, cinfo = swh_corrected_expectation(
+                    bundle, exps_by_no, b)
+                rinfo = dict(rinfo)
+                rinfo.update(cinfo)
+                if corrected is not None:
+                    exp, src = corrected, "SW_h-corrected"
+        exp_meta = exps_by_no.get(b.get("expno")) or {}
+        try:
+            n_rows = int(exp_meta.get("td1_rows", 0) or 0) or None
+        except (TypeError, ValueError):
+            n_rows = None
         row = {"expno": b.get("expno"), "role": b.get("role"),
                "wall_s": wall_s, "ocxo_expected_s": exp,
-               "ocxo_recorded_s": rec, "expected_source": src}
+               "ocxo_recorded_s": rec, "expected_source": src,
+               "rows": n_rows}
         row.update(rinfo)
         if exp is None:
             row.update({"used": False,
@@ -4381,9 +4572,13 @@ def analyze_clock_audit(meta, bundle=None):
                                % (100.0 * abs(wall_s / exp - 1.0))})
         else:
             row.update({"used": True,
-                        "block_offset": wall_s / exp - 1.0})
+                        "block_offset": wall_s / exp - 1.0,
+                        "excess_s": wall_s - float(exp),
+                        "excess_per_row_s": ((wall_s - float(exp)) / n_rows)
+                        if n_rows else None})
             usable.append((float(exp), wall_s, float(rec),
-                           src == "acqus-refined"))
+                           src == "acqus-refined", src, n_rows,
+                           b.get("expno")))
         rows.append(row)
     out["blocks"] = rows
     out["n_blocks"] = len(rows)
@@ -4438,11 +4633,13 @@ def analyze_clock_audit(meta, bundle=None):
     out["assumed_timestamp_jitter_s"] = NTP_JITTER_S
 
     n_refined = sum(1 for p in usable if p[3])
+    n_swh = sum(1 for p in usable if p[4] == "SW_h-corrected")
     tot_ocxo = sum(p[0] for p in usable)
     unref_ocxo = sum(p[0] for p in usable if not p[3])
     out["expectation_refinement"] = {
         "n_refined": n_refined,
-        "n_recorded_only": len(usable) - n_refined,
+        "n_swh_corrected": n_swh,
+        "n_recorded_only": len(usable) - n_refined - n_swh,
         "unrefined_usable_ocxo_fraction":
             (unref_ocxo / tot_ocxo) if tot_ocxo > 0 else None,
         "note": ("expected durations re-derived from each block's bundled "
@@ -4452,6 +4649,13 @@ def analyze_clock_audit(meta, bundle=None):
                  "per-scan shortfall biases the offset by "
                  "~shortfall/scan-duration"),
     }
+    if n_swh:
+        out["expectation_refinement"]["swh_note"] = (
+            "%d usable block(s) without modelable pulse-program text keep "
+            "the script-recorded expectation corrected for the console's "
+            "actual SW_h (AQ = TD/(2 SW_h) from acqus instead of the "
+            "requested %.0f Hz); their pulse, DE and pre-loop delays stay "
+            "unmodelled" % (n_swh, PROTOCOL_SWH_HZ))
     if n_refined and tot_ocxo > 0 and unref_ocxo / tot_ocxo > 0.05:
         out["expectation_refinement"]["caution"] = (
             "refinement is partial and the unrefined blocks carry %.0f%% "
@@ -4474,8 +4678,63 @@ def analyze_clock_audit(meta, bundle=None):
                      "pulse-program-derived durations"),
         }
 
-    out["conclusive"] = bool(span_s >= CLOCK_MIN_SPAN_S)
-    if not out["conclusive"]:
+    # Per-block excess over the expectation (wall - expected): the fit's
+    # intercept absorbs a CONSTANT per-block part; a part that scales with
+    # the row count (per-row overhead eps) is degenerate with a clock
+    # offset eps/row-duration, and a constant that differs between pulse
+    # programs biases a fit with few blocks.  Listed so the residual is
+    # visible, and used by the plausibility gate below.
+    excess_txt = []
+    for p in usable:
+        e = p[1] - p[0]
+        if p[5]:
+            excess_txt.append("expno %s %+.2f s (%d rows, %+.1f ms/row)"
+                              % (p[6], e, p[5], 1000.0 * e / p[5]))
+        else:
+            excess_txt.append("expno %s %+.2f s" % (p[6], e))
+    out["per_block_excess"] = "; ".join(excess_txt)
+
+    # Plausibility gate (v0.7.9): no console OCXO is off by more than
+    # CLOCK_OFFSET_PLAUSIBLE_MAX; a significant fitted offset beyond it
+    # is acquisition time the expectation model does not carry.
+    significant = abs(delta) > 3.0 * delta_err
+    implausible = abs(delta) > CLOCK_OFFSET_PLAUSIBLE_MAX
+    out["model_incomplete"] = bool(significant and implausible)
+    if out["model_incomplete"]:
+        n_unref = len(usable) - n_refined
+        why = ("the fitted offset %+.3g +/- %.2g is %.0f sigma from zero and "
+               "beyond any console OCXO (|offset| > %.0e): it is acquisition "
+               "overhead the timing model does not carry, not a clock error"
+               % (delta, delta_err, abs(delta) / delta_err,
+                  CLOCK_OFFSET_PLAUSIBLE_MAX))
+        if n_unref:
+            why += (" -- %d of %d usable blocks keep the script-recorded "
+                    "expectation (AQ + d1 (+ d11) only%s), so programmed "
+                    "pulses, DE and pre-loop delays are missing from them"
+                    % (n_unref, len(usable),
+                       ", SW_h-corrected" if n_swh else ""))
+        else:
+            why += (" -- every usable block is pulse-program-derived, so "
+                    "the unmodelled time is per-row receiver/transfer "
+                    "overhead (degenerate with a clock offset of "
+                    "overhead/row-duration) or a per-block constant that "
+                    "differs between pulse programs; the intercept absorbs "
+                    "only a constant common to all blocks")
+        why += " -- per-block excess wall - expected: %s" % out[
+            "per_block_excess"]
+        out["model_incomplete_why"] = why
+
+    short = span_s < CLOCK_MIN_SPAN_S
+    out["conclusive"] = bool(not short and not out["model_incomplete"])
+    if out["model_incomplete"]:
+        out["status"] = ("expectation model incomplete: %s; the number is "
+                         "reported but is NOT a console-clock verdict and "
+                         "the tiers are unassessed%s"
+                         % (out["model_incomplete_why"],
+                            " (the session is also short: span %.0f s < "
+                            "%.0f s)" % (span_s, CLOCK_MIN_SPAN_S)
+                            if short else ""))
+    elif short:
         out["status"] = ("clock audit inconclusive (short session): span "
                          "%.0f s < %.0f s; numbers below are reported but "
                          "should not be used for tier claims"
@@ -4490,7 +4749,9 @@ def analyze_clock_audit(meta, bundle=None):
     tiers = []
     for tid, name, req, note in CLOCK_TIERS:
         t = {"tier": tid, "name": name, "requirement": req, "note": note}
-        if not out["conclusive"]:
+        if out["model_incomplete"]:
+            t["verdict"] = "unassessed (expectation model incomplete)"
+        elif not out["conclusive"]:
             t["verdict"] = "unassessed (audit inconclusive)"
         elif delta_err > req:
             t["verdict"] = ("audit precision insufficient (+/-%.1g > %.1g "
@@ -4532,6 +4793,11 @@ def render_clock_audit_html(clock):
              esc(clock.get("fit_model", ""))))
     A("<p class='%s'>%s</p>" % ("small" if clock.get("conclusive")
                                 else "warn", esc(clock.get("status", ""))))
+    if clock.get("per_block_excess") and not clock.get("model_incomplete"):
+        A("<p class='small'>per-block excess wall &minus; expected: %s "
+          "(a constant part is absorbed by the fit intercept; a per-row "
+          "part is degenerate with a clock offset of overhead / row "
+          "duration)</p>" % esc(clock["per_block_excess"]))
     A("<p class='small'>session span %.2f h &middot; audited OCXO time "
       "%.0f s &middot; %d of %d blocks usable &middot; time source: "
       "<code>%s</code></p>"
@@ -4555,27 +4821,40 @@ def render_clock_audit_html(clock):
           "bundled pulse-program text + acqus for %d of %d usable "
           "blocks%s</p>"
           % (er["n_refined"],
-             er["n_refined"] + er.get("n_recorded_only", 0), extra))
+             er["n_refined"] + er.get("n_swh_corrected", 0)
+             + er.get("n_recorded_only", 0), extra))
         if er.get("caution"):
             A("<p class='warn'>%s</p>" % esc(er["caution"]))
+    if er.get("swh_note"):
+        A("<p class='small'>%s</p>" % esc(er["swh_note"]))
     if clock.get("blocks"):
         A("<table><tr><th>expno</th><th>role</th><th>wall (s)</th>"
           "<th>OCXO expected (s)</th><th>expected source</th>"
-          "<th>used</th><th>per-block offset</th></tr>")
+          "<th>used</th><th>per-block offset</th>"
+          "<th>excess wall &minus; expected</th></tr>")
         for b in clock["blocks"]:
             off = b.get("block_offset")
             src_html = esc(b.get("expected_source", ""))
-            if b.get("refine_note"):
+            notes = [b[k] for k in ("refine_note", "swh_note") if b.get(k)]
+            if notes:
                 src_html += (" <span class='small'>(%s)</span>"
-                             % esc(b["refine_note"]))
+                             % esc("; ".join(notes)))
+            exc = b.get("excess_s")
+            exc_html = "&mdash;"
+            if exc is not None:
+                exc_html = "%+.2f s" % exc
+                if b.get("excess_per_row_s") is not None:
+                    exc_html += (" <span class='small'>(%+.1f ms/row)</span>"
+                                 % (1000.0 * b["excess_per_row_s"]))
             A("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
-              "<td>%s</td><td>%s</td><td>%s</td></tr>"
+              "<td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>"
               % (fmt(b.get("expno")), esc(b.get("role", "?")),
                  fmt(b.get("wall_s"), 6), fmt(b.get("ocxo_expected_s"), 6),
                  src_html,
                  "yes" if b.get("used") else
                  "no &mdash; %s" % esc(b.get("why", "")),
-                 ("%+.2e" % off) if off is not None else "&mdash;"))
+                 ("%+.2e" % off) if off is not None else "&mdash;",
+                 exc_html))
         A("</table>")
     if clock.get("tiers"):
         A("<p class='small'><b>Requirement tiers</b> (absolute-frequency "

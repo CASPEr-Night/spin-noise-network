@@ -575,6 +575,28 @@ re-zip a partially extracted tree.
   the caution.
 - **Clock audit "inconclusive (short session)"** — normal for runs
   under an hour; it is a statement about audit precision, not a fault.
+- **Clock audit "expectation model incomplete"** (v0.7.9) — the fitted
+  offset is significant and larger than any console OCXO can be off
+  (|offset| > 1e-5), so it is acquisition time the report's timing model
+  does not carry — a per-block constant that differs between pulse
+  programs, or a few milliseconds of receiver/transfer overhead per row
+  (degenerate with a clock offset of overhead ÷ row duration) — not a
+  clock error. The number is still printed, with the per-block excess
+  (wall − expected, and per row), and the requirement tiers are left
+  unassessed. Nothing is wrong with the console or the workstation.
+  Reports of TopSpin 3.x sessions made with v0.7.8 or earlier declared a
+  ~1e-3 offset *conclusive*: the parser refused the `dccorr` statement
+  TopSpin 3.x inserts into every stored pulse program, every block kept
+  the script's recorded expectation (`AQ` from the requested 6900 Hz, not
+  the console's rounded `SW_h`), and that shortfall read as a clock
+  offset. Regenerate such reports with v0.7.9.
+- **Exclusion (κM₀, g₉₀) from a v0.7.8-or-earlier report of a TopSpin
+  3.x/4.x session** — regenerate it with v0.7.9. Those reports read the
+  reference pulse power from the legacy `PL` array, which TopSpin 3.x/4.x
+  leave at the 120 dB 'never set' value while the real power sits in
+  `PLW` (watts); the 1° small-flip tip came out as 1.8×10⁻⁵°, κM₀ 5.7×10⁴
+  too large and the exclusion 5.7×10⁴ too strong. The v0.7.9 basis string
+  names the entry it used (`PLW1 3.21e-03 W = 24.9 dB`).
 - **Per-block "expected source: script-recorded (pulse program ...)"**
   — the analysis could not model a pulse program's timing with
   certainty and fell back conservatively. Informational.
