@@ -128,7 +128,7 @@ import zipfile
 
 # Kept in sync with the repository VERSION file (a literal, because this
 # script may be copied standalone); testing/static_check.py enforces it.
-PACKER_VERSION = "0.7.9"
+PACKER_VERSION = "0.8.0"
 SCHEMA_VERSION = "2.0"
 
 GAMMA_1H_MHZ_PER_T = 42.5774806   # same constant spin_noise_run.py uses
@@ -1217,13 +1217,23 @@ def local_tz_offset_min():
     return int(-time.timezone / 60)
 
 
+def resolve_tz_offset(answers):
+    """The zone every started_local/finished_local is read in (schema:
+    local_timezone_offset_min) and where it came from, as the pair
+    (offset_min, basis): the answered value ("answers"), else this
+    machine's ("packing_machine" -- not necessarily the console's zone,
+    which is why the basis is recorded beside the offset as
+    local_timezone_offset_basis, v0.8)."""
+    tz_min = answers.get("local_timezone_offset_min")
+    if isinstance(tz_min, int) and not isinstance(tz_min, bool):
+        return tz_min, "answers"
+    return local_tz_offset_min(), "packing_machine"
+
+
 def resolve_tz_offset_min(answers):
     """The zone every started_local/finished_local is read in (schema:
     local_timezone_offset_min): the answered value, else this machine's."""
-    tz_min = answers.get("local_timezone_offset_min")
-    if not isinstance(tz_min, int) or isinstance(tz_min, bool):
-        tz_min = local_tz_offset_min()
-    return tz_min
+    return resolve_tz_offset(answers)[0]
 
 
 def tz_offset_label(tz_min):
@@ -1718,7 +1728,7 @@ def build_meta(vendor, reader, data_dir, answers):
             "%s\n(see packer/answers.example.json for the full questionnaire)"
             % (len(problems), "\n  - ".join(problems)))
 
-    tz_min = resolve_tz_offset_min(answers)
+    tz_min, tz_basis = resolve_tz_offset(answers)
 
     meta = {
         "schema_version": SCHEMA_VERSION,
@@ -1732,6 +1742,7 @@ def build_meta(vendor, reader, data_dir, answers):
         },
         "created_utc": now_utc(),
         "local_timezone_offset_min": tz_min,
+        "local_timezone_offset_basis": tz_basis,
         "vendor": vendor,
         "facility": fac,
         "spectrometer": spec,

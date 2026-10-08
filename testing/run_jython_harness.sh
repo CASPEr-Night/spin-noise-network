@@ -267,6 +267,18 @@ echo ""
 echo "--- report Bruker references + clock audit (test_report_bruker_refs) ---"
 python3 "$TESTING/test_report_bruker_refs.py" --out-dir "$CLOCKWORK/brukerrefs"
 
+# Report: the v0.8 wind-aware halo construction and the sidereal-modulation
+# fit (analysis spec Secs. 8-9; validation items 7 (v) and (vi)): the
+# lineshape bit-identity at theta 90/0, apex, |v_lab|, the closed-form
+# <sin^2>, the row-time chain and orientation defaults as unit checks, then
+# one 240-row timed synthetic with an injected modulated excess recovered
+# through facility_report.py, the untimed skip path and the site combiner.
+# --full adds the null, lab-cycle and orientation-skip cases (long).
+# See test_wind_sidereal.py.
+echo ""
+echo "--- wind-aware halo + sidereal-modulation fit (test_wind_sidereal) ---"
+python3 "$TESTING/test_wind_sidereal.py" --out-dir "$CLOCKWORK/windsidereal"
+
 echo ""
 echo "JYTHON HARNESS: ALL PASS (simulate + desktest x 13 console flavors"
 echo "                + selftest"
@@ -275,4 +287,5 @@ echo "                + clock-offset recovery: realism, powered, null,"
 echo "                  DE discrimination"
 echo "                + static"
 echo "                + report QA flags"
-echo "                + report Bruker references / clock audit)"
+echo "                + report Bruker references / clock audit"
+echo "                + wind-aware halo / sidereal-modulation fit)"

@@ -189,7 +189,9 @@ LINE_SEARCH_HZ = 40.0      # per-row search half-window around the reference-der
 LINE_MASK_HZ = 100.0       # masked around the line for baseline/spike protection
 FIT_HALF_HZ = 150.0        # fit window half-width
 SPIKE_NSIGMA = 6.0         # spike threshold in robust sigmas of narrow-SG residual
-SG_NARROW_HZ = 7.0         # narrow SG window (~half the expected linewidth)
+ROW_CLIP_NMAD = 5.0        # sidereal fit (spec Sec. 9.2): one robust clip of the
+                           # all-row residuals at 5 x 1.4826 x MAD, one refit
+SG_NARROW_HZ = 7.0        # narrow SG window (~half the expected linewidth)
 SG_BROAD_HZ = 1500.0       # broad SG baseline window (~hundred linewidths)
 COADD_HALF_HZ = 300.0      # co-added grid half-width
 DETECT_NSIGMA = 5.0        # amplitude significance required to claim a feature
@@ -443,6 +445,73 @@ def site_exclusion_module():
         spec.loader.exec_module(mod)
         _SITE_EXCLUSION_MOD = mod
     return _SITE_EXCLUSION_MOD
+
+
+_HALO_WIND_MOD = None
+
+
+def halo_wind_module():
+    """analysis/halo_wind.py loaded by file path (the SHM wind direction
+    and the wind-angle lineshape of the v0.8 wind-aware construction,
+    analysis spec Sec. 8); the repo checkout is required, as for the
+    site combiner."""
+    global _HALO_WIND_MOD
+    if _HALO_WIND_MOD is None:
+        path = os.path.join(REPO, "analysis", "halo_wind.py")
+        if not os.path.isfile(path):
+            raise RuntimeError("analysis/halo_wind.py not found at %s -- "
+                               "the wind-aware halo construction needs the "
+                               "repository checkout" % path)
+        spec = importlib.util.spec_from_file_location("snn_halo_wind", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _HALO_WIND_MOD = mod
+    return _HALO_WIND_MOD
+
+
+_REGISTRY_REPORT_MOD = None
+
+
+def registry_report_module():
+    """analysis/registry_report.py loaded by file path (its gazetteer
+    resolves a facility's city to coordinates when the operator recorded
+    none); the repo checkout is required."""
+    global _REGISTRY_REPORT_MOD
+    if _REGISTRY_REPORT_MOD is None:
+        path = os.path.join(REPO, "analysis", "registry_report.py")
+        if not os.path.isfile(path):
+            raise RuntimeError("analysis/registry_report.py not found at %s "
+                               "-- the city gazetteer needs the repository "
+                               "checkout" % path)
+        spec = importlib.util.spec_from_file_location("snn_registry_report",
+                                                      path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _REGISTRY_REPORT_MOD = mod
+    return _REGISTRY_REPORT_MOD
+
+
+_SIDEREAL_MOD = None
+
+
+def sidereal_modulation_module():
+    """analysis/sidereal_modulation.py loaded by file path (the v0.8
+    sidereal-modulation fit of the per-row line powers, analysis spec
+    Sec. 9, and the fixed-shape per-row line-power estimator of Sec.
+    9.2); the repo checkout is required, as for halo_wind."""
+    global _SIDEREAL_MOD
+    if _SIDEREAL_MOD is None:
+        path = os.path.join(REPO, "analysis", "sidereal_modulation.py")
+        if not os.path.isfile(path):
+            raise RuntimeError("analysis/sidereal_modulation.py not found at "
+                               "%s -- the sidereal-modulation fit needs the "
+                               "repository checkout" % path)
+        spec = importlib.util.spec_from_file_location(
+            "snn_sidereal_modulation", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _SIDEREAL_MOD = mod
+    return _SIDEREAL_MOD
 
 
 class VarianFormatError(ValueError):
@@ -1686,6 +1755,77 @@ def read_noise_group(bundle, exps):
 
 
 def analyze_noise_block(bundle, exps, f0_guess, fs_default):
+    """2020 stages on one noise block (the streaming passes of
+    _analyze_noise_block_pass), then the v0.8 fixed-shape per-row line
+    power (spec Sec. 9.2) once the headline line shape is known."""
+    out = _analyze_noise_block_pass(bundle, exps, f0_guess, fs_default)
+    if out is not None:
+        _fixed_shape_row_powers(out)
+    return out
+
+
+def _fixed_shape_row_powers(res):
+    """per_row[].line_power_fixed_shape_counts2 (spec Sec. 9.2): the
+    amplitude of the session's headline line shape (centre, FWHM and
+    dispersive fraction of noise.<headline_fit>, held fixed) solved per
+    row by linear least squares against the baseline-normalised PSD in
+    |f - f0| < FIT_HALF_HZ, times pi w/2 x baseline_psd_at_line. For the
+    drift-aligned co-add the headline centre sits at the aligned frame's
+    origin (the confident rows' weighted mean centre) plus the co-add
+    fit's center_shift_hz; for the unaligned fit at its center_hz. The
+    PSD windows kept by the first pass are released here. Additive: a
+    row without a line fit or without a window gets no value."""
+    fit, key = headline_fit(res)
+    axes = res.pop("_win_f", None) or {}
+    rows = res.get("per_row") or []
+    try:
+        if fit is None or not fit.get("amp_norm") or not fit.get("fwhm_hz") \
+                or fit["fwhm_hz"] <= 0:
+            return
+        if key == "coadd_fit":
+            origin = res.get("_coadd_mean_shift_hz")
+            if origin is None:
+                return
+            f0 = float(origin) + float(fit["center_shift_hz"])
+        else:
+            f0 = float(fit["center_hz"])
+        w = float(fit["fwhm_hz"])
+        r_disp = float(fit.get("disp_norm") or 0.0) / float(fit["amp_norm"])
+        sm = sidereal_modulation_module()
+        n_done = 0
+        for pr in rows:
+            win = pr.get("_win")
+            if win is None or "fit" not in pr or \
+                    not pr.get("baseline_psd_at_line"):
+                continue
+            f_axis = axes.get(win[0])
+            if f_axis is None or f_axis.shape != win[1].shape:
+                continue
+            amp = sm.fixed_shape_amplitude(f_axis, win[1], f0, w, r_disp,
+                                           FIT_HALF_HZ)
+            if amp is None:
+                continue
+            pr["line_power_fixed_shape_counts2"] = (
+                amp * math.pi * w / 2.0 * float(pr["baseline_psd_at_line"]))
+            n_done += 1
+        res["line_power_fixed_shape"] = {
+            "headline_fit": key, "center_hz": f0, "fwhm_hz": w,
+            "dispersive_fraction": r_disp, "window_half_hz": FIT_HALF_HZ,
+            "n_rows": int(n_done),
+            "basis": ("per_row[].line_power_fixed_shape_counts2 = a x pi w/2 "
+                      "x baseline_psd_at_line with a the linear least-squares "
+                      "amplitude of the headline line shape (%s: centre %.2f "
+                      "Hz, FWHM %.2f Hz, dispersive fraction %.3f, fixed) "
+                      "plus a flat offset, fitted to the row's baseline-"
+                      "normalised PSD within +/-%.0f Hz; the free per-row "
+                      "fit behind integrated_power_counts2 is not used "
+                      "(spec Sec. 9.2)" % (key, f0, w, r_disp, FIT_HALF_HZ))}
+    finally:
+        for pr in rows:
+            pr.pop("_win", None)
+
+
+def _analyze_noise_block_pass(bundle, exps, f0_guess, fs_default):
     """2020 stages on one noise block. `exps` is one noise experiment
     (a Bruker pseudo-2D expno whose rows are the block) or a list of
     same-parameter experiments whose rows, in meta order, form the block
@@ -1740,6 +1880,16 @@ def analyze_noise_block(bundle, exps, f0_guess, fs_default):
                 r["base"][np.abs(r["f"] - f0) < 50.0]))
             row["baseline_psd_at_line"] = base_at_line
             row["integrated_power_counts2"] = a * math.pi * w / 2.0 * base_at_line
+            # v0.8 (spec Sec. 9.2): keep this row's baseline-normalised PSD
+            # inside the line window in memory (private, ~7 KB per row at
+            # Oulu's resolution) so the fixed-shape line power can be
+            # solved once the headline line shape is known; the frequency
+            # axis is shared per nperseg
+            wm = np.abs(r["f"] - f0_guess) < FIT_HALF_HZ + LINE_SEARCH_HZ
+            out.setdefault("_win_f", {}).setdefault(
+                r["nperseg"], np.array(r["f"][wm], dtype=np.float64))
+            row["_win"] = (r["nperseg"],
+                           np.array(r["pnorm"][wm], dtype=np.float64))
             npe, offline = matched_filter_npe(r["f"], r["pnorm"], w, f0, edge_hz)
             i_line = int(np.argmin(np.abs(r["f"] - f0)))
             row["npe_at_line"] = float(npe[i_line])
@@ -1846,6 +1996,7 @@ def analyze_noise_block(bundle, exps, f0_guess, fs_default):
             mean_shift = float(np.sum(cc / ce ** 2) / np.sum(1.0 / ce ** 2))
         else:
             mean_shift = f0_guess
+        out["_coadd_mean_shift_hz"] = mean_shift   # the aligned frame's origin
         out["coadd_n_rows_self_aligned"] = int(np.count_nonzero(conf))
         df = row0["df"]
         grid = np.arange(-COADD_HALF_HZ, COADD_HALF_HZ + df / 2, df)
@@ -3233,6 +3384,308 @@ def alp_lineshape(grid_hz, nu_a_hz, wind_parallel, nsamp=EXCL_MC_SAMPLES,
     return w / v.shape[0] / step, float(np.mean(vperp2) / C_KMS ** 2)
 
 
+# ---- v0.8 wind-aware halo construction (analysis spec Sec. 8): the SHM
+# wind at its ACTUAL angle to B0 for this site and these row times, binned
+# at WIND_THETA_BIN_DEG, every bin at the session-mean |v_lab|. The
+# parallel worst case (alp_lineshape(..., True) at V = SHM_VLAB_KMS) and
+# the perpendicular nominal stay the unchanged v0.7 calls.
+WIND_DEFAULT_NMR_VENDORS = ("bruker", "agilent", "jeol")
+WIND_THETA_BIN_DEG = 2.0
+WIND_WORST_CONSTRUCTION = ("wind parallel to B_0, theta = 0, V = %.0f km/s, "
+                           "D_cal applied" % SHM_VLAB_KMS)
+
+
+def alp_lineshape_angle(grid_hz, nu_a_hz, theta_deg, vlab_kms=SHM_VLAB_KMS,
+                        nsamp=EXCL_MC_SAMPLES, seed=EXCL_MC_SEED):
+    """alp_lineshape at an arbitrary wind angle theta (degrees from B0)
+    and lab speed vlab_kms, on the same random stream: theta 90 at
+    SHM_VLAB_KMS reproduces alp_lineshape(..., False) and theta 0
+    alp_lineshape(..., True) bit-identically (analysis/halo_wind.py)."""
+    return halo_wind_module().alp_lineshape_angle(grid_hz, nu_a_hz,
+                                                  theta_deg, vlab_kms,
+                                                  nsamp, seed)
+
+
+def _is_num(x):
+    return isinstance(x, (int, float)) and not isinstance(x, bool)
+
+
+def _wind_site(meta):
+    """(lat, lon_east, basis) for the wind model: the operator's
+    facility.latitude_deg / longitude_east_deg ('operator'), else the
+    registry gazetteer by city ('registry_city'); None when neither
+    resolves (spec Sec. 8.4 (a)). The operator entry is accepted within
+    the meta schema's bounds (|lat| <= 90, |lon| <= 180, the same test
+    verify_bundle applies), never normalised."""
+    fac = meta.get("facility") or {}
+    lat, lon = fac.get("latitude_deg"), fac.get("longitude_east_deg")
+    if (_is_num(lat) and _is_num(lon) and abs(lat) <= 90.0
+            and abs(lon) <= 180.0):
+        return float(lat), float(lon), "operator"
+    try:
+        hit = registry_report_module().resolve_coords(fac)
+    except Exception:
+        hit = None
+    if hit:
+        return float(hit[0]), float(hit[1]), "registry_city"
+    return None
+
+
+def _wind_orientation(meta, vendor):
+    """(b0_orientation, basis, azimuth_deg) per spec Sec. 8.2:
+    spectrometer.b0_orientation as recorded; absent, 'vertical' for the
+    NMR console vendors (bruker, agilent, jeol; basis 'default_nmr') and
+    'unknown' for magritek, nanalysis or any unrecognised vendor (benchtop
+    Halbach arrays have B0 transverse to the bore at an unknown azimuth).
+    'unknown', recorded or inferred, leaves the v0.7 brackets alone."""
+    spec = meta.get("spectrometer") or {}
+    rec = spec.get("b0_orientation")
+    if rec is None or str(rec).strip() == "":
+        if vendor in WIND_DEFAULT_NMR_VENDORS:
+            return "vertical", "default_nmr", None
+        return "unknown", "default_vendor_%s" % vendor, None
+    rec = str(rec).strip().lower()
+    if rec == "vertical":
+        return "vertical", "recorded", None
+    if rec == "horizontal":
+        az = spec.get("b0_azimuth_deg")
+        if _is_num(az):
+            return "horizontal", "recorded", float(az) % 360.0
+        return "unknown", "recorded_horizontal_without_azimuth", None
+    return "unknown", "recorded", None
+
+
+def _wind_row_times(meta, noise_res):
+    """UTC time of every analysed noise row (per_row order) with its basis
+    (spec Sec. 8.4 (c)): clock_audit.blocks[].wall_start_ms/wall_end_ms,
+    with the block's row_started_offsets_ms when every noise block records
+    an acceptable list (row i at wall_start_ms + offsets[i], the row START;
+    'per_row'), else spread over each block ('block_spread', row i at
+    start + (i + 1/2) span / N); else started_local +
+    local_timezone_offset_min per experiment ('per_row' when every noise
+    experiment holds one row, the VnmrJ protocol; 'block_spread_local'
+    between started_local and finished_local; 'block_spread_estimated'
+    from N x row seconds).
+    Returns (times, basis, tz_offset_min, tz_basis, why, ext): times None
+    with the reason when nothing times the rows; ext = {"time_source":
+    'clock_audit' | 'started_local' | None, "note": a sentence for the QA
+    when a recorded row_started_offsets_ms list was ignored, else None}.
+    A list is acceptable when it holds exactly N numbers for the block's
+    N rows, non-negative, non-decreasing and inside the block's wall span;
+    the decision is all-or-nothing per session, so rows_timed_basis stays
+    one label (spec Secs. 8.5, 9.5)."""
+    hw = halo_wind_module()
+    rows = noise_res.get("per_row") or []
+    tz = meta.get("local_timezone_offset_min")
+    tz = tz if _is_num(tz) else None       # the bundle's own type (int)
+    tz_basis = str(meta.get("local_timezone_offset_basis") or "unknown")
+
+    def ext(source, note=None):
+        return {"time_source": source, "note": note}
+
+    exps = {}
+    for e in meta.get("experiments") or []:
+        try:
+            exps[int(e.get("expno"))] = e
+        except (TypeError, ValueError):
+            pass
+    blocks, row_offsets = {}, {}
+    for b in (meta.get("clock_audit") or {}).get("blocks") or []:
+        ws, we = b.get("wall_start_ms"), b.get("wall_end_ms")
+        try:
+            if _is_num(ws) and _is_num(we) and float(we) > float(ws):
+                ex = int(b.get("expno"))
+                blocks[ex] = (float(ws), float(we))
+                offs = b.get("row_started_offsets_ms")
+                if isinstance(offs, list):
+                    row_offsets[ex] = offs
+        except (TypeError, ValueError):
+            pass
+    # rows grouped by experiment, each with its acquisition index
+    order, members = [], {}
+    for i, r in enumerate(rows):
+        try:
+            ex = int(r.get("expno"))
+        except (TypeError, ValueError):
+            ex = None
+        k = r.get("row_in_expno")
+        acq = int(k) - 1 if _is_num(k) and k >= 1 else None
+        if ex not in members:
+            members[ex] = []
+            order.append(ex)
+        members[ex].append((i, acq))
+    if not rows or None in members:
+        return (None, None, tz, tz_basis,
+                "the noise rows carry no experiment number", ext(None))
+    times = [None] * len(rows)
+
+    def n_of(ex):
+        mem = members[ex]
+        return max([a for _, a in mem if a is not None] + [len(mem) - 1]) + 1
+
+    def place(ex, t0, t1):
+        ts = hw.block_spread_times(t0, t1, n_of(ex))
+        for j, (i, a) in enumerate(members[ex]):
+            times[i] = ts[a if a is not None else j]
+
+    if all(ex in blocks for ex in order):
+        # requested, optional (spec Sec. 8.4 (c)): row_started_offsets_ms
+        # places every row at its own recorded start when EVERY noise
+        # block carries an acceptable list; otherwise block_spread for the
+        # whole session, with a QA note naming what was ignored
+        reasons = []
+        if row_offsets:
+            for ex in order:
+                offs = row_offsets.get(ex)
+                n, span = n_of(ex), blocks[ex][1] - blocks[ex][0]
+                if offs is None:
+                    reasons.append("expno %s records none" % ex)
+                elif not all(_is_num(o) for o in offs):
+                    reasons.append("expno %s: non-numeric entries" % ex)
+                elif len(offs) != n:
+                    reasons.append("expno %s: %d entries for %d rows"
+                                   % (ex, len(offs), n))
+                elif not (offs[0] >= 0 and offs[-1] < span
+                          and all(offs[j] <= offs[j + 1]
+                                  for j in range(n - 1))):
+                    reasons.append("expno %s: entries not non-negative, "
+                                   "non-decreasing and inside the block's "
+                                   "%.0f s wall span" % (ex, span / 1000.0))
+            if not reasons:
+                for ex in order:
+                    offs = row_offsets[ex]
+                    for j, (i, a) in enumerate(members[ex]):
+                        times[i] = hw.utc_from_epoch_ms(
+                            blocks[ex][0]
+                            + float(offs[a if a is not None else j]))
+                return times, "per_row", tz, tz_basis, None, ext("clock_audit")
+        for ex in order:
+            place(ex, hw.utc_from_epoch_ms(blocks[ex][0]),
+                  hw.utc_from_epoch_ms(blocks[ex][1]))
+        note = None
+        if reasons:
+            note = ("clock_audit.blocks[].row_started_offsets_ms ignored "
+                    "(%s): every row is spread over its block's wall time "
+                    "instead (rows_timed_basis block_spread)"
+                    % "; ".join(reasons))
+        return times, "block_spread", tz, tz_basis, None, ext("clock_audit",
+                                                              note)
+    if tz is None:
+        return (None, None, tz, tz_basis,
+                "no clock_audit block wall times and no "
+                "local_timezone_offset_min to place started_local in UTC",
+                ext(None))
+    starts, ends = {}, {}
+    for ex in order:
+        e = exps.get(ex) or {}
+        s = e.get("started_local") or rows[members[ex][0][0]].get(
+            "started_local")
+        starts[ex] = hw.utc_from_local(s, tz) if s else None
+        f = e.get("finished_local")
+        ends[ex] = hw.utc_from_local(f, tz) if f else None
+    if any(starts[ex] is None for ex in order):
+        return (None, None, tz, tz_basis,
+                "no clock_audit block wall times and no parseable "
+                "started_local for every noise experiment", ext(None))
+    if all(len(members[ex]) == 1 for ex in order):
+        for ex in order:
+            times[members[ex][0][0]] = starts[ex]
+        return times, "per_row", tz, tz_basis, None, ext("started_local")
+    if all(ends[ex] is not None and ends[ex] > starts[ex] for ex in order):
+        for ex in order:
+            place(ex, starts[ex], ends[ex])
+        return (times, "block_spread_local", tz, tz_basis, None,
+                ext("started_local"))
+    row_s = noise_res.get("row_seconds")
+    for ex in order:
+        rs = row_s if _is_num(row_s) and row_s > 0 else (
+            exps.get(ex) or {}).get("aq_s_per_row")
+        if not (_is_num(rs) and rs > 0):
+            return (None, None, tz, tz_basis,
+                    "no clock_audit block wall times, no finished_local "
+                    "and no row duration for expno %s" % ex, ext(None))
+        place(ex, starts[ex],
+              starts[ex] + datetime.timedelta(seconds=float(rs) * n_of(ex)))
+    return (times, "block_spread_estimated", tz, tz_basis, None,
+            ext("started_local"))
+
+
+def wind_session_model(meta, noise_res, vendor):
+    """Inputs of the wind-aware halo construction (spec Secs. 8.2, 8.4):
+    (model, sw, None, times) with model the halo.wind_model dict (its
+    vperp2_over_c2_actual filled by the caller after the lineshape; the
+    private _row_time_source 'clock_audit' | 'started_local' and
+    _row_times_note serve the QA rows and are never serialised), sw the
+    session angle histogram of halo_wind.session_wind and times the row
+    UTC datetimes in per_row order; or (None, None, (reason, detail),
+    None) with reason one of 'orientation', 'coordinates', 'timing'
+    (halo.wind_model_unavailable)."""
+    vendor = str(vendor or meta.get("vendor") or "bruker").lower()
+    orient, obasis, az = _wind_orientation(meta, vendor)
+    if orient == "unknown":
+        return None, None, (
+            "orientation",
+            "B0 orientation unknown (spectrometer.b0_orientation %s, vendor "
+            "'%s'): a benchtop or unrecognised magnet's B0 direction is "
+            "not inferred, so the v0.7 wind brackets stand"
+            % ("'%s' recorded" % (meta.get("spectrometer") or {}).get(
+                "b0_orientation") if obasis.startswith("recorded")
+               else "absent", vendor)), None
+    site = _wind_site(meta)
+    if site is None:
+        fac = meta.get("facility") or {}
+        return None, None, (
+            "coordinates",
+            "no site coordinates: facility.latitude_deg / "
+            "longitude_east_deg absent and the registry gazetteer has no "
+            "entry for '%s', '%s'" % (fac.get("city"), fac.get("country"))), \
+            None
+    times, rbasis, tz, tz_basis, why, ext = _wind_row_times(meta, noise_res)
+    if times is None:
+        return None, None, ("timing", "noise rows cannot be placed in "
+                                      "UTC: %s" % why), None
+    hw = halo_wind_module()
+    sw = hw.session_wind(site[0], site[1], times, WIND_THETA_BIN_DEG, az)
+    model = {
+        "v_sun_gal_kms": [float(x) for x in hw.V_SUN_GAL_KMS],
+        "v_earth_orbital_kms": float(hw.V_EARTH_KMS),
+        "apex_ra_deg": sw["apex_ra_deg"], "apex_dec_deg": sw["apex_dec_deg"],
+        "site": {"latitude_deg": site[0], "longitude_east_deg": site[1],
+                 "basis": site[2]},
+        "b0_orientation": orient, "b0_orientation_basis": obasis,
+        "b0_azimuth_deg": az,
+        "rows_timed_basis": rbasis, "tz_offset_min": tz, "tz_basis": tz_basis,
+        "n_rows_timed": int(len(times)),
+        "theta_min_deg": sw["theta_min"], "theta_max_deg": sw["theta_max"],
+        "theta_mean_deg": sw["theta_mean"], "sin2_mean": sw["sin2_mean"],
+        "vlab_mean_kms": sw["vlab_mean"], "vlab_basis": "session_mean",
+        "theta_bin_deg": float(WIND_THETA_BIN_DEG),
+        "vperp2_over_c2_actual": None,
+        "_utc_first": min(times).isoformat(),
+        "_utc_last": max(times).isoformat(),
+        "_row_time_source": ext["time_source"],
+        "_row_times_note": ext["note"],
+    }
+    return model, sw, None, times
+
+
+def _wind_text(model):
+    """The construction clause of spec Sec. 8.5 for a built wind model."""
+    return ("the standard-halo wind at its actual direction for this site "
+            "and these times (theta %.1f-%.1f degrees)"
+            % (model["theta_min_deg"], model["theta_max_deg"]))
+
+
+def _rows_timed_text(model):
+    """rows_timed_basis for the QA row, naming the clock-audit row offsets
+    when they, not started_local, gave the per-row times."""
+    basis = str(model.get("rows_timed_basis"))
+    if (basis == "per_row"
+            and model.get("_row_time_source") == "clock_audit"):
+        return "per_row from clock_audit.blocks[].row_started_offsets_ms"
+    return basis
+
+
 def reference_tip_deg(ref, cal):
     """(tip_deg, basis) of one small-flip reference from its own pulse
     record and the bundle's p90 calibration; (None, why) when unresolved.
@@ -3310,22 +3763,34 @@ def _d_cal_text(d_cal, ladder_factor=None):
             % (d_cal, D_CAL_PILOT, ladder_factor))
 
 
-def _construction_text(d_cal_text, bridged=False):
-    return ("worst-case, the 2020 pilot's construction generalized: every "
-            "systematic at its limit-weakening extreme --- %s (the 2020 "
-            "pilot's calibration envelope, reused unmeasured%s), DM wind "
-            "parallel to B0, damping at the broader of the measured widths, "
+def _construction_text(d_cal_text, bridged=False, wind_text=None):
+    """The construction sentence. With a built wind model (spec Sec. 8.5,
+    headline option [B]) wind_text replaces the v0.7 'DM wind parallel
+    to B0' clause and the 'worst-case' label; nothing else changes, and
+    without it the v0.7 text is returned byte for byte."""
+    if wind_text:
+        head = ("conservative, the 2020 pilot's construction generalized: "
+                "every calibration systematic at its limit-weakening "
+                "extreme and the DM wind at its actual direction")
+        wind = wind_text
+    else:
+        head = ("worst-case, the 2020 pilot's construction generalized: "
+                "every systematic at its limit-weakening extreme")
+        wind = "DM wind parallel to B0"
+    return ("%s --- %s (the 2020 "
+            "pilot's calibration envelope, reused unmeasured%s), %s, "
+            "damping at the broader of the measured widths, "
             "the whole |PSD - baseline| line power (bump, dip and dispersive "
             "wing alike) attributed to a putative signal (no spin-noise "
             "subtraction), one-sided Student-t statistics. Unpublished, and "
             "far above astrophysical bounds."
-            % (d_cal_text, " and inflated for the receiver-gain bridge"
-               if bridged else ""))
+            % (head, d_cal_text, " and inflated for the receiver-gain bridge"
+               if bridged else "", wind))
 
 
 def axion_exclusion(meta, noise_res, refs, detection, floor_cal, ladder,
                     f0_guess, f0_line, sign_status, sweep_present,
-                    carrier_shift_hz=0.0):
+                    carrier_shift_hz=0.0, vendor=None):
     """Worst-case 90% CL exclusion on the ALP-proton gradient coupling
     g_ap from this session's headline noise block and small-flip
     references. f0_guess is the reference-anchored line offset from the
@@ -3630,6 +4095,33 @@ def axion_exclusion(meta, noise_res, refs, detection, floor_cal, ladder,
     g_t = np.sqrt(p90 / (km0 ** 2 * xi2_t))
     best = int(np.argmin(g_w))
     best_t = int(np.argmin(g_t))
+    # ---- v0.8 wind-aware construction (spec Sec. 8): the SHM wind at its
+    # ACTUAL angle to B0 for this site and these rows, row-weighted and
+    # binned, every bin at the session-mean |v_lab|. Conservative (D_cal
+    # as derated) is the headline (option [B], decided 2026-10-07), the
+    # D_cal = 1 companion beside it; the two v0.7 brackets above are the
+    # unchanged calls and stay byte-identical.
+    wind, wind_sw, wind_why, wind_times = wind_session_model(meta, noise_res,
+                                                             vendor)
+    g_wc = g_wn = None
+    wind_text = None
+    if wind is not None:
+        lam_a, vp_a, lam_bins = halo_wind_module().session_lineshape_bins(
+            grid, nu_plus, wind_sw, EXCL_MC_SAMPLES, EXCL_MC_SEED)
+        # private, popped by sidereal_modulation_fit before the report is
+        # serialised (datetimes and arrays): the row times, the angle
+        # histogram and the per-bin lineshapes the sidereal fit's template
+        # bank would otherwise recompute at the same inputs
+        out["_wind"] = {"times": wind_times, "sw": wind_sw,
+                        "lam_bins": lam_bins}
+        xi2_a = c_omega2 * trapz(lam_a[None, :] * resp, grid, axis=1)
+        g_wc = np.sqrt(p90 * d_cal / (km0 ** 2 * xi2_a))
+        g_wn = np.sqrt(p90 / (km0 ** 2 * xi2_a))
+        best_wc = int(np.argmin(g_wc))
+        best_wn = int(np.argmin(g_wn))
+        wind["vperp2_over_c2_actual"] = float(vp_a)
+        wind_text = _wind_text(wind)
+        out["construction"] = _construction_text(d_text, bridged, wind_text)
     band = offsets[g_w < 10.0 * g_w[best]]
     band_off = [float(band.min()), float(band.max())]
 
@@ -3663,6 +4155,13 @@ def axion_exclusion(meta, noise_res, refs, detection, floor_cal, ladder,
     if not verified:
         result["m_a_at_best_mirror_uev"] = float(
             (nu_minus + offsets[best]) * EV_PER_HZ * 1e6)
+    if g_wc is not None:
+        # spec Sec. 8.5 names; additive, after every v0.7 key
+        result["g90_wind_conservative_best_gev_inv"] = float(g_wc[best_wc])
+        result["offset_at_best_wind_conservative_hz"] = float(
+            offsets[best_wc])
+        result["g90_wind_nominal_best_gev_inv"] = float(g_wn[best_wn])
+        result["offset_at_best_wind_nominal_hz"] = float(offsets[best_wn])
     halo = {"rho_dm_gev_cm3": RHO_DM_GEV_CM3, "v0_kms": SHM_V0_KMS,
             "v_lab_kms": SHM_VLAB_KMS, "v_esc_kms": SHM_VESC_KMS,
             "vperp2_over_c2_worst": vp_w, "vperp2_over_c2_nominal": vp_t,
@@ -3673,20 +4172,109 @@ def axion_exclusion(meta, noise_res, refs, detection, floor_cal, ladder,
                             EXCL_LINESHAPE_GRID_HZ[1]),
             "scan": "nu_a - nu_L from %+.0f to %+.0f Hz in %.0f Hz steps"
                     % EXCL_SCAN_HZ,
-            "nominal_construction": "D_cal 1, wind perpendicular to B0, "
-                                    "same Gamma"}
+            "nominal_construction": ("D_cal 1, %s, same Gamma" % wind_text)
+                                    if wind_text else
+                                    "D_cal 1, wind perpendicular to B0, "
+                                    "same Gamma",
+            "worst_construction": WIND_WORST_CONSTRUCTION}
+    wind_qa = []       # QA rows for the caller; never serialised
+    if wind is not None:
+        halo["wind_model"] = wind
+        wind_qa.append({
+            "level": "OK", "check": "wind-aware halo",
+            "detail": ("built: site %.1f deg lat, %.1f deg E (%s); B0 %s "
+                       "(%s%s); %d rows timed (%s) %s .. %s UTC; theta "
+                       "%.1f-%.1f deg (mean %.1f, <sin^2 theta> %.3f), "
+                       "|v_lab| %.1f km/s, apex RA %.1f Dec %+.1f deg; "
+                       "headline g_ap < %.3g GeV^-1 (conservative, D_cal "
+                       "%.2f), D_cal = 1 companion %.3g, the v0.7 "
+                       "worst-parallel %.3g and perpendicular-nominal %.3g"
+                       % (wind["site"]["latitude_deg"],
+                          wind["site"]["longitude_east_deg"],
+                          wind["site"]["basis"], wind["b0_orientation"],
+                          wind["b0_orientation_basis"],
+                          (", azimuth %.0f deg" % wind["b0_azimuth_deg"])
+                          if wind["b0_azimuth_deg"] is not None else "",
+                          wind["n_rows_timed"], _rows_timed_text(wind),
+                          wind["_utc_first"][:19], wind["_utc_last"][:19],
+                          wind["theta_min_deg"], wind["theta_max_deg"],
+                          wind["theta_mean_deg"], wind["sin2_mean"],
+                          wind["vlab_mean_kms"], wind["apex_ra_deg"],
+                          wind["apex_dec_deg"], g_wc[best_wc], d_cal,
+                          g_wn[best_wn], g_w[best], g_t[best_t]))})
+        # the zone WARN belongs to the started_local chain only: rows timed
+        # from the clock audit's UTC epochs never depend on the offset
+        if (wind.get("_row_time_source") == "started_local"
+                and wind["tz_basis"] in ("packing_machine", "unknown")):
+            wind_qa.append({
+                "level": "WARN", "check": "wind-aware halo: row time zone",
+                "detail": ("row times are started_local (per row, or spread "
+                           "between started_local and finished_local, or N x "
+                           "row seconds) + local_timezone_offset_min %+.0f "
+                           "min whose basis "
+                           "is '%s' (the packing machine's zone, or "
+                           "unrecorded), not necessarily the console's: "
+                           "an hour of zone error rotates the wind angle by "
+                           "15 deg of hour angle" % (wind["tz_offset_min"]
+                                                     or 0.0,
+                                                     wind["tz_basis"]))})
+        if wind.get("_row_times_note"):
+            wind_qa.append({"level": "WARN",
+                            "check": "wind-aware halo: row times",
+                            "detail": wind["_row_times_note"]})
+    else:
+        halo["wind_model_unavailable"] = wind_why[0]
+        wind_qa.append({
+            "level": "WARN", "check": "wind-aware halo",
+            "detail": ("not built (%s): %s --- the headline stays the v0.7 "
+                       "worst-parallel construction and no g90_wind_* key "
+                       "is written" % wind_why)})
+    out["_wind_qa"] = wind_qa
 
     stat_pct = 100.0 * (t90 * sigma_tot / p90) if p90 else 0.0
-    honesty = [
-        "Worst-case construction (2020 pilot): %s, wind parallel "
-        "to B0, Gamma at the broader measured width (%s, %.1f Hz), the "
-        "whole |PSD - baseline| line power (%.3g counts^2: positive part "
-        "%.3g, negative part %.3g, over the Lorentzian window fraction "
-        "%.3f) attributed to a putative axion signal. UNPUBLISHED --- "
-        "%.1e times above the SN1987A cooling bound of %.1e GeV^-1 on the "
-        "same coupling."
-        % (d_text, gamma_basis, gamma_fwhm, p_line, p_pos, p_abs - p_pos,
-           win_frac, result["ratio_to_sn1987a_bound"], SN1987A_GAP_GEV_INV),
+    if g_wc is not None:
+        honesty = [
+            "Headline construction (the 2020 pilot's, with the wind at its "
+            "actual direction): %s, %s, Gamma at the broader measured width "
+            "(%s, %.1f Hz), the whole |PSD - baseline| line power (%.3g "
+            "counts^2: positive part %.3g, negative part %.3g, over the "
+            "Lorentzian window fraction %.3f) attributed to a putative axion "
+            "signal. UNPUBLISHED --- %.1e times above the SN1987A cooling "
+            "bound of %.1e GeV^-1 on the same coupling."
+            % (d_text, wind_text, gamma_basis, gamma_fwhm, p_line, p_pos,
+               p_abs - p_pos, win_frac,
+               g_wc[best_wc] / SN1987A_GAP_GEV_INV, SN1987A_GAP_GEV_INV),
+            "Robustness: even with the wind along B_0 (theta = 0, V = %.0f "
+            "km/s, the 2020 pilot's worst case, D_cal applied) the bound is "
+            "g_ap < %.3g GeV^-1 at %+.0f Hz (%.1e times the SN1987A bound); "
+            "the D_cal = 1 companion at the actual wind direction is g_ap < "
+            "%.3g GeV^-1 at %+.0f Hz, against the v0.7 wind-perpendicular "
+            "nominal %.3g GeV^-1 at %+.0f Hz. Wind model: %d rows timed "
+            "(%s), theta %.1f-%.1f degrees (mean %.1f, <sin^2 theta> %.3f), "
+            "|v_lab| %.1f km/s, <v_perp^2/c^2> %.3e against %.3e parallel "
+            "and %.3e perpendicular."
+            % (SHM_VLAB_KMS, g_w[best], offsets[best],
+               result["ratio_to_sn1987a_bound"], g_wn[best_wn],
+               offsets[best_wn], g_t[best_t], offsets[best_t],
+               wind["n_rows_timed"], wind["rows_timed_basis"],
+               wind["theta_min_deg"], wind["theta_max_deg"],
+               wind["theta_mean_deg"], wind["sin2_mean"],
+               wind["vlab_mean_kms"], vp_a, vp_w, vp_t),
+        ]
+    else:
+        honesty = [
+            "Worst-case construction (2020 pilot): %s, wind parallel "
+            "to B0, Gamma at the broader measured width (%s, %.1f Hz), the "
+            "whole |PSD - baseline| line power (%.3g counts^2: positive part "
+            "%.3g, negative part %.3g, over the Lorentzian window fraction "
+            "%.3f) attributed to a putative axion signal. UNPUBLISHED --- "
+            "%.1e times above the SN1987A cooling bound of %.1e GeV^-1 on "
+            "the same coupling."
+            % (d_text, gamma_basis, gamma_fwhm, p_line, p_pos, p_abs - p_pos,
+               win_frac, result["ratio_to_sn1987a_bound"],
+               SN1987A_GAP_GEV_INV),
+        ]
+    honesty += [
         "In this construction the limit does NOT improve with more "
         "measurement time --- its floor is the spin-noise line itself "
         "(P_90 = %.3g counts^2, of which the statistical term is %.1f%%) "
@@ -3751,7 +4339,206 @@ def axion_exclusion(meta, noise_res, refs, detection, floor_cal, ladder,
     if not verified:
         out["curve"]["m_a_ev_mirror"] = ((nu_minus + offsets)
                                          * EV_PER_HZ).tolist()
+    if g_wc is not None:
+        out["curve"]["g90_wind_conservative"] = g_wc.tolist()
+        out["curve"]["g90_wind_nominal"] = g_wn.tolist()
     return out
+
+
+# ---- v0.8 sidereal-modulation fit (analysis spec Sec. 9): the per-row line
+# powers of the headline noise group fitted to P_SN + P_a f(t_k; Delta),
+# f the wind-angle template of the exclusion's own lineshape at the scan
+# offset. Estimator per_row[].line_power_fixed_shape_counts2 (Sec. 9.2);
+# SPINNOISE_SIDEREAL_ESTIMATOR=free_fit is the debug/regression mode on
+# integrated_power_counts2 (the Sec. 9.6 prototype numbers);
+# SPINNOISE_SIDEREAL_REGRESSORS=none drops the floor regressor.
+SIDEREAL_ESTIMATOR_ENV = "SPINNOISE_SIDEREAL_ESTIMATOR"
+SIDEREAL_REGRESSORS_ENV = "SPINNOISE_SIDEREAL_REGRESSORS"
+
+
+# spec Sec. 9.2: the fixed skip_reason strings; any detail goes into the
+# honesty entry and the QA row, never into skip_reason
+SKIP_EXCLUSION_UNAVAILABLE = "exclusion_unavailable"
+SKIP_WIND_UNAVAILABLE = "wind_model_unavailable: %s"   # orientation | coordinates | timing
+
+
+def _sidereal_skip(reason, wind=None, extra=None, detail=None):
+    sm = sidereal_modulation_module()
+    obj = {"available": False, "skip_reason": reason, "label": sm.LABEL,
+           "rows_timed_basis": (wind or {}).get("rows_timed_basis"),
+           "tz_basis": (wind or {}).get("tz_basis"),
+           "honesty": ["Sidereal-modulation fit not run: %s%s. UNPUBLISHED."
+                       % (reason, (" (%s)" % detail) if detail else "")]}
+    if extra:
+        obj.update(extra)
+    return obj
+
+
+def sidereal_modulation_fit(meta, noise_res, excl, vendor):
+    """(science.sidereal_modulation, qa_rows) per spec Secs. 9.2-9.5 from
+    the headline noise group and the per-session exclusion. Skips with
+    available False and one of the fixed skip_reason strings: when the
+    exclusion itself is unavailable ('exclusion_unavailable', its reason
+    in the honesty entry and the QA row), when its wind model is absent
+    ('wind_model_unavailable: orientation | coordinates | timing'), and,
+    from the module, when fewer than 30 rows carry a line power or the
+    template's std(f) at result.offset_at_best_wind_nominal_hz is below
+    0.02 ('no modulation leverage in this session's hours').
+    The exclusion's private excl["_wind"] (row times, angle histogram,
+    per-bin lineshapes; set by axion_exclusion when the wind model was
+    built) is popped here on every path and handed to the module as
+    inp["wind_precomputed"], so neither the row placement nor the
+    Monte-Carlo bins are computed twice; without it (a stripped
+    exclusion) the inputs are recomputed as before."""
+    qa = []
+    pre = excl.pop("_wind", None) if isinstance(excl, dict) else None
+    if not isinstance(excl, dict) or not excl.get("available"):
+        why = str((excl or {}).get("reason") or "?")
+        obj = _sidereal_skip(SKIP_EXCLUSION_UNAVAILABLE, detail=why)
+        qa.append({"level": "OK", "check": "sidereal-modulation fit",
+                   "detail": "skipped: %s (%s)" % (obj["skip_reason"], why)})
+        return obj, qa
+    halo = excl.get("halo") or {}
+    wind = halo.get("wind_model")
+    if not wind or "offset_at_best_wind_nominal_hz" not in excl["result"]:
+        obj = _sidereal_skip(SKIP_WIND_UNAVAILABLE
+                             % halo.get("wind_model_unavailable", "?"))
+        qa.append({"level": "OK", "check": "sidereal-modulation fit",
+                   "detail": "skipped: %s" % obj["skip_reason"]})
+        return obj, qa
+    estimator = (os.environ.get(SIDEREAL_ESTIMATOR_ENV) or "fixed_shape").strip()
+    if estimator not in ("fixed_shape", "free_fit"):
+        estimator = "fixed_shape"
+    field = ("line_power_fixed_shape_counts2" if estimator == "fixed_shape"
+             else "integrated_power_counts2")
+    use_reg = (os.environ.get(SIDEREAL_REGRESSORS_ENV) or "floor").strip() \
+        .lower() not in ("none", "off", "0", "")
+    rows = (noise_res or {}).get("per_row") or []
+    hw = halo_wind_module()
+    site = wind["site"]
+    lat, lon = float(site["latitude_deg"]), float(site["longitude_east_deg"])
+    az = wind.get("b0_azimuth_deg")
+    if (isinstance(pre, dict) and isinstance(pre.get("times"), list)
+            and len(pre["times"]) == len(rows)
+            and isinstance(pre.get("sw"), dict)):
+        # the exclusion's own row times and angle histogram (E7)
+        times, sw = pre["times"], pre["sw"]
+        rbasis, tz_basis = wind.get("rows_timed_basis"), wind.get("tz_basis")
+    else:
+        pre = None
+        times, rbasis, tz, tz_basis, why, _ext = _wind_row_times(
+            meta, noise_res or {})
+        if times is None:
+            # unreachable in the pipeline (the same call just built
+            # halo.wind_model from the same meta and rows); a guard
+            obj = _sidereal_skip(SKIP_WIND_UNAVAILABLE % "timing", wind,
+                                 detail=why)
+            qa.append({"level": "OK", "check": "sidereal-modulation fit",
+                       "detail": "skipped: %s (%s)" % (obj["skip_reason"],
+                                                       why)})
+            return obj, qa
+        sw = hw.session_wind(lat, lon, times, WIND_THETA_BIN_DEG, az)
+    sel = [i for i, pr in enumerate(rows)
+           if "fit" in pr and _is_num(pr.get(field))
+           and _is_num(pr.get("baseline_psd_at_line"))
+           and pr["baseline_psd_at_line"] > 0 and times[i] is not None]
+    n_no_fit = sum(1 for pr in rows if "fit" not in pr)
+    res, sp, cv = excl["result"], excl["signal_power"], excl["curve"]
+    fs_basis = ((noise_res or {}).get("line_power_fixed_shape") or {}).get(
+        "basis")
+    inp = {
+        "hw": hw,
+        "P": [rows[i][field] for i in sel],
+        "floor": [rows[i]["baseline_psd_at_line"] for i in sel],
+        "t_utc": [times[i] for i in sel],
+        "theta_deg": [float(sw["theta_deg"][i]) for i in sel],
+        "wind": wind, "site": (lat, lon, az),
+        "grid_hz": np.arange(*EXCL_LINESHAPE_GRID_HZ),
+        "offsets_hz": np.arange(*EXCL_SCAN_HZ),
+        "nu_a_hz": excl["line"]["nu_L_hz_nominal"],
+        "gamma_per_s": excl["damping"]["gamma_per_s"],
+        "nsamp": EXCL_MC_SAMPLES, "seed": EXCL_MC_SEED,
+        "c_omega2": 0.5 * RHO_DM_GEV_CM3 * HBARC_GEV_CM ** 3
+        * GEV_TO_RADS ** 2,
+        "bin_deg": WIND_THETA_BIN_DEG,
+        "P90": sp["P_90_counts2"],
+        "g_wind_nominal": cv["g90_wind_nominal"],
+        "g_wind_conservative": cv["g90_wind_conservative"],
+        "offset_best_hz": res["offset_at_best_wind_nominal_hz"],
+        "g_wc_best": res["g90_wind_conservative_best_gev_inv"],
+        "g_worst_best": res["g90_worst_best_gev_inv"],
+        "m_a_ev": cv["m_a_ev"], "m_a_ev_mirror": cv.get("m_a_ev_mirror"),
+        "t90_of": lambda dof: t_quantile_one_sided(0.90, dof),
+        "row_clip_nmad": ROW_CLIP_NMAD, "use_floor_regressor": use_reg,
+        "estimator": estimator, "per_row_field": field,
+        "estimator_basis": (fs_basis if estimator == "fixed_shape" else
+                            "per_row[].integrated_power_counts2, the free "
+                            "five-parameter per-row fit (DEBUG/REGRESSION "
+                            "mode, %s=free_fit)" % SIDEREAL_ESTIMATOR_ENV),
+        "n_rows_total": len(rows), "n_rows_no_fit": n_no_fit,
+        "alignment_gate_fired": bool(((noise_res or {}).get(
+            "alignment_check") or {}).get("gate_fired")),
+        "p_net": sp.get("P_net_counts2"),
+        "win_frac": sp.get("lorentzian_window_fraction"),
+        "sn1987a": SN1987A_GAP_GEV_INV,
+    }
+    if pre is not None:
+        # E7: times and sw as above, lam_bins seeds the template bank
+        inp["wind_precomputed"] = pre
+    obj = sidereal_modulation_module().run(inp)
+    obj["rows_timed_basis"] = rbasis
+    obj["tz_basis"] = tz_basis
+    if not obj.get("available"):
+        ts = (obj.get("template") or {}).get("template_std")
+        qa.append({"level": "OK", "check": "sidereal-modulation fit",
+                   "detail": "skipped: %s (%d rows with a line power, "
+                             "template std(f) %s at %+.0f Hz)"
+                             % (obj["skip_reason"],
+                                obj.get("rows_with_line_power", 0),
+                                ("%.4f" % ts) if _is_num(ts) else "n/a",
+                                res["offset_at_best_wind_nominal_hz"])})
+        return obj, qa
+    b, t, ft = obj["bound"], obj["template"], obj["fit"]
+    qa.append({"level": "OK", "check": "sidereal-modulation fit",
+               "detail": ("%s estimator on %d of %d rows (%d clipped): P_a = "
+                          "%+.1f +/- %.1f counts^2 at %+.0f Hz, P_90,mod = "
+                          "%.1f against P_90 = %.1f; g_ap < %.3g GeV^-1 "
+                          "(conservative) / %.3g (D_cal = 1), %.2fx the "
+                          "entire-line-power bound; template std(f) %.3f, "
+                          "theta %.1f-%.1f deg; solar_degeneracy %s; "
+                          "UNPUBLISHED, preliminary"
+                          % (estimator, obj["rows_used"],
+                             obj["rows_with_line_power"],
+                             obj["rows_excluded"], ft["P_a_counts2"],
+                             ft["sigma_Pa_counts2"], t["offset_hz"],
+                             b["P90_mod_counts2"], sp["P_90_counts2"],
+                             b["g90_conservative_mod_gev_inv"],
+                             b["g90_nominal_mod_gev_inv"],
+                             b["improvement_vs_line_power"]["nominal"] or 0.0,
+                             t["template_std"], t["theta_min_deg"],
+                             t["theta_max_deg"], obj["solar_degeneracy"]))})
+    if obj["rows_excluded_frac"] > sidereal_modulation_module(
+            ).ROWS_EXCLUDED_WARN_FRAC:
+        qa.append({"level": "WARN", "check": "sidereal-modulation fit: rows",
+                   "detail": ("%d of %d rows (%.0f%%) removed by the robust "
+                              "clip; the primary fit is NOT changed silently "
+                              "(fit_allrows is recorded beside it)"
+                              % (obj["rows_excluded"],
+                                 obj["rows_with_line_power"],
+                                 100.0 * obj["rows_excluded_frac"]))})
+    ec = obj.get("estimator_check") or {}
+    if ec.get("ratio") is not None and abs(ec["ratio"] - 1.0) > ec["warn_above"]:
+        qa.append({"level": "WARN",
+                   "check": "sidereal-modulation fit: estimator",
+                   "detail": ("row mean of P_k %+.1f counts^2 against the "
+                              "exclusion's P_net / window fraction %+.1f: "
+                              "ratio %.3f, more than %.0f%% from 1 (the two "
+                              "estimators weigh the dispersive wing and the "
+                              "baseline curvature differently)"
+                              % (ec["row_mean_Pk_counts2"],
+                                 ec["P_net_over_window_fraction_counts2"],
+                                 ec["ratio"], 100 * ec["warn_above"]))})
+    return obj, qa
 
 
 def ladder_levels(rungs):
@@ -4981,27 +5768,75 @@ def render_axion_exclusion_html(ctx):
         return ""
     parts = []
     A = parts.append
-    A("<h2>Axion-coupling exclusion (worst-case, this session)</h2>"
-      "<div class='card'>")
+    # headline option [B] (spec Sec. 8.5): the wind-aware conservative
+    # construction when the wind model is built, the v0.7 worst case
+    # otherwise (unchanged text)
+    wm = ((ex.get("halo") or {}).get("wind_model")
+          if ex.get("available") else None)
+    wind_head = bool(wm) and ("g90_wind_conservative_best_gev_inv"
+                              in (ex.get("result") or {}))
+    A("<h2>Axion-coupling exclusion (%s, this session)</h2>"
+      "<div class='card'>"
+      % ("wind-aware conservative" if wind_head else "worst-case"))
     if not ex.get("available"):
         A("<p class='warn'>Not computed: %s</p><p class='small'>%s</p></div>"
           % (esc(ex.get("reason", "")), esc(ex.get("construction", ""))))
         return "".join(parts)
     res, line, tr = ex["result"], ex["line"], ex["transduction"]
     sp, dm, dc = ex["signal_power"], ex["damping"], ex["calibration_derating"]
-    A("<p><span class='big'>g<sub>ap</sub> &lt; %.3g GeV<sup>&minus;1</sup>"
-      "</span> (90%% CL, worst case) at m<sub>a</sub> = %.7f &micro;eV%s, "
-      "best at &nu;<sub>a</sub> &minus; &nu;<sub>L</sub> = %+.0f Hz.</p>"
-      % (res["g90_worst_best_gev_inv"], res["m_a_at_best_uev"],
-         (" <span class='warn'>(or %.7f &micro;eV under the mirror sign)"
-          "</span>" % res["m_a_at_best_mirror_uev"])
-         if "m_a_at_best_mirror_uev" in res else "",
-         res["offset_at_best_hz"]))
+    if wind_head:
+        off_wc = res["offset_at_best_wind_conservative_hz"]
+        m_wc = (line["nu_L_hz_nominal"] + off_wc) * EV_PER_HZ * 1e6
+        A("<p><span class='big'>g<sub>ap</sub> &lt; %.3g GeV<sup>&minus;1"
+          "</sup></span> (90%% CL, conservative: D<sub>cal</sub> %.2f and "
+          "the standard-halo wind at its actual direction for this site and "
+          "these times, &theta; %.1f&ndash;%.1f&deg;) at m<sub>a</sub> = "
+          "%.7f &micro;eV%s, best at &nu;<sub>a</sub> &minus; &nu;<sub>L"
+          "</sub> = %+.0f Hz. Companion at D<sub>cal</sub> = 1, same wind: "
+          "g<sub>ap</sub> &lt; %.3g GeV<sup>&minus;1</sup> at %+.0f Hz.</p>"
+          % (res["g90_wind_conservative_best_gev_inv"], dc["D_cal"],
+             wm["theta_min_deg"], wm["theta_max_deg"], m_wc,
+             (" <span class='warn'>(or %.7f &micro;eV under the mirror "
+              "sign)</span>" % ((line["nu_L_hz_mirror"] + off_wc)
+                                * EV_PER_HZ * 1e6))
+             if "nu_L_hz_mirror" in line else "", off_wc,
+             res["g90_wind_nominal_best_gev_inv"],
+             res["offset_at_best_wind_nominal_hz"]))
+        A("<p class='small'>Robustness &mdash; the 2020 pilot's worst case "
+          "(wind parallel to B<sub>0</sub>, &theta; = 0, V = %.0f km/s, "
+          "D<sub>cal</sub> applied): g<sub>ap</sub> &lt; %.3g GeV<sup>"
+          "&minus;1</sup> at m<sub>a</sub> = %.7f &micro;eV%s, %+.0f Hz, "
+          "%.1e&times; above the SN1987A cooling bound (%.1e GeV<sup>&minus;1"
+          "</sup>). v0.7 nominal bracket (D<sub>cal</sub> 1, wind "
+          "perpendicular to B<sub>0</sub>, same &Gamma;): g<sub>ap</sub> "
+          "&lt; %.3g GeV<sup>&minus;1</sup> at %+.0f Hz; the wind-aware "
+          "D<sub>cal</sub> = 1 companion is %.3f&times; it.</p>"
+          % (SHM_VLAB_KMS, res["g90_worst_best_gev_inv"],
+             res["m_a_at_best_uev"],
+             (" <span class='warn'>(or %.7f &micro;eV under the mirror sign)"
+              "</span>" % res["m_a_at_best_mirror_uev"])
+             if "m_a_at_best_mirror_uev" in res else "",
+             res["offset_at_best_hz"], res["ratio_to_sn1987a_bound"],
+             SN1987A_GAP_GEV_INV, res["g90_nominal_best_gev_inv"],
+             res["offset_at_best_nominal_hz"],
+             res["g90_wind_nominal_best_gev_inv"]
+             / res["g90_nominal_best_gev_inv"]))
+    else:
+        A("<p><span class='big'>g<sub>ap</sub> &lt; %.3g GeV<sup>&minus;1"
+          "</sup></span> (90%% CL, worst case) at m<sub>a</sub> = %.7f "
+          "&micro;eV%s, best at &nu;<sub>a</sub> &minus; &nu;<sub>L</sub> = "
+          "%+.0f Hz.</p>"
+          % (res["g90_worst_best_gev_inv"], res["m_a_at_best_uev"],
+             (" <span class='warn'>(or %.7f &micro;eV under the mirror sign)"
+              "</span>" % res["m_a_at_best_mirror_uev"])
+             if "m_a_at_best_mirror_uev" in res else "",
+             res["offset_at_best_hz"]))
     bu = res["band_10x_uev"]
-    A("<p class='small'>Within 10&times; of the best coupling: "
+    A("<p class='small'>Within 10&times; of the best %scoupling: "
       "&nu;<sub>a</sub> &minus; &nu;<sub>L</sub> in [%+.0f, %+.0f] Hz "
       "&mdash; %.7f to %.7f &micro;eV on the nominal (+offset) mass axis"
-      % (res["band_10x_offset_hz"][0], res["band_10x_offset_hz"][1],
+      % ("worst-case " if wind_head else "",
+         res["band_10x_offset_hz"][0], res["band_10x_offset_hz"][1],
          bu["nominal"][0], bu["nominal"][1]))
     if "mirror" in bu:
         inter = bu.get("intersection")
@@ -5012,13 +5847,20 @@ def render_axion_exclusion_html(ctx):
              else "EMPTY (the two sign hypotheses do not overlap)",
              bu["union"][0], bu["union"][1]))
     A(".</p>")
-    A("<p class='small'>Nominal construction for comparison (D_cal 1, "
-      "wind perpendicular to B<sub>0</sub>, same &Gamma;): g<sub>ap</sub> "
-      "&lt; %.3g GeV<sup>&minus;1</sup> at %+.0f Hz. The worst-case "
-      "number sits %.1e&times; above the SN1987A cooling bound "
-      "(%.1e GeV<sup>&minus;1</sup>).</p>"
-      % (res["g90_nominal_best_gev_inv"], res["offset_at_best_nominal_hz"],
-         res["ratio_to_sn1987a_bound"], SN1987A_GAP_GEV_INV))
+    if not wind_head:
+        A("<p class='small'>Nominal construction for comparison (D_cal 1, "
+          "wind perpendicular to B<sub>0</sub>, same &Gamma;): g<sub>ap</sub> "
+          "&lt; %.3g GeV<sup>&minus;1</sup> at %+.0f Hz. The worst-case "
+          "number sits %.1e&times; above the SN1987A cooling bound "
+          "(%.1e GeV<sup>&minus;1</sup>).</p>"
+          % (res["g90_nominal_best_gev_inv"],
+             res["offset_at_best_nominal_hz"],
+             res["ratio_to_sn1987a_bound"], SN1987A_GAP_GEV_INV))
+        if (ex.get("halo") or {}).get("wind_model_unavailable"):
+            A("<p class='small warn'>Wind-aware construction not built "
+              "(%s): the headline is the v0.7 worst case and no wind-aware "
+              "curve is written; the QA table says why.</p>"
+              % esc(ex["halo"]["wind_model_unavailable"]))
     A("<table><tr><th>input</th><th>value</th><th>from this session</th>"
       "</tr>")
     A("<tr><td>&nu;<sub>L</sub></td><td>%.3f MHz %+.1f Hz = %.7f &micro;eV"
@@ -5066,7 +5908,32 @@ def render_axion_exclusion_html(ctx):
          fmt(dm["reference_power_equivalent_fwhm_hz"], 3)))
     A("<tr><td>D<sub>cal</sub></td><td>%.2f</td><td>%s</td></tr>"
       % (dc["D_cal"], esc(dc["basis"])))
+    if wm:
+        hl = ex["halo"]
+        A("<tr><td>DM wind</td><td>&theta; %.1f&ndash;%.1f&deg; (mean "
+          "%.1f&deg;, &lt;sin&sup2;&theta;&gt; %.3f), |v<sub>lab</sub>| "
+          "%.1f km/s, &lt;v<sub>&perp;</sub>&sup2;/c&sup2;&gt; %.3e "
+          "(parallel %.3e, perpendicular %.3e)</td><td>site %.1f&deg; lat, "
+          "%.1f&deg; E (%s); B<sub>0</sub> %s (%s%s); %d rows timed (%s), "
+          "zone offset %s min (%s); apex RA %.1f&deg; Dec %+.1f&deg;; "
+          "%g&deg; angle bins, every bin at the session-mean |v<sub>lab"
+          "</sub>|; the parallel worst case stays at V = %.0f km/s</td></tr>"
+          % (wm["theta_min_deg"], wm["theta_max_deg"], wm["theta_mean_deg"],
+             wm["sin2_mean"], wm["vlab_mean_kms"],
+             wm["vperp2_over_c2_actual"], hl["vperp2_over_c2_worst"],
+             hl["vperp2_over_c2_nominal"], wm["site"]["latitude_deg"],
+             wm["site"]["longitude_east_deg"], esc(wm["site"]["basis"]),
+             esc(wm["b0_orientation"]), esc(wm["b0_orientation_basis"]),
+             (", azimuth %.0f&deg;" % wm["b0_azimuth_deg"])
+             if wm.get("b0_azimuth_deg") is not None else "",
+             wm["n_rows_timed"], esc(wm["rows_timed_basis"]),
+             fmt(wm["tz_offset_min"], 0) if wm["tz_offset_min"] is not None
+             else "&mdash;", esc(wm["tz_basis"]), wm["apex_ra_deg"],
+             wm["apex_dec_deg"], wm["theta_bin_deg"], SHM_VLAB_KMS))
     A("</table>")
+    if "exclusion" in (ctx.get("figs") or {}):
+        A("<div class='fig'><img alt='exclusion' "
+          "src='data:image/png;base64,%s'></div>" % ctx["figs"]["exclusion"])
     A("<ul class='small'>")
     for h in ex.get("honesty", []):
         A("<li>%s</li>" % esc(h))
@@ -5074,42 +5941,88 @@ def render_axion_exclusion_html(ctx):
     sc = ex.get("site_combined")
     if isinstance(sc, dict) and sc.get("combined"):
         c = sc["combined"]
-        segs = c.get("band_10x_segments_uev") or [c["band_10x_uev"]]
+        # headline option [B] (spec Sec. 8.5) at the site level: the
+        # combiner's wind-aware conservative headline when every session
+        # carries curve.g90_wind_conservative (site_combined.headline_curve
+        # == 'g90_wind_conservative'), the v0.7 worst-parallel card
+        # otherwise, byte-identical to v0.7 plus the headline_basis line
+        wc = c.get("wind_conservative")
+        wind_site = (c.get("headline_curve") == "g90_wind_conservative"
+                     and isinstance(wc, dict)
+                     and c.get("g90_wind_conservative_best_gev_inv")
+                     is not None)
+        hb = wc if wind_site else c
+        gkey = ("g90_wind_conservative_best_gev_inv" if wind_site
+                else "g90_worst_best_gev_inv")
+        g_head = c[gkey]
+        m_head = (c["m_a_at_best_wind_conservative_uev"] if wind_site
+                  else c["m_a_at_best_uev"])
+        band = (c["band_10x_wind_conservative_uev"] if wind_site
+                else c["band_10x_uev"])
+        setter = (c["session_setting_best_wind_conservative"] if wind_site
+                  else c["session_setting_best"])
+        segs = hb.get("band_10x_segments_uev") or [band]
+        th = c.get("wind_theta_deg_range") if wind_site else None
+        ineq = (("a wind-aware conservative inequality (the standard-halo "
+                 "wind at its actual direction for each session's site and "
+                 "times%s, D<sub>cal</sub> applied)"
+                 % ((", &theta; %.0f&ndash;%.0f&deg; over the sessions"
+                     % (th[0], th[1])) if th else ""))
+                if wind_site else "a worst-case inequality")
+        companion = ""
+        if wind_site and c.get("g90_wind_nominal_best_gev_inv") is not None:
+            companion = ("; D<sub>cal</sub> = 1 companion at the same wind "
+                         "g<sub>ap</sub> &lt; %.3g GeV<sup>&minus;1</sup> at "
+                         "%.7f &micro;eV"
+                         % (c["g90_wind_nominal_best_gev_inv"],
+                            c["m_a_at_best_wind_nominal_uev"]))
         order = c.get("sign_hypotheses") or []
         step = (sc.get("curve") or {}).get("grid_step_hz") or 0.0
         A("<p><b>Site-combined (%d session%s, %.0f s of noise data)%s:</b> "
           "g<sub>ap</sub> &lt; %.3g GeV<sup>&minus;1</sup> at m<sub>a</sub> "
           "= %.7f &micro;eV, within-10&times; band around the best %.7f to "
           "%.7f &micro;eV (%d contiguous segment%s within 10&times; in "
-          "total, set by %s) &mdash; %s.</p>"
+          "total, set by %s)%s &mdash; %s.</p>"
           % (sc["n_sessions"], "" if sc["n_sessions"] == 1 else "s",
              c["total_noise_seconds"],
              ", sign-robust headline" if order else "",
-             c["g90_worst_best_gev_inv"],
-             c["m_a_at_best_uev"], c["band_10x_uev"][0], c["band_10x_uev"][1],
+             g_head, m_head, band[0], band[1],
              len(segs), "" if len(segs) == 1 else "s",
-             esc(c["session_setting_best"]),
+             esc(setter), companion,
              ("under each joint axis-sign hypothesis the pointwise minimum "
               "over sessions on the site's common %g Hz mass grid (each "
-              "session a worst-case inequality, the sign taken as ONE "
+              "session %s, the sign taken as ONE "
               "shared unknown per vendor, a premise the axis-sign lines "
               "below state), the site curve the weaker hypothesis at every "
-              "mass" % step) if order else
+              "mass" % (step, ineq)) if order else
              ("the pointwise minimum over sessions on the site's common "
-              "%g Hz mass grid, each session a worst-case inequality%s"
-              % (step, ", every sign-unverified session entered as the "
-                       "weaker of its two mass placements"
+              "%g Hz mass grid, each session %s%s"
+              % (step, ineq, ", every sign-unverified session entered as the "
+                             "weaker of its two mass placements"
                  if c.get("sign_unverified_sessions") else ""))))
+        if wind_site:
+            # the worst-parallel number as the robustness line and the
+            # D_cal = 1 companion, as the per-session honesty list has them
+            A("<p class='small'>Robustness &mdash; %s.</p>"
+              % esc(c.get("robustness_note") or ""))
+        elif c.get("headline_basis"):
+            A("<p class='warn small'>Headline basis: %s</p>"
+              % esc(c["headline_basis"]))
         if order:
+            def _cond(l):
+                blk = (hb.get("if_sign") or {}).get(l)
+                if isinstance(blk, dict) and gkey in blk:
+                    return blk, gkey
+                return c["if_sign"][l], "g90_worst_best_gev_inv"
             A("<p>Conditional on the axis sign: %s.</p>" % "; ".join(
                 "if the axis sign is <b>%s</b>: g<sub>ap</sub> &lt; %.3g "
                 "GeV<sup>&minus;1</sup> at m<sub>a</sub> = %.7f &micro;eV "
                 "(within-10&times; band %.7f to %.7f &micro;eV, set by %s)"
-                % (esc(l), c["if_sign"][l]["g90_worst_best_gev_inv"],
-                   c["if_sign"][l]["m_a_at_best_uev"],
-                   c["if_sign"][l]["band_10x_uev"][0],
-                   c["if_sign"][l]["band_10x_uev"][1],
-                   esc(c["if_sign"][l]["session_setting_best"]))
+                % (esc(l), _cond(l)[0][_cond(l)[1]],
+                   _cond(l)[0]["m_a_at_best_uev"],
+                   _cond(l)[0]["band_10x_uev"][0],
+                   _cond(l)[0]["band_10x_uev"][1],
+                   esc(_cond(l)[0]["session_setting_best"]))
                 for l in order))
         if c.get("sign_note"):
             A("<p class='warn small'>Axis sign: %s</p>"
@@ -5117,16 +6030,35 @@ def render_axion_exclusion_html(ctx):
         if c.get("sign_premise"):
             A("<p class='warn small'>Sign premise: %s</p>"
               % esc(c["sign_premise"]))
-        A("<p class='warn small'>Coverage: %s</p>" % esc(c.get(
-            "coverage_note", "")))
+        cov_wind = ""
+        if wind_site and wc.get("statistical_fraction_of_P90_at_best") \
+                is not None:
+            cov_wind = (" The session setting the wind-aware headline (%s) "
+                        "has a statistical term of %.0f%% of its P<sub>90"
+                        "</sub>." % (esc(setter), 100 * wc[
+                            "statistical_fraction_of_P90_at_best"]))
+        A("<p class='warn small'>Coverage: %s%s</p>" % (esc(c.get(
+            "coverage_note", "")), cov_wind))
         A("<table><tr><th>session</th><th>bundle</th><th>carrier (MHz)</th>"
           "<th>axis sign</th>"
-          "<th>best g<sub>ap</sub> (GeV<sup>&minus;1</sup>)</th>"
-          "<th>at m<sub>a</sub> (&micro;eV)</th><th>statistical term of "
-          "P<sub>90</sub></th><th>noise (s)</th></tr>")
+          "<th>%s g<sub>ap</sub> (GeV<sup>&minus;1</sup>)</th>"
+          "<th>at m<sub>a</sub> (&micro;eV)</th>%s<th>statistical term of "
+          "P<sub>90</sub></th><th>noise (s)</th></tr>"
+          % ("worst-parallel" if wind_site else "best",
+             ("<th>wind-aware g<sub>ap</sub> (GeV<sup>&minus;1</sup>)</th>"
+              "<th>&theta; (&deg;)</th>") if wind_site else ""))
         for s in sc["sessions"]:
+            wcols = ""
+            if wind_site:
+                gw = s.get("g90_wind_conservative_best_gev_inv")
+                tr = s.get("wind_theta_deg_range")
+                ok = bool(s.get("wind_curve"))
+                wcols = ("<td>%s</td><td>%s</td>"
+                         % (("%.3g" % gw) if ok and gw else "&mdash;",
+                            ("%.1f&ndash;%.1f" % (tr[0], tr[1]))
+                            if ok and tr else "&mdash;"))
             A("<tr><td>%s</td><td><code>%s</code></td><td>%s</td><td>%s"
-              "</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>"
+              "</td><td>%s</td><td>%s</td>%s<td>%s</td><td>%s</td></tr>"
               % (esc(s["label"]), esc(s.get("bundle")),
                  fmt(s.get("carrier_mhz"), 6),
                  ("verified" if s.get("sign_verified") else
@@ -5134,7 +6066,7 @@ def render_axion_exclusion_html(ctx):
                  + ((" (%s)" % esc(s["vendor"])) if s.get("vendor") else ""),
                  "%.3g" % s["g90_worst_best_gev_inv"]
                  if s.get("g90_worst_best_gev_inv") else "&mdash;",
-                 fmt(s.get("m_a_at_best_uev"), 6),
+                 fmt(s.get("m_a_at_best_uev"), 6), wcols,
                  ("%.0f%%" % (100 * s["statistical_fraction_of_P90"]))
                  if s.get("statistical_fraction_of_P90") is not None
                  else "&mdash;",
@@ -5900,6 +6832,302 @@ def fig_to_b64(fig):
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
+def make_exclusion_figure(excl, sidereal=None):
+    """g_ap(nu_a - nu_L) curves of the per-session exclusion: the v0.7
+    brackets (wind parallel, D_cal; wind perpendicular, D_cal 1) and, when
+    the wind model is built, the v0.8 wind-aware pair (actual wind with
+    D_cal, the headline; actual wind at D_cal 1), plus the
+    sidereal-modulation bound curves (spec Sec. 9.5) when that fit ran.
+    HTML only; None when the exclusion is unavailable."""
+    if not isinstance(excl, dict) or not excl.get("available"):
+        return None
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    cv = excl.get("curve") or {}
+    if not cv.get("nu_a_minus_nu_L_hz"):
+        return None
+    x = np.asarray(cv["nu_a_minus_nu_L_hz"], dtype=float)
+    series = [("g90_worst", "wind parallel to B0, D_cal (v0.7 worst case)",
+               "#777777", "-", 1.0),
+              ("g90_nominal", "wind perpendicular to B0, D_cal = 1 "
+                              "(v0.7 nominal)", "#777777", "--", 1.0)]
+    wm = (excl.get("halo") or {}).get("wind_model")
+    if wm and "g90_wind_conservative" in cv:
+        series += [("g90_wind_conservative",
+                    "actual wind (theta %.1f-%.1f deg), D_cal --- headline"
+                    % (wm["theta_min_deg"], wm["theta_max_deg"]),
+                    "#c44e52", "-", 2.0),
+                   ("g90_wind_nominal", "actual wind, D_cal = 1",
+                    "#3b6ea5", "--", 1.4)]
+    fig, ax = plt.subplots(figsize=(7.2, 4.2))
+    for key, label, color, ls, lw in series:
+        if key not in cv:
+            continue
+        y = np.asarray(cv[key], dtype=float)
+        ax.semilogy(x, y, color=color, ls=ls, lw=lw, label=label)
+        i = int(np.argmin(y))
+        ax.plot([x[i]], [y[i]], "o", color=color, ms=4)
+    sc = (sidereal or {}).get("curve") if isinstance(sidereal, dict) \
+        and sidereal.get("available") else None
+    if sc and sc.get("nu_a_minus_nu_L_hz"):
+        xs = np.asarray(sc["nu_a_minus_nu_L_hz"], dtype=float)
+        for key, label, color, ls, lw in (
+                ("g90_conservative_mod", "sidereal-modulation bound, D_cal "
+                 "(clipped rows; preliminary)", "#8c4b9e", ":", 2.0),
+                ("g90_nominal_mod", "sidereal-modulation bound, D_cal = 1",
+                 "#55a868", ":", 1.4)):
+            if key not in sc:
+                continue
+            y = np.asarray(sc[key], dtype=float)
+            ax.semilogy(xs, y, color=color, ls=ls, lw=lw, label=label)
+            i = int(np.argmin(y))
+            ax.plot([xs[i]], [y[i]], "o", color=color, ms=4)
+    ax.set_xlabel("nu_a - nu_L (Hz)")
+    ax.set_ylabel("g_ap excluded at 90% CL (GeV^-1)")
+    ax.set_title("Axion-coupling exclusion, this session --- UNPUBLISHED, "
+                 "preliminary (SN1987A bound %.1e GeV^-1 off scale)"
+                 % SN1987A_GAP_GEV_INV, fontsize=9)
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8, loc="upper left")
+    return fig_to_b64(fig)
+
+
+def make_sidereal_figure(sm):
+    """The sidereal-modulation card's figure (spec Sec. 9.5): (a) the
+    wind template f(t) at the quoted offset over one sidereal day with
+    the session's window marked, (b) the binned per-row (floor-
+    normalised) line powers of the fitted rows with the fit P_SN + P_a
+    f(t) and the modulation a signal at the 90% bound would show. HTML
+    only; None when the fit did not run."""
+    if not isinstance(sm, dict) or not sm.get("available") \
+            or not sm.get("_plot"):
+        return None
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    pl = sm["_plot"]
+    t_h, f, P, keep = pl["t_h"], pl["f"], pl["P"], pl["keep"]
+    lead = pl["lead_h"]
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(12.0, 3.8),
+                                 gridspec_kw={"width_ratios": [1, 1.6],
+                                              "wspace": 0.28})
+    a1.plot(pl["h_day"], pl["f_day"], color="#898781", lw=1.2,
+            label="template over one sidereal day")
+    a1.axvspan(float(t_h.min()) + lead, float(t_h.max()) + lead,
+               color="#3b6ea5", alpha=0.15, lw=0, label="this session")
+    a1.plot(t_h + lead, f, color="#3b6ea5", lw=2.0)
+    a1.set_xlabel("hours from %s UTC"
+                  % pl["day0"].strftime("%Y-%m-%d %H:%M"))
+    a1.set_ylabel("signal template f(t) at %+.0f Hz" % pl["offset_hz"])
+    a1.set_title("wind template, theta %.1f-%.1f deg in session"
+                 % (float(pl["theta"].min()), float(pl["theta"].max())),
+                 fontsize=9)
+    a1.grid(alpha=0.4)
+    a1.legend(fontsize=7, frameon=False, loc="best")
+    n = int(np.count_nonzero(keep))
+    nb = max(8, n // 60)
+    tk, Pk, fk = t_h[keep], P[keep], f[keep]
+    edges = np.linspace(float(tk.min()), float(tk.max()), nb + 1)
+    idx = np.clip(np.digitize(tk, edges) - 1, 0, nb - 1)
+    tb, Pb, eb = [], [], []
+    for i in range(nb):
+        m = idx == i
+        if not m.any():
+            continue
+        tb.append(float(tk[m].mean()))
+        Pb.append(float(Pk[m].mean()))
+        eb.append(float(Pk[m].std(ddof=1) / math.sqrt(m.sum()))
+                  if m.sum() > 1 else 0.0)
+    a2.errorbar(tb, Pb, eb, fmt="o", ms=4, color="#0b0b0b", lw=1,
+                capsize=2, label="line power, ~%d-row bins (%d rows)"
+                % (max(n // nb, 1), n))
+    order = np.argsort(tk)
+    a2.plot(tk[order], pl["P_SN"] + pl["P_a"] * fk[order], color="#c44e52",
+            lw=1.8, label="fit P_SN + P_a f(t): P_a = %+.0f +/- %.0f"
+            % (pl["P_a"], pl["sigma_Pa"]))
+    a2.plot(tk[order], pl["P_SN"] + pl["P_a"] + pl["P90_mod"]
+            * (fk[order] - 1.0), color="#d97706", lw=1.2, ls="--",
+            label="modulation at the 90%% bound (P_a = %.0f)" % pl["P90_mod"])
+    # the axis follows the binned kept rows and the two model lines, so
+    # a clipped outlier cannot compress the plot (it sits at the edge)
+    if tb:
+        lo = min(min(np.array(Pb) - 3.0 * np.array(eb)),
+                 float((pl["P_SN"] + pl["P_a"] * fk).min()),
+                 float((pl["P_SN"] + pl["P_a"] + pl["P90_mod"]
+                        * (fk - 1.0)).min()))
+        hi = max(max(np.array(Pb) + 3.0 * np.array(eb)),
+                 float((pl["P_SN"] + pl["P_a"] * fk).max()),
+                 float((pl["P_SN"] + pl["P_a"] + pl["P90_mod"]
+                        * (fk - 1.0)).max()))
+        pad = 0.3 * max(hi - lo, 1e-9)
+        a2.set_ylim(lo - pad, hi + pad)
+        if (~keep).any():
+            a2.plot(t_h[~keep], np.clip(P[~keep], lo - pad, hi + pad), "x",
+                    color="#999999", ms=6, mew=1.5,
+                    label="clipped rows (%d; drawn at the axis edge when "
+                          "outside)" % int((~keep).sum()))
+            a2.legend(fontsize=7, frameon=False, loc="best")
+    a2.set_xlabel("hours into the session")
+    a2.set_ylabel("floor-normalised line power (counts^2)")
+    a2.set_title("per-row line power against the sidereal template --- "
+                 "UNPUBLISHED, preliminary; not a detection claim",
+                 fontsize=9)
+    a2.grid(alpha=0.4)
+    a2.legend(fontsize=7, frameon=False, loc="best")
+    return fig_to_b64(fig)
+
+
+def render_sidereal_modulation_html(ctx):
+    """The science.sidereal_modulation card (spec Sec. 9.5): heading,
+    result, inputs, the two plots, the object's honesty list and note; a
+    skipped fit prints its skip_reason, the template summary and the same
+    honesty list (its skip sentence carries the UNPUBLISHED label)."""
+    sm = ctx.get("sidereal_modulation")
+    if not isinstance(sm, dict):
+        return ""
+    smod = sidereal_modulation_module()
+    parts = []
+    A = parts.append
+
+    def honesty_tail():
+        A("<ul class='small'>")
+        for h in sm.get("honesty", []):
+            A("<li>%s</li>" % esc(h))
+        A("</ul>")
+        if sm.get("note"):
+            A("<p class='small'>%s</p>" % esc(sm["note"]))
+        A("</div>")
+
+    A("<h2>%s</h2><div class='card'>" % esc(smod.HEADING))
+    A("<p class='small'>%s</p>" % esc(sm.get("label", smod.LABEL)))
+    if not sm.get("available"):
+        A("<p class='warn'>Not run: %s</p>" % esc(sm.get("skip_reason", "?")))
+        t = sm.get("template")
+        if t:
+            A("<p class='small'>Template at %+.0f Hz over %s rows with a "
+              "line power: f %.3f&ndash;%.3f, std(f) %.4f, &theta; %.1f&ndash;"
+              "%.1f&deg; (rows timed %s).</p>"
+              % (t["offset_hz"], fmt(sm.get("rows_with_line_power"), 0),
+                 t["f_min"], t["f_max"], t["template_std"],
+                 t["theta_min_deg"], t["theta_max_deg"],
+                 esc(sm.get("rows_timed_basis"))))
+        honesty_tail()
+        return "".join(parts)
+    ft, b, t = sm["fit"], sm["bound"], sm["template"]
+    imp = b["improvement_vs_line_power"]
+    A("<p>P<sub>a</sub> = <b>%+.1f &plusmn; %.1f counts&sup2;</b> at "
+      "&nu;<sub>a</sub> &minus; &nu;<sub>L</sub> = %+.0f Hz (P<sub>SN</sub> "
+      "= %.1f, &sigma;<sub>row</sub> = %.1f counts&sup2;, %d of %d rows with "
+      "a line power used, %d clipped at %.0f MAD, %d without a line fit); "
+      "with drift terms %+.1f &plusmn; %.1f; anti-phase template f(t + 12 h) "
+      "%+.1f &plusmn; %.1f. Not significant: this is a bound, not a "
+      "detection.</p>"
+      % (ft["P_a_counts2"], ft["sigma_Pa_counts2"], t["offset_hz"],
+         ft["P_SN_counts2"], ft["sigma_row_counts2"], sm["rows_used"],
+         sm["rows_with_line_power"], sm["rows_excluded"], sm["row_clip_nmad"],
+         sm.get("rows_without_fit", 0), ft["P_a_with_drift_counts2"],
+         ft["sigma_Pa_with_drift_counts2"],
+         sm["antiphase_check"]["P_a_counts2"],
+         sm["antiphase_check"]["sigma_counts2"]))
+    if sm.get("alignment_gate_fired"):
+        A("<p class='warn small'>Caveat: the co-add alignment gate fired on "
+          "this session; the headline line shape behind P<sub>k</sub> is the "
+          "unaligned fit, and the session is a demonstration, not a "
+          "regression target.</p>")
+    A("<table><tr><th>quantity</th><th>value</th><th>basis</th></tr>")
+    A("<tr><td>90%% bound on the modulated excess</td><td>P<sub>90,mod</sub> "
+      "= %.1f counts&sup2; (t<sub>90</sub> = %.3f, template std %.3f, "
+      "solar degeneracy <b>%s</b>) &rarr; g<sub>ap</sub> &lt; <b>%.3g</b> "
+      "GeV<sup>&minus;1</sup> conservative (D<sub>cal</sub> applied), "
+      "%.3g at D<sub>cal</sub> = 1; curve minimum (clipped set) %.3g / %.3g "
+      "at %+.0f Hz</td><td>max(P<sub>a</sub>, 0) + t<sub>90</sub>(n &minus; "
+      "p) &sigma;(P<sub>a</sub>); g<sub>mod</sub> = g<sub>wind</sub> "
+      "&radic;(P<sub>90,mod</sub>/P<sub>90</sub>) with the exclusion's "
+      "transduction; improvement over the entire-line-power bound: "
+      "%.2f&times; nominal-to-nominal, %.2f&times; against the wind-aware "
+      "conservative headline, %.2f&times; against the v0.7 worst-parallel"
+      "</td></tr>"
+      % (b["P90_mod_counts2"], b["t90"], t["template_std"],
+         esc(sm["solar_degeneracy"]), b["g90_conservative_mod_gev_inv"],
+         b["g90_nominal_mod_gev_inv"],
+         b["curve_min"]["g90_conservative_mod_gev_inv"],
+         b["curve_min"]["g90_nominal_mod_gev_inv"],
+         b["curve_min"]["offset_hz"], imp["nominal"] or float("nan"),
+         imp["conservative"], imp["vs_worst_parallel"]))
+    A("<tr><td>template</td><td>f %.3f&ndash;%.3f at %+.0f Hz, std(f) %.3f, "
+      "leverage &radic;n std(f) = %.1f; &theta; %.1f&ndash;%.1f&deg; in "
+      "%g&deg; bins; closed-form full-day swing %.2f&times; (intuition only)"
+      "</td><td>%s; rows timed %s (zone basis %s)</td></tr>"
+      % (t["f_min"], t["f_max"], t["offset_hz"], t["template_std"],
+         t["leverage"], t["theta_min_deg"], t["theta_max_deg"],
+         t["template_theta_bin_deg"], t["closed_form_swing"],
+         esc(t.get("basis", "")), esc(sm.get("rows_timed_basis")),
+         esc(sm.get("tz_basis"))))
+    for name, key in (("primary fit (clipped, floor-normalised%s)"
+                       % (", floor regressor" if ft.get("regressors")
+                          else ""), "fit"),
+                      ("all rows, floor-normalised", "fit_allrows"),
+                      ("clipped, raw powers", "fit_raw"),
+                      ("all rows, raw powers", "fit_allrows_raw")):
+        d = sm.get(key) or {}
+        A("<tr><td>%s</td><td>P<sub>a</sub> = %+.1f &plusmn; %.1f, "
+          "&sigma;<sub>row</sub> %.1f, P<sub>90,mod</sub> %.1f counts&sup2;"
+          "</td><td>%s rows%s</td></tr>"
+          % (esc(name), d.get("P_a_counts2", float("nan")),
+             d.get("sigma_Pa_counts2", float("nan")),
+             d.get("sigma_row_counts2", float("nan")),
+             d.get("P90_mod_counts2", float("nan")),
+             fmt(d.get("n_rows"), 0),
+             ("; t<sub>90</sub> %.3f, dof %d, (&sigma;<sub>row</sub> / "
+              "robust &sigma;)&sup2; %s [chi2_dof; tail indicator, not "
+              "goodness-of-fit]" % (ft["t90"], ft["dof"],
+                                    fmt(ft.get("chi2_dof"), 2)))
+             if key == "fit" else ""))
+    if ft.get("regressors"):
+        A("<tr><td>regressors</td><td>%s</td><td>without them P<sub>a</sub> "
+          "= %+.1f &plusmn; %.1f</td></tr>"
+          % ("; ".join("%s: coefficient %+.3g, corr(z, f) %s"
+                       % (esc(r["name"]), r["coefficient"],
+                          fmt(r.get("corr_with_f"), 3))
+                       for r in ft["regressors"]),
+             ft["P_a_without_regressors_counts2"],
+             ft["sigma_Pa_without_regressors_counts2"]))
+    if ft.get("drift_terms"):
+        A("<tr><td>drift terms</td><td>%s</td><td>fitted beside the primary; "
+          "P<sub>a</sub> with drift %+.1f &plusmn; %.1f%s</td></tr>"
+          % ("; ".join("order %d: %+.3g %s" % (d["order"], d["value_per_h"],
+                                                esc(d.get("unit", "")))
+                       for d in ft["drift_terms"]),
+             ft["P_a_with_drift_counts2"], ft["sigma_Pa_with_drift_counts2"],
+             ("; linear drift only (%+.3g counts&sup2;/h): %+.1f &plusmn; "
+              "%.1f" % (ft["linear_drift_per_h"],
+                        ft["P_a_with_linear_drift_counts2"],
+                        ft["sigma_Pa_with_linear_drift_counts2"]))
+             if len(ft["drift_terms"]) > 1 and "linear_drift_per_h" in ft
+             else ""))
+    est = sm.get("estimator") or {}
+    ec = sm.get("estimator_check") or {}
+    A("<tr><td>estimator</td><td>%s (%s)%s</td><td>%s</td></tr>"
+      % (esc(est.get("name")), esc(est.get("per_row_field")),
+         ("; row mean %+.1f against P<sub>net</sub>/window fraction %+.1f, "
+          "ratio %.3f" % (ec["row_mean_Pk_counts2"],
+                          ec["P_net_over_window_fraction_counts2"],
+                          ec["ratio"])) if ec.get("ratio") is not None
+         else "", esc(est.get("basis") or "")))
+    A("<tr><td>rows</td><td>%d used, %d excluded (%.1f%%)</td><td>%s</td></tr>"
+      % (sm["rows_used"], sm["rows_excluded"],
+         100.0 * sm["rows_excluded_frac"], esc(sm.get("row_veto", ""))))
+    A("</table>")
+    if "sidereal" in (ctx.get("figs") or {}):
+        A("<div class='fig'><img alt='sidereal modulation' "
+          "src='data:image/png;base64,%s'></div>" % ctx["figs"]["sidereal"])
+    A("<p class='small'>The modulation-bound curve is drawn on the exclusion "
+      "figure above (dotted).</p>")
+    honesty_tail()
+    return "".join(parts)
+
+
 def make_figures(noise_res, refs, ladder, detection):
     import matplotlib
     matplotlib.use("Agg")
@@ -6605,6 +7833,7 @@ def render_html(ctx):
     A(render_field_sweep_html(ctx))
     A(render_line_catalog_html(ctx))
     A(render_axion_exclusion_html(ctx))
+    A(render_sidereal_modulation_html(ctx))
 
     # ---- QA
     A("<h2>QA flags</h2><div class='card'><table>"
@@ -6735,8 +7964,12 @@ def main(argv=None):
                     help="report.json files (or report directories) of "
                          "EARLIER sessions of the SAME facility: the new "
                          "report then carries science.axion_exclusion"
-                         ".site_combined, the site's running worst-case "
-                         "exclusion (analysis/site_exclusion.py) --- a prior "
+                         ".site_combined, the site's running exclusion --- "
+                         "the wind-aware conservative headline "
+                         "(curve.g90_wind_conservative) when every session "
+                         "of the site carries it, the v0.7 worst-parallel "
+                         "combination otherwise, site_combined.rule saying "
+                         "which (analysis/site_exclusion.py) --- a prior "
                          "report from another facility_slug is refused")
     ap.add_argument("--meta-override", default=None, metavar="PATH",
                     help="JSON file whose top-level object is deep-merged "
@@ -7540,7 +8773,16 @@ def main(argv=None):
                            ladder, f0_guess, f0_detect, sign_status,
                            bool(sweep_exps),
                            carrier_shifts.get((noise_res or {}).get("expno"),
-                                              0.0))
+                                              0.0),
+                           vendor=bundle.vendor)
+    for fl in excl.pop("_wind_qa", None) or []:
+        qa.append(fl)
+    # v0.8 sidereal-modulation fit (spec Sec. 9): science.sidereal_modulation
+    # from the headline group's per-row line powers and the exclusion's
+    # wind model, transduction and scan grid; before the site combination
+    sidereal, sidereal_qa = sidereal_modulation_fit(meta, noise_res, excl,
+                                                    bundle.vendor)
+    qa.extend(sidereal_qa)
     if prior_reports:
         current = {"facility_slug": report["facility_slug"],
                    "bundle": report["bundle"],
@@ -7689,7 +8931,30 @@ def main(argv=None):
         honesty.append("Reference pair: %s; the open/close A0 ratio and "
                        "line-position stability are NOT a drift bracket "
                        "for this session." % ref_pair["note"])
-    if excl.get("available"):
+    if (excl.get("available")
+            and "g90_wind_conservative_best_gev_inv" in excl["result"]
+            and excl["halo"].get("wind_model")):
+        # headline option [B] (spec Sec. 8.5)
+        wres, wm = excl["result"], excl["halo"]["wind_model"]
+        honesty.append(
+            "Axion-coupling exclusion: a CONSERVATIVE wind-aware "
+            "construction (g_ap < %.3g GeV^-1 at %.6f ueV with the "
+            "standard-halo wind at its actual direction for this site and "
+            "these times, theta %.1f-%.1f degrees, %.1e times above the "
+            "SN1987A bound; D_cal = 1 companion %.3g GeV^-1; even with the "
+            "wind along B_0 the bound is g_ap < %.3g GeV^-1), unpublished "
+            "--- its card lists every input and caveat, and the limit does "
+            "NOT improve with more measurement time in this construction."
+            % (wres["g90_wind_conservative_best_gev_inv"],
+               (excl["line"]["nu_L_hz_nominal"]
+                + wres["offset_at_best_wind_conservative_hz"])
+               * EV_PER_HZ * 1e6,
+               wm["theta_min_deg"], wm["theta_max_deg"],
+               wres["g90_wind_conservative_best_gev_inv"]
+               / SN1987A_GAP_GEV_INV,
+               wres["g90_wind_nominal_best_gev_inv"],
+               wres["g90_worst_best_gev_inv"]))
+    elif excl.get("available"):
         honesty.append(
             "Axion-coupling exclusion: a WORST-CASE construction "
             "(g_ap < %.3g GeV^-1 at %.6f ueV, %.1e times above the SN1987A "
@@ -7702,8 +8967,46 @@ def main(argv=None):
     else:
         honesty.append("NOT determined: the axion-coupling exclusion (%s)."
                        % excl.get("reason", "?"))
+    # v0.8 sidereal-modulation fit (spec Sec. 9.5): one line beside the
+    # exclusion's when available, the skip_reason otherwise
+    if sidereal.get("available"):
+        sb, st, sf = sidereal["bound"], sidereal["template"], sidereal["fit"]
+        honesty.append(
+            "Sidereal-modulation fit (preliminary, internal; not a detection "
+            "claim): the per-row line powers fitted to P_SN + P_a f(t) with f "
+            "the standard-halo wind template at this site (theta %.1f-%.1f "
+            "degrees, std(f) %.3f over %d rows) give P_a = %+.1f +/- %.1f "
+            "counts^2 at %+.0f Hz, a one-sided 90%% bound on the MODULATED "
+            "excess P_90,mod = %.1f counts^2 against the entire-line-power "
+            "P_90 = %.1f, i.e. g_ap < %.3g GeV^-1 (conservative, D_cal "
+            "applied; %.3g at D_cal = 1), %.2f times below the wind-aware "
+            "headline in coupling; only the modulated fraction of a signal is "
+            "tested, the constant term absorbs the spin-noise line, and this "
+            "bound DOES scale as 1/sqrt(tau_m). UNPUBLISHED, %.1e times "
+            "above the SN1987A bound."
+            % (st["theta_min_deg"], st["theta_max_deg"], st["template_std"],
+               sidereal["rows_used"], sf["P_a_counts2"], sf["sigma_Pa_counts2"],
+               st["offset_hz"], sb["P90_mod_counts2"],
+               excl["signal_power"]["P_90_counts2"],
+               sb["g90_conservative_mod_gev_inv"],
+               sb["g90_nominal_mod_gev_inv"],
+               sb["improvement_vs_line_power"]["conservative"],
+               sb["g90_conservative_mod_gev_inv"] / SN1987A_GAP_GEV_INV))
+    else:
+        # the object's own skip sentence: its fixed skip_reason, the detail
+        # in brackets and the UNPUBLISHED label, identical in both places
+        sh = sidereal.get("honesty") or []
+        honesty.append(sh[0] if sh else
+                       "Sidereal-modulation fit not run: %s."
+                       % sidereal.get("skip_reason", "?"))
 
     figs = make_figures(noise_res, refs, ladder, detection)
+    fig_excl = make_exclusion_figure(excl, sidereal)
+    if fig_excl:
+        figs["exclusion"] = fig_excl
+    fig_sid = make_sidereal_figure(sidereal)
+    if fig_sid:
+        figs["sidereal"] = fig_sid
     ctx = {"report_type": report["report_type"], "meta": meta,
            "bundle_path": bundle_path, "validation_msgs": val_msgs,
            "validation_ok": val_ok, "noise": noise_res, "refs": refs,
@@ -7718,6 +9021,7 @@ def main(argv=None):
            "noise_aggregation": noise_aggregation,
            "reference_pair": ref_pair,
            "axion_exclusion": excl,
+           "sidereal_modulation": sidereal,
            "tuning_ladder": tuning, "meta_overrides": meta_overrides,
            "rd_optimize": (meta.get("calibration") or {}).get("rd_optimize")}
     html = render_html(ctx)
@@ -7746,6 +9050,7 @@ def main(argv=None):
         "subvirial_pass": subvirial,
         "axion_mass_bookkeeping": mass_book,
         "axion_exclusion": excl,
+        "sidereal_modulation": sidereal,
         "rd_optimize": (meta.get("calibration") or {}).get("rd_optimize"),
         "qa_flags": qa, "honesty": honesty,
     })

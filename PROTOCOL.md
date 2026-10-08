@@ -185,7 +185,9 @@ documented in `docs/design_rdopt_locksweep.md`:
 At the end, the script zips the complete Bruker experiment directories
 (acqus, ser/fid, pulse program, `uxnmr.info`, audit trail) together with a
 `meta.json` describing the instrument (TopSpin version, field, console,
-probe string and type, coil/preamp temperatures if reported), the sample,
+probe string and type, coil/preamp temperatures if reported, and from
+v0.8 the B0 orientation, `vertical` for every magnet this script runs
+on), the sample,
 your dialog answers, and SHA-256 checksums of every data file. The
 `meta.json` follows schema version 1.2 (the last Bruker-only vintage —
 still fully valid under the repository's current vendor-neutral schema
@@ -199,6 +201,18 @@ instruments, as those reader paths mature) can instead be packed with
 the standalone `packer/pack_bundle.py`, which writes schema-2.0 bundles
 from a data directory plus an `answers.json` questionnaire carrying the
 same answers as the dialogs.
+
+v0.8 adds optional fields, none required and none asked of you at the
+console: `facility.latitude_deg`, `facility.longitude_east_deg` (east
+positive) and `facility.coordinates_basis` (`operator` or `registry_city`);
+`spectrometer.b0_orientation` (`vertical`, `horizontal` or `unknown`) with
+`spectrometer.b0_azimuth_deg` for a horizontal field;
+`local_timezone_offset_basis` (`answers` or `packing_machine`, written by
+the packer beside the offset); and `clock_audit.blocks[].row_started_offsets_ms`,
+the start of each row within its block — requested, but not recorded by
+any writer yet, so the analysis spreads the rows evenly over the block's
+wall time until one does. Why the analysis wants them is the section
+after the clock audit below.
 
 **Privacy:** the bundle contains instrument and sample metadata only. The
 sole item of personal information is the optional contact email, stored only
@@ -237,6 +251,53 @@ measured fractional offset. An offset of, say, +2×10⁻⁷ means every frequenc
 your console reports is high by 0.2 ppm — 120 Hz at 600 MHz — and the network
 analysis corrects for it. It is not a fault, it requires no service call, and
 no action is needed on your side.
+
+## Where the magnet is, and when the rows ran
+
+The dark-matter wind has a known direction. In the standard halo model the
+laboratory moves through the halo at the Sun's 232.6 km/s plus the Earth's
+29.79 km/s orbital velocity, toward the apex: RA 313°, Dec +48° for the
+Sun's motion alone, and once the Earth's orbit is added a point that loops
+through the year between Dec +41° and +54° (about RA 319°, Dec +54° in early
+October; RA 321°, Dec +53° in mid-September); the report records the
+session-mean value in `halo.wind_model.apex_ra_deg` / `apex_dec_deg`. Your magnet's B₀ is vertical, so the angle between the wind and B₀
+at any moment follows from the site's latitude and longitude and the UTC
+time — and the drive on the spins goes as the wind component perpendicular
+to B₀. From v0.8 the facility report uses this instead of assuming a
+direction: the headline exclusion number is computed with the wind at its
+actual direction for your site and your run's hours, and the old "wind
+parallel to B₀" number is kept as a robustness line. Two consequences:
+
+- **Nothing more to enter.** The report takes the site from the registry's
+  city gazetteer (0.1° is enough) and the row times from the clock-audit
+  timestamps the run records anyway. If you know the magnet's coordinates,
+  send them to the maintainer with the bundle — they go in as
+  `facility.latitude_deg` / `facility.longitude_east_deg` at analysis time.
+  From v0.8 the TopSpin script records `spectrometer.b0_orientation: vertical`;
+  bundles from the standalone packer (any vendor) and bundles acquired before
+  v0.8 leave the field absent, and the analysis reads absent as `vertical` for
+  Bruker, Agilent and JEOL bundles (`b0_orientation_basis: default_nmr`) and as
+  `unknown` for Magritek and Nanalysis. A horizontal-bore magnet would need
+  `horizontal` plus its compass azimuth.
+- **The hours matter.** The wind angle repeats with the sidereal day, so a
+  session's sensitivity depends on when it ran. Over a sidereal day the
+  angle runs 11–61° at Oulu, 16–88° at Carbondale, 7–80° at Lausanne; the
+  headline bound is best at the hours of largest angle, which for a
+  vertical magnet are around the apex's lower culmination (at Oulu about
+  06:40 UTC, 09:40 local, in the first week of October — 09:55 on 1 October,
+  09:36 on 5 October — four minutes earlier each day). A run
+  that spans the change — 12 h from peak to trough, or 3 h placed across
+  an extremum — also feeds the report's sidereal-modulation fit: an axion
+  signal would rise and fall with the wind angle while the spin-noise line
+  and the receiver floor stay put, so the fit looks for that rise and fall
+  in the per-row line power and sets a bound on it. That bound gains with
+  hours, so long runs stay the most valuable. The fit's section in the
+  report is headed "preliminary, internal; not a detection claim", and no
+  session so far shows a modulation.
+
+Every exclusion number in the report is UNPUBLISHED and preliminary — an
+internal sensitivity bookkeeping, far above the astrophysical bounds, not a
+publication-grade limit.
 
 ## Quickstart
 

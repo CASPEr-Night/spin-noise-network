@@ -122,7 +122,7 @@ AUTOSTEP = False          # True (with SWEEP): TIER-2 programmatic field
 
 # Single source of truth for the script version.  KEEP IN SYNC with the
 # repository VERSION file (testing/static_check.py enforces the match).
-SCRIPT_VERSION  = "0.7.9"
+SCRIPT_VERSION  = "0.8.0"
 # NOTE: no module constant named PROGRAM_VERSION -- TopSpin's TopCmds
 # exports a FUNCTION of that name and `from TopCmds import *` (below)
 # overwrote the alias, so v0.7.3 bundles carry "<function PROGRAM_VERSION
@@ -5149,6 +5149,12 @@ def main():
             "observe_nucleus": nuc1,
             "observe_freq_mhz": bf1,
             "field_tesla": field_t,
+            # v0.8: B0 orientation for the analysis' halo-wind angle.  Every
+            # bundle this script writes comes from a superconducting
+            # vertical-bore magnet, so the value is a constant; the
+            # schema enum is vertical|horizontal|unknown and the field is
+            # optional (absent is read as vertical for Bruker bundles).
+            "b0_orientation": "vertical",
             "console": console,
             "probe_string": probe,
             "probe_type": probe_type,

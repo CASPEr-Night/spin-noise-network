@@ -149,6 +149,14 @@ rungs' stored gains; the `tuning` entries of the spin-noise tuning
 ladder (quickstart 2.6) are the human's console readings — ask for
 them, never invent them. The packer prints the bundle path.
 
+`answers.json` may carry `local_timezone_offset_min`, the zone the
+console's `time_run` / `started_local` stamps are written in: ask the
+human for it (the SIU console was once found in the wrong zone).
+Without it the packer records the packing machine's zone and says so
+in `local_timezone_offset_basis` (`packing_machine`, v0.8), and the
+facility report warns when it has to place the noise rows in UTC from
+that offset.
+
 VERIFY:
 
     python3 uploader/upload_bundle.py <bundle.zip> --selftest
@@ -186,7 +194,8 @@ reference_open / reference_close plus EITHER a `noise` experiment OR
 a field-stepped session's `noise_sweep` blocks (with `sweep_verify`
 and, from v0.6, one `sweep_signcal`), and `clock_audit.blocks` is
 non-empty" (read the zip's meta.json; you can do all of this without
-touching TopSpin). V3, V5, V6, V7, V8 apply unchanged.
+touching TopSpin; from v0.8 `spectrometer.b0_orientation` also reads
+`vertical`). V3, V5, V6, V7, V8 apply unchanged.
 
 V1 — source-data sanity (before packing). For each noise record the
 human saved: the data directory is complete (Agilent: `.fid/` with
@@ -213,6 +222,12 @@ facility fields. Wrong metadata is a finding too. (X-nucleus
 sessions, e.g. a 19F pilot: `h1_freq_mhz` is the 1H-EQUIVALENT
 frequency and should still match the nameplate; the actual carrier
 lives in `observe_freq_mhz`, with `observe_nucleus` naming it.)
+Optional, v0.8: ask the human for the magnet's position to 0.1
+degree (latitude, east longitude) and whether B0 is vertical (every
+superconducting NMR magnet) or horizontal (then its compass azimuth),
+and put them in the validation report. No writer stores the position
+in the bundle yet; the maintainer applies it at analysis time, and
+without it the report falls back to the registry's city gazetteer.
 
 V6 — upload (Step 7) and record the server receipt.
 
@@ -228,6 +243,7 @@ CITATION.cff), using this template:
       pipeline value it was compared against
     Packer warnings (verbatim):
     Upload receipt:
+    Magnet position (lat, lon east, 0.1 deg) and B0 orientation:
     Attached: one procpar (or vendor equivalent) from a noise record
       -- it is a plain-text parameter file, no secrets in it -- and,
       if anything failed, the first 64 bytes of the matching fid:
