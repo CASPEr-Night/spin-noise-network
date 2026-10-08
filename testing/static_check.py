@@ -1222,6 +1222,14 @@ check("tests: testing/test_report_bruker_refs.py exists and the harness "
       os.path.exists(os.path.join(REPO, "testing",
                                   "test_report_bruker_refs.py"))
       and "test_report_bruker_refs.py" in _HARN)
+_CI = open(os.path.join(REPO, ".github", "workflows", "ci.yml"),
+           encoding="utf-8").read()
+check("tests: testing/test_wind_sidereal.py exists (spec Sec. 7 (v)/(vi): "
+      "wind-aware halo construction + sidereal-modulation fit) and both "
+      "the harness and the CI numpy step run it",
+      os.path.exists(os.path.join(REPO, "testing", "test_wind_sidereal.py"))
+      and "test_wind_sidereal.py" in _HARN
+      and "testing/test_wind_sidereal.py" in _CI)
 
 
 # --------------------------------------------------------------------------

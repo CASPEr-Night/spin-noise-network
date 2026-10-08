@@ -82,6 +82,14 @@
    "type": "integer",
    "description": "Local timezone offset from UTC in minutes at creation time (e.g. +120 for CEST). Lets us reconstruct local time-of-day for environmental-noise correlation."
   },
+  "local_timezone_offset_basis": {
+   "type": "string",
+   "enum": [
+    "answers",
+    "packing_machine"
+   ],
+   "description": "OPTIONAL (v0.8, packer bundles; additive, no schema-version bump). How local_timezone_offset_min was obtained by packer/pack_bundle.py: 'answers' = the operator's answers.json value; 'packing_machine' = the zone of the machine that ran the packer, which is not necessarily the console's zone (the console's time_run/started_local stamps carry no zone of their own). The analysis copies it to science.axion_exclusion.halo.wind_model.tz_basis ('unknown' when absent) and warns when per-row timing rests on a packing-machine or unknown zone. Absent from TopSpin-script bundles, whose offset is read on the console itself."
+  },
   "vendor": {
    "type": "string",
    "enum": [
@@ -125,6 +133,26 @@
     "contact_consent": {
      "type": "boolean",
      "description": "True only if the operator explicitly consented to storing contact_email."
+    },
+    "latitude_deg": {
+     "type": "number",
+     "minimum": -90,
+     "maximum": 90,
+     "description": "OPTIONAL (v0.8; additive, no schema-version bump). Geographic latitude of the magnet in degrees, north positive. With longitude_east_deg it fixes the site's zenith for the standard-halo wind angle of the axion exclusion (0.1 degree is adequate). When absent the analysis falls back to the registry's city gazetteer (facility.city / country) and records coordinates_basis = registry_city; when neither resolves, the wind-aware constructions are omitted and the report says so."
+    },
+    "longitude_east_deg": {
+     "type": "number",
+     "minimum": -180,
+     "maximum": 180,
+     "description": "OPTIONAL (v0.8). Geographic longitude of the magnet in degrees, EAST positive (so Carbondale, Illinois is about -89.2). Meaningful only together with latitude_deg."
+    },
+    "coordinates_basis": {
+     "type": "string",
+     "enum": [
+      "operator",
+      "registry_city"
+     ],
+     "description": "OPTIONAL (v0.8). Provenance of latitude_deg / longitude_east_deg: 'operator' = entered or confirmed by the facility operator; 'registry_city' = defaulted from the network registry's city gazetteer and not yet confirmed. A writer that stores coordinates should say which; the analysis reports the same vocabulary in halo.wind_model.site.basis."
     }
    }
   },
@@ -204,6 +232,21 @@
       "null"
      ],
      "description": "Preamplifier temperature in kelvin if known; null otherwise."
+    },
+    "b0_orientation": {
+     "type": "string",
+     "enum": [
+      "vertical",
+      "horizontal",
+      "unknown"
+     ],
+     "description": "OPTIONAL (v0.8; additive, no schema-version bump). Direction of the static field B0 in the laboratory: 'vertical' for every superconducting vertical-bore magnet (topspin/spin_noise_run.py writes this constant from v0.8 on), 'horizontal' for horizontal-bore magnets (MRI nodes, electromagnets; give b0_azimuth_deg), 'unknown' when it has not been established. The axion exclusion's halo-wind angle needs the B0 direction; when the field is ABSENT the analysis reads vertical for bruker/agilent/jeol bundles (vendor absent = bruker) and unknown for magritek/nanalysis and unrecognised vendors (benchtop Halbach arrays hold B0 transverse to the bore at an unknown azimuth). 'unknown', explicit or inferred, leaves the released constructions alone and omits the wind-aware ones."
+    },
+    "b0_azimuth_deg": {
+     "type": "number",
+     "minimum": 0,
+     "maximum": 360,
+     "description": "OPTIONAL (v0.8). For b0_orientation = horizontal only: compass azimuth of the B0 axis in degrees, 0 = geographic north, 90 = east, measured in the horizontal plane. The sign of B0 along the axis is irrelevant (the axion drive is even in the perpendicular velocity), so azimuth and azimuth + 180 are equivalent."
     }
    }
   },
@@ -731,6 +774,13 @@
          "null"
         ],
         "description": "OCXO-implied block duration in seconds, computed from the acquisition parameters (rows * ns * (TD/(2*SW_h) + delays)). Null for blocks whose duration is not OCXO-predictable (the setup block: tune/shim/pulsecal plus operator dialogs); such blocks are excluded from the offset fit."
+       },
+       "row_started_offsets_ms": {
+        "type": "array",
+        "items": {
+         "type": "number"
+        },
+        "description": "OPTIONAL (v0.8; requested, not yet written by any writer -- documented so the contract is fixed before a console records it). One entry per row of the block, in row order: the start of row i in milliseconds after wall_start_ms, from the ser growth or the console audit trail. Gives the analysis per-row UTC times (rows_timed_basis = per_row); until present, rows are spread uniformly over the block's wall time, row i at wall_start_ms + (i + 1/2) (wall_end_ms - wall_start_ms) / N (block_spread). A writer that records it should give exactly N = td1_rows entries."
        }
       }
      },

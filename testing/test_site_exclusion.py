@@ -40,6 +40,26 @@ hook in analysis/facility_report.py.
      whose two placements share no node -> combined None, CLI exit 1; no
      note quotes a duration for the tof-shift test; the construction
      string names the D_cal values the sessions actually used;
+  1c. v0.8 headline (analysis note Sec. 8.5, option [B]): when every
+     session carries curve.g90_wind_conservative the site headline is
+     the same min/max-over-hypotheses rule on that curve
+     (combined.g90_wind_conservative_best_gev_inv, mass, offset,
+     curve.g_site_wind_conservative), g90_wind_nominal is combined the
+     same way when every session carries it, and curve.g_site plus every
+     v0.7 combined key stay byte-identical to the worst-parallel
+     combination; rule and construction name the headline curve, the
+     wind at its actual direction, the theta range and the robustness
+     line; a mixed set (one v0.7 report) falls back to the worst-parallel
+     headline, rule and headline_basis carrying a sentence that says
+     which session lacks the curve and why (predates it / wind model
+     unavailable / unusable) while construction is the v0.7 string
+     byte-for-byte (the committed master module's, loaded via git show
+     when git is available: on a v0.7-only set the only changed key is
+     rule, nothing removed); the companion absent from one session is
+     not combined;
+     a lone sign-unverified session gets its wind headline as the max
+     over its two placements with its own if_sign, sign note and factor;
+     the input order changes nothing;
   2. skipped-report listing: a software-test report (science null), a
      report whose exclusion is unavailable, a report predating the
      exclusion, curves carrying NaN, +inf or zero couplings and an exact
@@ -78,6 +98,7 @@ from __future__ import print_function
 import argparse
 import copy
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -125,13 +146,18 @@ def close(a, b, rel=1e-9):
 
 def fake_report(slug, bundle, ks, g, carrier_mhz=400.0, noise_s=1800.0,
                 available=True, mirror_shift=None, stat_frac=0.05,
-                vendor=None, vendor_in_line=True, d_cal=None):
+                vendor=None, vendor_in_line=True, d_cal=None, wind=None,
+                wind_unavailable=None):
     """A minimal report.json dict with one worst-case curve at the grid
     nodes ks; mirror_shift (in nodes) makes it sign-unverified with the
     mirror mass axis shifted by that many nodes; vendor is recorded on
     the exclusion's line (or, vendor_in_line False, only under
     science.frequency_axis_sign as reports predating line.vendor have
-    it); d_cal = (D_cal, D_cal_pilot) fills calibration_derating."""
+    it); d_cal = (D_cal, D_cal_pilot) fills calibration_derating; wind =
+    (g90_wind_conservative list, g90_wind_nominal list or None,
+    [theta_min, theta_max] or None) adds the v0.8 wind-aware curves
+    (analysis note Sec. 8.5) and halo.wind_model; wind_unavailable sets
+    halo.wind_model_unavailable instead (no wind curve)."""
     ms = [m_ev(k) for k in ks]
     best = min(range(len(g)), key=lambda i: g[i])
     verified = mirror_shift is None
@@ -158,6 +184,24 @@ def fake_report(slug, bundle, ks, g, carrier_mhz=400.0, noise_s=1800.0,
     if d_cal is not None:
         ex["calibration_derating"] = {"D_cal": d_cal[0],
                                       "D_cal_pilot": d_cal[1]}
+    if wind is not None:
+        g_wc, g_wn, theta = wind
+        ex["curve"]["g90_wind_conservative"] = list(g_wc)
+        i_wc = min(range(len(g_wc)), key=lambda i: g_wc[i])
+        ex["result"]["g90_wind_conservative_best_gev_inv"] = g_wc[i_wc]
+        ex["result"]["offset_at_best_wind_conservative_hz"] = 0.0
+        if g_wn is not None:
+            ex["curve"]["g90_wind_nominal"] = list(g_wn)
+            i_wn = min(range(len(g_wn)), key=lambda i: g_wn[i])
+            ex["result"]["g90_wind_nominal_best_gev_inv"] = g_wn[i_wn]
+            ex["result"]["offset_at_best_wind_nominal_hz"] = 0.0
+        ex["halo"] = {"worst_construction": "wind parallel to B_0, theta = "
+                                            "0, V = 233 km/s, D_cal applied"}
+        if theta is not None:
+            ex["halo"]["wind_model"] = {"theta_min_deg": theta[0],
+                                        "theta_max_deg": theta[1]}
+    if wind_unavailable is not None:
+        ex["halo"] = {"wind_model_unavailable": wind_unavailable}
     if not available:
         ex = {"available": False, "reason": "synthetic unavailable"}
     rep = {"report_version": "test", "generated_utc": "2026-09-15T00:00:00Z",
@@ -207,6 +251,33 @@ def write_json(path, obj):
     with open(path, "w") as fh:
         json.dump(obj, fh, indent=1)
     return path
+
+
+def diff_keys(old, new, prefix=""):
+    """(changed, removed): dotted paths of leaves present in both old and
+    new whose JSON-serialised values differ, and of keys of old missing
+    from new; lists of dicts of equal length are walked element-wise
+    (sessions[] keeps its order), other lists compared whole. Additive
+    keys of new are ignored."""
+    changed, removed = [], []
+    if isinstance(old, dict) and isinstance(new, dict):
+        for k in old:
+            path = prefix + k
+            if k not in new:
+                removed.append(path)
+            else:
+                c, r = diff_keys(old[k], new[k], path + ".")
+                changed += c
+                removed += r
+    elif isinstance(old, list) and isinstance(new, list) and old and all(
+            isinstance(x, dict) for x in old + new) and len(old) == len(new):
+        for i, (o, n) in enumerate(zip(old, new)):
+            c, r = diff_keys(o, n, "%s[%d]." % (prefix[:-1], i))
+            changed += c
+            removed += r
+    elif json.dumps(old, sort_keys=True) != json.dumps(new, sort_keys=True):
+        changed.append(prefix[:-1])
+    return sorted(changed), sorted(removed)
 
 
 def run_cli(args):
@@ -729,6 +800,345 @@ def main(argv=None):
           and "0.9^N" in sitef["construction"]
           and "unpublished" in sitef["construction"]
           and "publication" not in sitef["construction"])
+
+    # ------------------------------------------------------------------
+    # 1c. v0.8 headline (analysis note Sec. 8.5, option [B]): wind-aware
+    #     conservative curves in every session set the headline, the
+    #     worst-parallel combination is kept unchanged; a mixed set falls
+    #     back and says so; the D_cal = 1 companion; a lone unverified
+    #     session; v0.7 reports untouched
+    # ------------------------------------------------------------------
+    V07_COMBINED_KEYS = (
+        "g90_worst_best_gev_inv", "m_a_at_best_ev", "m_a_at_best_uev",
+        "band_10x_ev", "band_10x_uev", "band_10x_segments_uev",
+        "session_setting_best", "band_10x_basis", "mass_coverage_ev",
+        "mass_coverage_segments_uev", "total_noise_seconds",
+        "statistical_fraction_of_P90_max",
+        "statistical_fraction_of_P90_at_best", "coverage_note", "robust",
+        "if_sign", "sign_hypotheses", "sign_groups",
+        "sign_unverified_sessions", "sign_rule")
+    wc_a, wn_a = [v * 0.8 for v in g_a], [v * 0.3 for v in g_a]
+    wc_b, wn_b = [v * 0.9 for v in g_b], [v * 0.35 for v in g_b]
+    rep_wa = fake_report("site-x", "a.zip", ks_a, g_a, noise_s=1800.0,
+                         wind=(wc_a, wn_a, [10.0, 40.0]))
+    rep_wb = fake_report("site-x", "b.zip", ks_b, g_b, noise_s=3600.0,
+                         wind=(wc_b, wn_b, [50.0, 60.0]))
+    site_w = se.combine_reports([("/w/rep_a/report.json", rep_wa),
+                                 ("/w/rep_b/report.json", rep_wb)])
+    cw = site_w["combined"]
+    nodes_w = [node_of(m) for m in site_w["curve"]["m_a_ev"]]
+    want_wc = min_over([placed(ks_a, wc_a), placed(ks_b, wc_b)])
+    want_wn = min_over([placed(ks_a, wn_a), placed(ks_b, wn_b)])
+    check("wind headline: every session carries curve.g90_wind_conservative "
+          "-> headline_curve g90_wind_conservative (site and combined), "
+          "combined.g90_wind_conservative_best_gev_inv 0.9 at node 5 set by "
+          "b, its mass, its offset (node nu - carrier = 20 Hz), the "
+          "within-10x band, no session missing",
+          site_w["headline_curve"] == "g90_wind_conservative"
+          and cw["headline_curve"] == "g90_wind_conservative"
+          and site_w["curve"]["headline_curve"] == "g90_wind_conservative"
+          and close(cw["g90_wind_conservative_best_gev_inv"], 0.9)
+          and close(cw["m_a_at_best_wind_conservative_uev"],
+                    m_ev(K0 + 5) * 1e6)
+          and close(cw["m_a_at_best_wind_conservative_ev"], m_ev(K0 + 5))
+          and cw["session_setting_best_wind_conservative"] == "b"
+          and abs(cw["offset_at_best_wind_conservative_hz"] - 20.0) < 1e-6
+          and close(cw["band_10x_wind_conservative_uev"][0], m_ev(K0) * 1e6)
+          and close(cw["band_10x_wind_conservative_uev"][1],
+                    m_ev(K0 + 7) * 1e6)
+          and cw["wind_sessions_missing"] == []
+          and site_w["wind_sessions_missing"] == []
+          and cw["wind_conservative"]["session_setting_best"] == "b"
+          and cw["wind_conservative"]["hypothesis_setting_best"] is None
+          and cw["wind_conservative"]["if_sign"] == {},
+          json.dumps({k: cw.get(k) for k in cw if "wind" in k
+                      or "headline" in k})[:700])
+    check("wind headline: curve.g_site_wind_conservative and "
+          "g_site_wind_nominal are the pointwise minima of the wind curves "
+          "on the worst curve's grid; curve.g_site and every v0.7 combined "
+          "key are byte-identical to the no-wind combination of test 1",
+          matches(nodes_w, site_w["curve"]["g_site_wind_conservative"],
+                  want_wc)
+          and matches(nodes_w, site_w["curve"]["g_site_wind_nominal"],
+                      want_wn)
+          and site_w["curve"]["g_site"] == site["curve"]["g_site"]
+          and site_w["curve"]["m_a_ev"] == site["curve"]["m_a_ev"]
+          and site_w["curve"]["per_session"] == site["curve"]["per_session"]
+          and all(cw[k] == comb[k] for k in V07_COMBINED_KEYS)
+          and all(site_w["sessions"][i][k] == site["sessions"][i][k]
+                  for i in (0, 1) for k in site["sessions"][i]
+                  if "wind" not in k),
+          json.dumps([k for k in V07_COMBINED_KEYS if cw[k] != comb[k]]))
+    check("wind headline: the D_cal = 1 companion combined.g90_wind_nominal_"
+          "best_gev_inv 0.35 at node 5 (b), its offset; the worst-parallel "
+          "robustness factor 1/0.9; the theta range 10-60 over the sessions",
+          close(cw["g90_wind_nominal_best_gev_inv"], 0.35)
+          and close(cw["m_a_at_best_wind_nominal_uev"], m_ev(K0 + 5) * 1e6)
+          and abs(cw["offset_at_best_wind_nominal_hz"] - 20.0) < 1e-6
+          and cw["session_setting_best_wind_nominal"] == "b"
+          and close(cw["worst_over_wind_conservative_factor"], 1.0 / 0.9)
+          and cw["wind_theta_deg_range"] == [10.0, 60.0],
+          json.dumps({k: cw.get(k) for k in cw if "nominal" in k
+                      or "factor" in k or "theta" in k}))
+    check("wind headline: rule names the headline curve and the wind-aware "
+          "conservative g_90 (still the plain minimum), construction names "
+          "the standard-halo wind at its actual direction for each "
+          "session's site and times, theta 10-60 degrees, the "
+          "worst-parallel robustness line, D_cal, unpublished and 0.9^N, "
+          "the robustness note quotes both numbers",
+          "headline curve g90_wind_conservative" in site_w["rule"]
+          and "wind-aware conservative g_90(m_a)" in site_w["rule"]
+          and "plain minimum" in site_w["rule"]
+          and "falls back" not in site_w["rule"]
+          and site_w["construction"].startswith(
+              "wind-aware conservative per session")
+          and ("the standard-halo wind at its actual direction for each "
+               "session's site and times" in site_w["construction"])
+          and "theta 10-60 degrees" in site_w["construction"]
+          and "robustness line" in site_w["construction"]
+          and "wind parallel to B0" in site_w["construction"]
+          and "D_cal unrecorded" in site_w["construction"]
+          and "unpublished" in site_w["construction"]
+          and "0.9^N" in site_w["construction"]
+          and "publication" not in site_w["construction"]
+          and "even with the wind along B_0" in cw["robustness_note"]
+          and "0.9 GeV^-1" in cw["robustness_note"]
+          and "1 GeV^-1 at" in cw["robustness_note"]
+          and "0.35 GeV^-1" in cw["robustness_note"]
+          and "theta 10-60 degrees" in cw["robustness_note"],
+          json.dumps({"rule": site_w["rule"],
+                      "construction": site_w["construction"],
+                      "note": cw["robustness_note"]})[:1200])
+    check("wind headline: per-session summaries carry the wind best, "
+          "offset, theta range and wind_curve True; per_session_wind_"
+          "conservative columns are each session's own wind curve, None "
+          "outside its band",
+          all(s["wind_curve"] for s in site_w["sessions"])
+          and close(site_w["sessions"][0]["g90_wind_conservative_best_gev_inv"],
+                    2.4)
+          and close(site_w["sessions"][1]["g90_wind_nominal_best_gev_inv"],
+                    0.35)
+          and site_w["sessions"][0]["wind_theta_deg_range"] == [10.0, 40.0]
+          and site_w["sessions"][0]["wind_model_unavailable"] is None
+          and matches(nodes_w,
+                      site_w["curve"]["per_session_wind_conservative"][0],
+                      placed(ks_a, wc_a))
+          and matches(nodes_w,
+                      site_w["curve"]["per_session_wind_conservative"][1],
+                      placed(ks_b, wc_b)),
+          json.dumps(site_w["sessions"][0])[:500])
+    # the input order changes nothing on the wind path either
+    site_w2 = se.combine_reports([("/w/rep_b/report.json", rep_wb),
+                                  ("/w/rep_a/report.json", rep_wa)])
+    check("wind headline: the input order changes neither the wind "
+          "headline, the wind curves, nor rule and construction",
+          all(close(site_w2["combined"][k], cw[k]) for k in
+              ("g90_wind_conservative_best_gev_inv",
+               "g90_wind_nominal_best_gev_inv",
+               "m_a_at_best_wind_conservative_uev",
+               "worst_over_wind_conservative_factor"))
+          and site_w2["curve"]["g_site_wind_conservative"]
+          == site_w["curve"]["g_site_wind_conservative"]
+          and site_w2["rule"] == site_w["rule"]
+          and site_w2["construction"] == site_w["construction"]
+          and site_w2["combined"]["robustness_note"] == cw["robustness_note"])
+    # mixed set: one session without the wind curve -> fallback, said
+    site_m = se.combine_reports([("/w/rep_a/report.json", rep_wa),
+                                 ("/w/rep_b/report.json", rep_b)])
+    cm = site_m["combined"]
+    check("mixed set (a wind-aware, b v0.7): headline falls back to "
+          "g90_worst, every v0.7 combined key and curve.g_site equal test "
+          "1, wind keys None, wind_sessions_missing ['b'], rule and "
+          "headline_basis say so and why (b: the report predates it), "
+          "construction is the v0.7 text (no headline sentence)",
+          site_m["headline_curve"] == "g90_worst"
+          and cm["headline_curve"] == "g90_worst"
+          and cm["g90_wind_conservative_best_gev_inv"] is None
+          and cm["wind_conservative"] is None
+          and cm["g90_wind_nominal_best_gev_inv"] is None
+          and cm["wind_nominal"] is None
+          and cm["offset_at_best_wind_conservative_hz"] is None
+          and site_m["curve"]["g_site_wind_conservative"] is None
+          and site_m["curve"]["g_site_wind_nominal"] is None
+          and site_m["curve"]["per_session_wind_conservative"] is None
+          and site_m["curve"]["g_site"] == site["curve"]["g_site"]
+          and all(cm[k] == comb[k] for k in V07_COMBINED_KEYS)
+          and cm["wind_sessions_missing"] == ["b"]
+          and site_m["wind_sessions_missing"] == ["b"]
+          and "falls back" in site_m["rule"]
+          and "1 of 2 session(s)" in site_m["rule"]
+          and "b: curve.g90_wind_conservative absent" in site_m["rule"]
+          and "predates it" in site_m["rule"]
+          and "headline curve g90_worst" in site_m["rule"]
+          and "worst-case g_90(m_a)" in site_m["rule"]
+          and site_m["construction"].startswith("worst-case per session")
+          and "falls back" in site_m["headline_basis"]
+          and "falls back" in cm["headline_basis"]
+          and " --- headline curve" not in site_m["construction"]
+          and "falls back" not in site_m["construction"]
+          and "v0.7 combination stands" in cm["robustness_note"]
+          and "rule and headline_basis say so" in cm["robustness_note"]
+          and site_m["sessions"][0]["wind_curve"] is True
+          and site_m["sessions"][1]["wind_curve"] is False,
+          json.dumps({"rule": site_m["rule"],
+                      "note": cm["robustness_note"]})[:900])
+    # C9 (analysis note Sec. 7 (iv) / 8.5): the fallback construction
+    # string is the v0.7 text verbatim --- equal to the v0.7-only set's
+    # and to the committed v0.7 combiner's, byte for byte; the headline
+    # sentence lives in rule and headline_basis only
+    check("mixed set: the fallback construction string equals the v0.7-only "
+          "set's construction byte for byte and carries no headline "
+          "sentence; the sentence is in rule and headline_basis",
+          site_m["construction"] == site["construction"]
+          and " --- headline curve" not in site["construction"]
+          and site_m["rule"].split(" --- headline curve")[0]
+          == site["rule"].split(" --- headline curve")[0]
+          and site_m["headline_basis"].startswith("headline curve g90_worst")
+          and site_m["headline_basis"] in site_m["rule"],
+          json.dumps({"m": site_m["construction"],
+                      "solo": site["construction"]})[:900])
+    master_src = None
+    try:
+        master_src = subprocess.run(
+            ["git", "-C", REPO, "show", "master:analysis/site_exclusion.py"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        master_src = (master_src.stdout.decode("utf-8")
+                      if master_src.returncode == 0 else None)
+    except (OSError, subprocess.SubprocessError):
+        master_src = None
+    if master_src is None:
+        print("SKIP : committed v0.7 combiner (git show master:analysis/"
+              "site_exclusion.py) unavailable --- byte-for-byte guard not run")
+    else:
+        master_path = os.path.join(work, "site_exclusion_master.py")
+        with io.open(master_path, "w", encoding="utf-8") as fh:
+            fh.write(master_src)
+        se_master = load_module("snn_site_exclusion_master", master_path)
+        site_old = se_master.combine_reports(
+            [("/w/rep_a/report.json", rep_a), ("/w/rep_b/report.json", rep_b)])
+        site_m_old = se_master.combine_reports(
+            [("/w/rep_a/report.json", rep_wa), ("/w/rep_b/report.json", rep_b)])
+        changed, removed = diff_keys(site_old, site)
+        changed_m, removed_m = diff_keys(site_m_old, site_m)
+        check("committed v0.7 combiner vs this module on the v0.7-only set "
+              "and on the mixed set: construction byte-identical, the only "
+              "changed key is rule, nothing removed",
+              site_old["construction"] == site["construction"]
+              and site_m_old["construction"] == site_m["construction"]
+              and changed == ["rule"] and removed == []
+              and changed_m == ["rule"] and removed_m == [],
+              json.dumps({"changed": changed, "removed": removed,
+                          "changed_mixed": changed_m,
+                          "removed_mixed": removed_m})[:600])
+    # a wind model that was unavailable gives its reason; an unusable
+    # curve (NaN) or one of the wrong length counts as missing
+    rep_un = fake_report("site-x", "b.zip", ks_b, g_b,
+                         wind_unavailable="coordinates")
+    site_un = se.combine_reports([("/w/rep_a/report.json", rep_wa),
+                                  ("/w/rep_b/report.json", rep_un)])
+    bad = list(wc_b)
+    bad[2] = float("nan")
+    rep_bad = fake_report("site-x", "b.zip", ks_b, g_b,
+                          wind=(bad, None, None))
+    site_bad = se.combine_reports([("/w/rep_a/report.json", rep_wa),
+                                   ("/w/rep_b/report.json", rep_bad)])
+    rep_short = fake_report("site-x", "b.zip", ks_b, g_b,
+                            wind=(wc_b[:-1], None, None))
+    site_short = se.combine_reports([("/w/rep_a/report.json", rep_wa),
+                                     ("/w/rep_b/report.json", rep_short)])
+    check("fallback reasons: halo.wind_model_unavailable 'coordinates' is "
+          "quoted; a NaN in the wind curve or a wrong length makes it "
+          "unusable (fallback, reason says so), the worst headline intact",
+          site_un["headline_curve"] == "g90_worst"
+          and "wind model unavailable (coordinates)" in site_un["rule"]
+          and site_un["sessions"][1]["wind_model_unavailable"] == "coordinates"
+          and site_bad["headline_curve"] == "g90_worst"
+          and "unusable" in site_bad["rule"]
+          and "non-finite" in site_bad["rule"]
+          and site_short["headline_curve"] == "g90_worst"
+          and "unusable" in site_short["rule"]
+          and "6 values against 7 masses" in site_short["rule"]
+          and all(s["combined"]["g90_worst_best_gev_inv"] == 1.0
+                  for s in (site_un, site_bad, site_short)),
+          json.dumps({"un": site_un["rule"][-300:],
+                      "bad": site_bad["rule"][-200:],
+                      "short": site_short["rule"][-200:]}))
+    # the nominal companion absent from one session: the headline is still
+    # wind-aware, the companion is not combined and the rule says so
+    rep_wb_nn = fake_report("site-x", "b.zip", ks_b, g_b, noise_s=3600.0,
+                            wind=(wc_b, None, [50.0, 60.0]))
+    site_nn = se.combine_reports([("/w/rep_a/report.json", rep_wa),
+                                  ("/w/rep_b/report.json", rep_wb_nn)])
+    cnn = site_nn["combined"]
+    check("companion absent from one session: the wind-aware headline "
+          "stands (0.9), g90_wind_nominal is not combined (None) and the "
+          "rule says from which session it is absent",
+          site_nn["headline_curve"] == "g90_wind_conservative"
+          and close(cnn["g90_wind_conservative_best_gev_inv"], 0.9)
+          and cnn["g90_wind_nominal_best_gev_inv"] is None
+          and cnn["wind_nominal"] is None
+          and site_nn["curve"]["g_site_wind_nominal"] is None
+          and "g90_wind_nominal (D_cal = 1) is absent from 1 of 2 session(s) "
+              "(b) and is not combined" in site_nn["rule"]
+          and "with D_cal = 1" not in cnn["robustness_note"],
+          site_nn["rule"][-400:])
+    # v0.7 reports alone: the fallback, every new key None or False
+    check("v0.7 reports alone (test 1's solo): headline_curve g90_worst, "
+          "wind keys None, wind_curve False, rule says every session lacks "
+          "the curve",
+          solo["headline_curve"] == "g90_worst"
+          and solo["combined"]["wind_conservative"] is None
+          and solo["combined"]["g90_wind_conservative_best_gev_inv"] is None
+          and solo["sessions"][0]["wind_curve"] is False
+          and solo["wind_sessions_missing"] == ["a"]
+          and "every one of the 1 session(s)" in solo["rule"],
+          solo["rule"][-300:])
+    # a lone sign-unverified session with the wind curve: the wind headline
+    # is the max over its two placements, with its own if_sign and sign note
+    ks_uw = [K0 + i for i in range(6)]
+    g_uw = [8.0, 6.0, 4.0, 3.0, 4.0, 6.0]
+    wc_uw = [v * 0.5 for v in g_uw]
+    rep_uw = fake_report("site-x", "u.zip", ks_uw, g_uw, mirror_shift=-2,
+                         vendor="agilent", wind=(wc_uw, None, [20.0, 30.0]))
+    site_uw = se.combine_reports([("/w/rep_u/report.json", rep_uw)])
+    cuw = site_uw["combined"]
+    wcb = cuw["wind_conservative"]
+    want_uw = max_over([placed(ks_uw, wc_uw), placed(ks_uw, wc_uw, -2)])
+    nodes_uw = [node_of(m) for m in site_uw["curve"]["m_a_ev"]]
+    check("lone sign-unverified session with the wind curve: the wind "
+          "headline is the max over its two placements (2.0 at node 2), "
+          "the worst headline likewise (4.0), if_sign nominal/mirror 1.5 "
+          "each, the wind block's sign note and premise, the factor 4/3, "
+          "the curve carried where both placements make a statement",
+          site_uw["headline_curve"] == "g90_wind_conservative"
+          and close(cuw["g90_wind_conservative_best_gev_inv"], 2.0)
+          and close(cuw["m_a_at_best_wind_conservative_uev"],
+                    m_ev(K0 + 2) * 1e6)
+          and close(cuw["g90_worst_best_gev_inv"], 4.0)
+          and sorted(wcb["if_sign"]) == ["mirror", "nominal"]
+          and close(wcb["if_sign"]["nominal"]
+                    ["g90_wind_conservative_best_gev_inv"], 1.5)
+          and close(wcb["if_sign"]["mirror"]
+                    ["g90_wind_conservative_best_gev_inv"], 1.5)
+          and close(wcb["if_sign"]["nominal"]["m_a_at_best_uev"],
+                    m_ev(K0 + 3) * 1e6)
+          and close(wcb["if_sign"]["mirror"]["m_a_at_best_uev"],
+                    m_ev(K0 + 1) * 1e6)
+          and close(wcb["robust_over_conditional_factor"], 4.0 / 3.0)
+          and "sign-robust headline 2 GeV^-1" in wcb["sign_note"]
+          and "premise" in wcb["sign_premise"]
+          and wcb["independent_sign"]["g90_wind_conservative_best_gev_inv"]
+          == cuw["g90_wind_conservative_best_gev_inv"]
+          and wcb["hypothesis_setting_best"] in ("nominal", "mirror")
+          and matches(nodes_uw, site_uw["curve"]["g_site_wind_conservative"],
+                      want_uw)
+          and isinstance(cuw["offset_at_best_wind_conservative_hz"], float)
+          and set(site_uw["curve"]["if_sign"]["g_wind_conservative"])
+          == {"nominal", "mirror"}
+          and "ONE shared unknown" in site_uw["rule"]
+          and "headline curve g90_wind_conservative" in site_uw["rule"],
+          json.dumps({k: wcb.get(k) for k in ("g90_wind_conservative_best_gev_inv",
+                                               "if_sign", "sign_note")})[:900])
 
     # ------------------------------------------------------------------
     # 2. skipped reports are listed, never counted

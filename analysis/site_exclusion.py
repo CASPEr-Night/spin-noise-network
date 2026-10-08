@@ -23,7 +23,27 @@ Output: site_exclusion_<slug>.json (inputs, per-session summaries, the
         sign hypothesis, then one g column per session) in --out
         (default: the directory of the first report).
 
-Combination rule. Every session's worst-case curve g_90(m_a) is placed
+Headline curve (v0.8, analysis note Sec. 8.5, option [B]). When every
+session used carries curve.g90_wind_conservative --- the standard-halo
+wind at its actual direction for that session's site and times, D_cal
+applied --- the site headline minimises THAT curve
+(combined.g90_wind_conservative_best_gev_inv, its mass and offset), and
+curve.g90_wind_nominal (D_cal = 1) is combined the same way when every
+session carries it too (combined.g90_wind_nominal_best_gev_inv). The
+worst-parallel curve g90_worst (wind parallel to B0, the v0.7 headline)
+is ALWAYS combined by the same rule and kept as
+combined.g90_worst_best_gev_inv --- the robustness line and the
+continuity with the released v0.7 numbers. When any session used lacks
+the wind curve (a report predating v0.8, or a session whose wind model
+was unavailable: halo.wind_model_unavailable) the headline falls back to
+today's g90_worst combination, unchanged, and rule, headline_basis and
+headline_curve say so --- construction is then the v0.7 text verbatim
+(analysis note Sec. 8.5 names site_combined.rule as the carrier; the
+Sec. 7 (iv) allow-list does not include this string). Every v0.7 key
+keeps its name, position and meaning; the wind-aware keys are additive.
+
+Combination rule. Every session's curve g_90(m_a) (each curve family
+treated alike) is placed
 on the site's common mass grid --- the nodes at integer multiples of
 SITE_GRID_STEP_HZ (the per-session scan step) in nu_a inside each
 session's scanned band, their union over sessions, so that N sessions
@@ -104,9 +124,11 @@ without the per-session and per-hypothesis curves), or run this script
 over all of them. facility_report imports this module lazily by file
 path.
 
-Every number here is a worst-case construction (2020 pilot: D_cal from
+Every number here is a conservative construction (2020 pilot: D_cal from
 the pilot's 4.6 envelope, inflated by the ladder power envelope where a
-session's references were gain-bridged, wind parallel to B0, damping at
+session's references were gain-bridged; the standard-halo wind at its
+actual direction for each session's site and times in the headline,
+wind parallel to B0 in the worst-parallel robustness line; damping at
 the broader measured width, no spin-noise subtraction), unpublished, and
 many orders of magnitude above the astrophysical bounds on the same
 coupling.
@@ -137,6 +159,15 @@ MAX_SIGN_VENDORS = 3
 # sign-group key of a sign-unverified session whose vendor is unrecorded
 # (it shares its sign with no other session)
 UNRECORDED_VENDOR_PREFIX = "unrecorded-vendor:"
+# curve families (keys of science.axion_exclusion.curve): the v0.7
+# worst-parallel curve is always combined; the v0.8 wind-aware curves
+# (analysis note Sec. 8.5) are combined when every session carries them
+WORST_CURVE = "g90_worst"
+WIND_CONSERVATIVE_CURVE = "g90_wind_conservative"
+WIND_NOMINAL_CURVE = "g90_wind_nominal"
+WIND_DIRECTION_TEXT = ("the standard-halo wind at its actual direction for "
+                       "each session's site and times")
+WORST_DIRECTION_TEXT = "wind parallel to B0"
 
 
 class SiteMismatch(ValueError):
@@ -186,6 +217,54 @@ def session_exclusion(report):
                       % (int(np.count_nonzero(~(np.isfinite(ga)
                                                  & (ga > 0)))), ga.size))
     return ex, None
+
+
+def _usable_curve(values, n):
+    """(array, None) when values is a list of n finite positive numbers,
+    else (None, why)."""
+    try:
+        ga = np.asarray(values, dtype=float)
+    except (TypeError, ValueError):
+        return None, "not numeric"
+    if ga.ndim != 1 or ga.size != n:
+        return None, "%d values against %d masses" % (ga.size, n)
+    bad = ~(np.isfinite(ga) & (ga > 0))
+    if bad.any():
+        return None, ("%d of %d couplings non-finite or non-positive"
+                      % (int(np.count_nonzero(bad)), ga.size))
+    return ga, None
+
+
+def session_wind_curves(ex, report=None):
+    """The usable wind-aware curves of a usable exclusion (analysis note
+    Sec. 8.5): {conservative: array or None, nominal: array or None,
+    why: why the conservative curve is absent or unusable (None when
+    usable), nominal_why: likewise for the D_cal = 1 companion}."""
+    curve = ex.get("curve") or {}
+    version = (report or {}).get("report_version") or "unrecorded"
+    n = len(curve.get("m_a_ev") or [])
+    out = {"conservative": None, "nominal": None, "why": None,
+           "nominal_why": None}
+    for fam, key, why_key in (("conservative", WIND_CONSERVATIVE_CURVE,
+                               "why"),
+                              ("nominal", WIND_NOMINAL_CURVE,
+                               "nominal_why")):
+        g = curve.get(key)
+        if g is None:
+            halo = ex.get("halo") if isinstance(ex.get("halo"), dict) else {}
+            if halo.get("wind_model_unavailable"):
+                out[why_key] = ("curve.%s absent: wind model unavailable (%s)"
+                                % (key, halo["wind_model_unavailable"]))
+            else:
+                out[why_key] = ("curve.%s absent: the report predates it "
+                                "(generator v%s)" % (key, version))
+            continue
+        ga, why = _usable_curve(g, n)
+        if ga is None:
+            out[why_key] = "curve.%s unusable: %s" % (key, why)
+            continue
+        out[fam] = ga
+    return out
 
 
 def session_vendor(report, ex):
@@ -246,7 +325,35 @@ def session_summary(label, path, report, ex):
         "statistical_fraction_of_P90": sp.get("statistical_fraction_of_P90"),
         "noise_seconds": sp.get("noise_seconds"),
         "n_rows": sp.get("n_rows"),
+        # v0.8 additive (analysis note Sec. 8.5): the session's wind-aware
+        # headline, its D_cal = 1 companion, and the wind angle range
+        "g90_wind_conservative_best_gev_inv":
+            res.get("g90_wind_conservative_best_gev_inv"),
+        "offset_at_best_wind_conservative_hz":
+            res.get("offset_at_best_wind_conservative_hz"),
+        "g90_wind_nominal_best_gev_inv":
+            res.get("g90_wind_nominal_best_gev_inv"),
+        "offset_at_best_wind_nominal_hz":
+            res.get("offset_at_best_wind_nominal_hz"),
+        "wind_theta_deg_range": _theta_range(ex),
+        "wind_model_unavailable": ((ex.get("halo") or {})
+                                   .get("wind_model_unavailable")
+                                   if isinstance(ex.get("halo"), dict)
+                                   else None),
+        "wind_curve": (session_wind_curves(ex, report)["conservative"]
+                       is not None),
     }
+
+
+def _theta_range(ex):
+    """[theta_min, theta_max] in degrees from halo.wind_model, else None."""
+    halo = ex.get("halo") if isinstance(ex.get("halo"), dict) else {}
+    wm = halo.get("wind_model") if isinstance(halo.get("wind_model"),
+                                              dict) else {}
+    lo, hi = wm.get("theta_min_deg"), wm.get("theta_max_deg")
+    if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
+        return [float(lo), float(hi)]
+    return None
 
 
 def _nodes_hz(nu_lo, nu_hi, step=SITE_GRID_STEP_HZ):
@@ -291,10 +398,10 @@ def _uev(pair):
     return [pair[0] * EV_PER_HZ * 1e6, pair[1] * EV_PER_HZ * 1e6]
 
 
-def _headline(nodes, g):
+def _headline(nodes, g, gkey="g90_worst_best_gev_inv"):
     """The best coupling on the finite part of g over nodes: its index
-    and {best g, its mass, the within-10x band around it, every
-    within-10x segment}."""
+    and {best g (under gkey), its mass, the within-10x band around it,
+    every within-10x segment}."""
     fin = np.isfinite(g)
     idx = np.flatnonzero(fin)
     best_i = int(idx[np.argmin(g[idx])])
@@ -302,7 +409,7 @@ def _headline(nodes, g):
     segs_hz = _segments(nodes, fin & (g < 10.0 * best))
     around = [s for s in segs_hz if s[0] <= nodes[best_i] <= s[1]][0]
     return best_i, {
-        "g90_worst_best_gev_inv": best,
+        gkey: best,
         "m_a_at_best_ev": float(nodes[best_i] * EV_PER_HZ),
         "m_a_at_best_uev": float(nodes[best_i] * EV_PER_HZ * 1e6),
         "band_10x_ev": [around[0] * EV_PER_HZ, around[1] * EV_PER_HZ],
@@ -336,19 +443,70 @@ def _vendor_text(vendor, n_sessions=None):
                                         "" if n_sessions == 1 else "s")
 
 
-def _rule_text(n_vendors, shared):
+def _headline_sentence(n_used, wind_missing, wind_why, nominal_missing):
+    """The sentence of rule (and of construction when the wind-aware
+    curve is the headline) that names the headline curve: wind-aware
+    conservative (option [B]) when every session used carries it, else
+    the v0.7 worst-parallel fallback and why --- on the fallback path it
+    is carried by rule and headline_basis only."""
+    if not wind_missing:
+        if not nominal_missing:
+            nominal = (", and curve.%s (the same wind, D_cal = 1) likewise "
+                       "as combined.g90_wind_nominal_best_gev_inv"
+                       % WIND_NOMINAL_CURVE)
+        else:
+            nominal = ("; curve.%s (D_cal = 1) is absent from %d of %d "
+                       "session(s) (%s) and is not combined"
+                       % (WIND_NOMINAL_CURVE, len(nominal_missing), n_used,
+                          ", ".join(nominal_missing)))
+        return ("headline curve %s (%s, D_cal applied): every one of the %d "
+                "session(s) carries it; curve.%s (%s, the v0.7 headline) is "
+                "combined by the same rule and kept as "
+                "combined.g90_worst_best_gev_inv, the robustness line%s"
+                % (WIND_CONSERVATIVE_CURVE, WIND_DIRECTION_TEXT, n_used,
+                   WORST_CURVE, WORST_DIRECTION_TEXT, nominal))
+    return ("headline curve %s (%s, the v0.7 construction): the "
+            "wind-aware curve.%s (%s) is absent from %s, so the site "
+            "headline falls back to the worst-parallel combination, "
+            "unchanged from v0.7; the wind-aware combination needs the "
+            "curve in every session of the site"
+            % (WORST_CURVE, WORST_DIRECTION_TEXT, WIND_CONSERVATIVE_CURVE,
+               WIND_DIRECTION_TEXT,
+               _wind_missing_detail(n_used, wind_missing, wind_why)))
+
+
+def _wind_missing_detail(n_used, wind_missing, wind_why):
+    """'K of N session(s) (sessions: why; ...)', the sessions grouped by
+    reason, 'every session' when one reason covers them all."""
+    by_why = {}
+    for l in wind_missing:
+        by_why.setdefault(wind_why.get(l, "?"), []).append(l)
+    if len(wind_missing) == n_used and len(by_why) == 1:
+        return ("every one of the %d session(s) (%s)"
+                % (n_used, list(by_why)[0]))
+    return ("%d of %d session(s) (%s)"
+            % (len(wind_missing), n_used,
+               "; ".join("%s: %s" % (", ".join(ls), why)
+                         for why, ls in sorted(by_why.items()))))
+
+
+def _rule_text(n_vendors, shared, wind_headline=False, headline=""):
     grid = ("on the site's common %g Hz mass grid (each node the weaker "
             "of its two bracketing native points), +inf outside a "
             "session's scanned band" % SITE_GRID_STEP_HZ)
+    kind = (("wind-aware conservative g_90(m_a) (curve.%s)"
+             % WIND_CONSERVATIVE_CURVE) if wind_headline
+            else "worst-case g_90(m_a)")
+    tail = (" --- " + headline) if headline else ""
     if n_vendors == 0:
         return ("g_site(m_a) = min over sessions of each session's "
-                "worst-case g_90(m_a) %s --- every session's axis sign is "
+                "%s %s --- every session's axis sign is "
                 "verified, so there is one sign hypothesis and the site "
-                "curve is this plain minimum" % grid)
+                "curve is this plain minimum%s" % (kind, grid, tail))
     if shared:
         return ("g_site(m_a) = max over the %d joint axis-sign hypotheses "
                 "h of g_h(m_a), with g_h(m_a) = min over sessions of each "
-                "session's worst-case g_90(m_a) placed at carrier + offset "
+                "session's %s placed at carrier + offset "
                 "(nominal) or carrier - offset (mirror) as h assigns its "
                 "vendor's sign, %s --- the sign is taken as ONE shared "
                 "unknown per vendor axis convention (%d sign-unverified "
@@ -358,23 +516,25 @@ def _rule_text(n_vendors, shared):
                 "sign-verified session contributes the same curve under "
                 "every h, and g_site is stated only where every h makes a "
                 "statement, so under that premise it holds whichever sign "
-                "is true"
-                % (2 ** n_vendors, grid, n_vendors,
-                   "" if n_vendors == 1 else "s"))
-    return ("g_site(m_a) = min over sessions of each session's worst-case "
-            "g_90(m_a) %s, every sign-unverified session entered as the "
+                "is true%s"
+                % (2 ** n_vendors, kind, grid, n_vendors,
+                   "" if n_vendors == 1 else "s", tail))
+    return ("g_site(m_a) = min over sessions of each session's %s "
+            "%s, every sign-unverified session entered as the "
             "max over its two mass placements --- the independent-sign "
             "fallback: %d sign-unverified vendors exceed the %d the shared-"
             "sign enumeration (2^k joint hypotheses) supports; treating "
             "the signs as independent is never tighter than sharing them, "
             "so the report that brought the %dth vendor may have loosened "
-            "the site curve"
-            % (grid, n_vendors, MAX_SIGN_VENDORS, MAX_SIGN_VENDORS + 1))
+            "the site curve%s"
+            % (kind, grid, n_vendors, MAX_SIGN_VENDORS, MAX_SIGN_VENDORS + 1,
+               tail))
 
 
-def _d_cal_text(sessions):
+def _d_cal_text(sessions, wind=False):
     """'D_cal ...' as the sessions actually used it, the pilot envelope
-    named as provenance."""
+    named as provenance; wind=True adds that the wind-aware conservative
+    curve carries the same derating as the worst-parallel one."""
     vals = sorted(set(round(float(s["D_cal"]), 2) for s in sessions
                       if isinstance(s.get("D_cal"), (int, float))))
     pil = sorted(set(round(float(s["D_cal_pilot"]), 2) for s in sessions
@@ -383,14 +543,140 @@ def _d_cal_text(sessions):
         return "D_cal unrecorded"
     pilot = ("the 2020 pilot's %s envelope" % "/".join("%.1f" % p for p in pil)
              if pil else "the 2020 pilot's envelope")
+    reused = "reused unmeasured" + (
+        ", the same derating in the wind-aware conservative and the "
+        "worst-parallel curves" if wind else "")
     inflated = (", inflated by the ladder power envelope where a session's "
                 "references were gain-bridged")
     if len(vals) == 1:
-        return ("D_cal %.2f in every session (%s, reused unmeasured%s)"
-                % (vals[0], pilot,
+        return ("D_cal %.2f in every session (%s, %s%s)"
+                % (vals[0], pilot, reused,
                    inflated if pil and vals[0] > max(pil) + 1e-9 else ""))
-    return ("D_cal %.2f to %.2f by session (%s, reused unmeasured%s --- "
-            "sessions[].D_cal)" % (vals[0], vals[-1], pilot, inflated))
+    return ("D_cal %.2f to %.2f by session (%s, %s%s --- "
+            "sessions[].D_cal)" % (vals[0], vals[-1], pilot, reused, inflated))
+
+
+def _construction_text(sessions, wind_headline, headline):
+    """The site's construction string: the wind-aware conservative
+    construction (option [B]) when it is the headline, the headline
+    sentence appended; else the v0.7 worst-parallel string VERBATIM
+    (byte-identical to the v0.7 combiner's), the headline stated in
+    rule and headline_basis --- Sec. 8.5 names rule as the carrier and
+    the Sec. 7 (iv) allow-list does not license changing this string
+    when the combination itself is the unchanged v0.7 one."""
+    tail = ("--- unpublished, far above "
+            "astrophysical bounds --- where a session's bound is set by "
+            "its spin-noise line the limit does NOT improve with more "
+            "measurement time, where it is set by a fluctuation "
+            "(statistical term %.0f%% or more of P_90) it is a 90%% "
+            "one-sided statement whose minimum over N sessions has "
+            "coverage below 90%% (toward 0.9^N)"
+            % (100 * STAT_FRACTION_FLUCTUATION))
+    if wind_headline:
+        thetas = [s["wind_theta_deg_range"] for s in sessions
+                  if s.get("wind_theta_deg_range")]
+        theta = ((" (theta %.0f-%.0f degrees over the sessions)"
+                  % (min(t[0] for t in thetas), max(t[1] for t in thetas)))
+                 if thetas else "")
+        return ("wind-aware conservative per session (2020 pilot "
+                "calibration: %s, %s%s, damping at the broader measured "
+                "width, no spin-noise subtraction; the worst-parallel curve, "
+                "%s, is combined alongside as the robustness line) %s --- %s"
+                % (_d_cal_text(sessions, True), WIND_DIRECTION_TEXT, theta,
+                   WORST_DIRECTION_TEXT, tail, headline))
+    return ("worst-case per session (2020 pilot construction: %s, wind "
+            "parallel to B0, damping at the broader measured width, no "
+            "spin-noise subtraction) %s" % (_d_cal_text(sessions), tail))
+
+
+def _nu_l_hz(ex):
+    """The session's Larmor frequency (Hz) the curve offsets are measured
+    from: line.nu_L_hz_nominal, else carrier + line offset, else None."""
+    line = ex.get("line") or {}
+    v = line.get("nu_L_hz_nominal")
+    if isinstance(v, (int, float)):
+        return float(v)
+    c, o = line.get("carrier_mhz"), line.get("offset_hz")
+    if isinstance(c, (int, float)):
+        return float(c) * 1e6 + (float(o) if isinstance(o, (int, float))
+                                 else 0.0)
+    return None
+
+
+def _offset_at(nu_node, ex, mirror):
+    """nu_a - nu_L (Hz) of a site node for the session whose line sets it,
+    on its nominal placement (nu_L - nu_a on the mirror one); None when
+    the session records no Larmor frequency."""
+    nu_l = _nu_l_hz(ex)
+    if nu_l is None:
+        return None
+    return float(nu_l - nu_node) if mirror else float(nu_node - nu_l)
+
+
+def _sign_block(best, if_sign, order, gkey, n_unverified, vendors, groups,
+                split_txt, nodes, col_own, labels):
+    """The shared-sign texts for one curve family, in key order:
+    robust_over_conditional_factor, sign_note, independent_sign (the
+    headline without the premise, None where no node lies under both
+    placements of one session) and sign_premise."""
+    cond_best = min(if_sign[l][gkey] for l in order)
+    factor = best / cond_best
+    lone_console = (len(vendors) == 1
+                    and vendors[0].startswith(UNRECORDED_VENDOR_PREFIX))
+    note = (
+        "the sign-robust headline %.3g GeV^-1 %s the tighter "
+        "sign-conditional headline (%s) because %d session(s) are taken "
+        "to share %s, so the bound at each mass must hold with their "
+        "lines placed at carrier + offset and at carrier - offset, %s "
+        "apart --- a single sign determination for %s (a tof-shift "
+        "test, vendor checklist item 2: confirm the tof sign and "
+        "reference convention) collapses the site bound to the "
+        "conditional value at the corresponding mass"
+        % (best,
+           ("is %.1fx weaker than" % factor) if factor >= 1.05 else
+           "matches to within %.0f%%" % (100 * (factor - 1.0)),
+           "; ".join("if %s %.3g GeV^-1 at %.7f ueV"
+                     % (l, if_sign[l][gkey], if_sign[l]["m_a_at_best_uev"])
+                     for l in order),
+           n_unverified,
+           ("ONE unverified frequency-axis sign (%s)"
+            % _vendor_text(vendors[0]))
+           if len(vendors) == 1 else
+           ("ONE unverified frequency-axis sign per vendor (%s)"
+            % ", ".join(_vendor_text(v, len(groups[v])) for v in vendors)),
+           split_txt,
+           "that session's console" if lone_console else
+           "that vendor" if len(vendors) == 1 else "each such vendor"))
+    # the bound without the premise: the independent-sign rule
+    g_ind = col_own.min(axis=0)
+    ind = None
+    if np.isfinite(g_ind).any():
+        i_ind, ind = _headline(nodes, g_ind, gkey)
+        del ind["band_10x_segments_uev"]
+        ind["session_setting_best"] = labels[int(np.argmin(col_own[:, i_ind]))]
+    premise = (
+        "the shared sign is a premise the data do not check: every "
+        "sign-unverified session of one vendor at this site is taken to "
+        "follow one axis convention (one console, one acquisition-"
+        "software version, the offset read the same way in every "
+        "bundle); a second console, another software version or a "
+        "per-experiment axis reversal at this site breaks it, and the "
+        "site bound is then tighter than the truth wherever the shared "
+        "rule beats the independent-sign rule --- without the premise "
+        "(each session the max over its two placements, then the min "
+        "over sessions) the headline is %s"
+        % (("%.3g GeV^-1 at %.7f ueV (set by %s), %s"
+            % (ind[gkey], ind["m_a_at_best_uev"], ind["session_setting_best"],
+               ("%.1fx weaker than the sign-robust headline"
+                % (ind[gkey] / best))
+               if ind[gkey] / best >= 1.005 else
+               "the same as the sign-robust headline (the premise does "
+               "not tighten the headline here)"))
+           if ind else
+           "undefined (no site node lies under both placements of one "
+           "session)"))
+    return [("robust_over_conditional_factor", factor), ("sign_note", note),
+            ("independent_sign", ind), ("sign_premise", premise)]
 
 
 def combine_reports(reports, per_session_columns=True):
@@ -416,6 +702,37 @@ def combine_reports(reports, per_session_columns=True):
     False} --- nodes where no hypothesis makes a statement are not
     carried. Raises SiteMismatch when the reports name more than one
     facility_slug.
+
+    v0.8 additive keys (analysis note Sec. 8.5, option [B]; every key
+    above keeps its name, position and meaning): headline_curve
+    ('g90_wind_conservative' when every session used carries that curve,
+    else 'g90_worst', the fallback), headline_basis (the sentence that
+    says which and why, also appended to rule, and to construction only
+    on the wind path --- the fallback construction is the v0.7 string
+    verbatim),
+    wind_sessions_missing (sorted labels lacking a usable wind curve);
+    sessions[] gain g90_wind_conservative_best_gev_inv,
+    offset_at_best_wind_conservative_hz, g90_wind_nominal_best_gev_inv,
+    offset_at_best_wind_nominal_hz, wind_theta_deg_range,
+    wind_model_unavailable, wind_curve; combined gains headline_curve,
+    headline_basis, wind_sessions_missing, wind_conservative and
+    wind_nominal (each the full headline block of that family under the
+    same rule --- best, mass, offset_at_best_hz on the setting session's
+    nominal placement, within-10x band and segments, session/hypothesis
+    setting the best, if_sign, and on the shared-sign path the factor,
+    sign_note, independent_sign and sign_premise --- or None), the flat
+    headline g90_wind_conservative_best_gev_inv,
+    m_a_at_best_wind_conservative_ev/_uev,
+    offset_at_best_wind_conservative_hz, band_10x_wind_conservative_uev,
+    session_setting_best_wind_conservative, g90_wind_nominal_best_gev_inv,
+    m_a_at_best_wind_nominal_uev, offset_at_best_wind_nominal_hz,
+    session_setting_best_wind_nominal, wind_theta_deg_range (over the
+    sessions), worst_over_wind_conservative_factor and robustness_note
+    (the headline and the "even with the wind along B_0" line, or the
+    fallback statement); curve gains headline_curve,
+    g_site_wind_conservative and g_site_wind_nominal (on curve.m_a_ev,
+    None when not combined), per_session_wind_conservative and
+    if_sign.g_wind_conservative when per_session_columns.
     """
     slugs = sorted(set(str(rep.get("facility_slug")) for _p, rep in reports
                        if rep.get("facility_slug") is not None))
@@ -444,28 +761,37 @@ def combine_reports(reports, per_session_columns=True):
         seen[key] = label
         used.append((path, rep, ex, label))
     sessions = [session_summary(l, p, r, e) for p, r, e, l in used]
+    labels = [l for _p, _r, _e, l in used]
+    # v0.8 headline (option [B]): the wind-aware conservative curve when
+    # every session used carries it, else the v0.7 worst-parallel one
+    wind = [session_wind_curves(e, r) for _p, r, e, _l in used]
+    # (sorted: the combination is independent of the input order)
+    wind_missing = sorted(labels[i] for i, w in enumerate(wind)
+                          if w["conservative"] is None)
+    wind_why = dict((labels[i], w["why"]) for i, w in enumerate(wind)
+                    if w["conservative"] is None)
+    nominal_missing = sorted(labels[i] for i, w in enumerate(wind)
+                             if w["nominal"] is None)
+    wind_headline = bool(used) and not wind_missing
+    wind_nominal = wind_headline and not nominal_missing
+    headline = (_headline_sentence(len(used), wind_missing, wind_why,
+                                   nominal_missing) if used else "")
     out = {"facility_slug": slugs[0] if slugs else None,
            "n_sessions": len(used),
            "sessions": sessions,
            "skipped": skipped,
            "rule": ("no usable session --- no site curve" if not used
-                    else _rule_text(0, True)),
-           "construction": (
-               "worst-case per session (2020 pilot construction: %s, wind "
-               "parallel to B0, damping at the broader measured width, no "
-               "spin-noise subtraction) --- unpublished, far above "
-               "astrophysical bounds --- where a session's bound is set by "
-               "its spin-noise line the limit does NOT improve with more "
-               "measurement time, where it is set by a fluctuation "
-               "(statistical term %.0f%% or more of P_90) it is a 90%% "
-               "one-sided statement whose minimum over N sessions has "
-               "coverage below 90%% (toward 0.9^N)"
-               % (_d_cal_text(sessions), 100 * STAT_FRACTION_FLUCTUATION))}
+                    else _rule_text(0, True, wind_headline, headline)),
+           "construction": _construction_text(sessions, wind_headline,
+                                              headline),
+           "headline_curve": ((WIND_CONSERVATIVE_CURVE if wind_headline
+                               else WORST_CURVE) if used else None),
+           "headline_basis": headline or "no usable session",
+           "wind_sessions_missing": wind_missing}
     if not used:
         out["combined"] = None
         out["curve"] = None
         return out
-    labels = [l for _p, _r, _e, l in used]
     placements = []
     for path, rep, ex, label in used:
         cur = ex["curve"]
@@ -473,19 +799,17 @@ def combine_reports(reports, per_session_columns=True):
         mir = None
         if cur.get("m_a_ev_mirror") is not None:
             mir = np.asarray(cur["m_a_ev_mirror"], dtype=float) / EV_PER_HZ
-        placements.append((nu, mir, np.asarray(cur["g90_worst"],
+        placements.append((nu, mir, np.asarray(cur[WORST_CURVE],
                                                dtype=float)))
+    families = [(WORST_CURVE, [g for _n, _m, g in placements])]
+    if wind_headline:
+        families.append((WIND_CONSERVATIVE_CURVE,
+                         [w["conservative"] for w in wind]))
+    if wind_nominal:
+        families.append((WIND_NOMINAL_CURVE, [w["nominal"] for w in wind]))
     nodes = np.unique(np.concatenate(
         [_nodes_hz(a.min(), a.max()) for nu, mir, _g in placements
          for a in (nu, mir) if a is not None]))
-    col_nom = np.array([_resample_weaker(nu, g, nodes)
-                        for nu, _m, g in placements])
-    col_mir = np.array([col_nom[i] if mir is None
-                        else _resample_weaker(mir, g, nodes)
-                        for i, (_n, mir, g) in enumerate(placements)])
-    # each session's own sign-robust column: its curve, or for a
-    # sign-unverified session the max over its two placements
-    col_own = np.maximum(col_nom, col_mir)
     unverified = [i for i, (_n, mir, _g) in enumerate(placements)
                   if mir is not None]
     groups, vendor_of = {}, [None] * len(used)
@@ -501,15 +825,36 @@ def combine_reports(reports, per_session_columns=True):
     if shared:
         hyps = [dict(zip(vendors, combo)) for combo in
                 itertools.product(SIGN_HYPOTHESES, repeat=len(vendors))]
-        hyp_cols = [np.where(np.array([v is not None and h[v] == "mirror"
-                                       for v in vendor_of])[:, None],
-                             col_mir, col_nom) for h in hyps]
+        mirror_rows = [np.array([v is not None and h[v] == "mirror"
+                                 for v in vendor_of]) for h in hyps]
     else:
-        hyps, hyp_cols = [None], [col_own]
-    g_hyp = np.array([c.min(axis=0) for c in hyp_cols])
-    g_site = g_hyp.max(axis=0)
+        hyps, mirror_rows = [None], None
+    # the same placement and sign machinery for every curve family
+    fam = {}
+    for key, gs in families:
+        c_nom = np.array([_resample_weaker(nu, g, nodes)
+                          for (nu, _m, _w), g in zip(placements, gs)])
+        c_mir = np.array([c_nom[i] if mir is None
+                          else _resample_weaker(mir, g, nodes)
+                          for i, ((_n, mir, _w), g)
+                          in enumerate(zip(placements, gs))])
+        # each session's own sign-robust column: its curve, or for a
+        # sign-unverified session the max over its two placements
+        c_own = np.maximum(c_nom, c_mir)
+        if shared:
+            h_cols = [np.where(m[:, None], c_mir, c_nom) for m in mirror_rows]
+        else:
+            h_cols = [c_own]
+        g_h = np.array([c.min(axis=0) for c in h_cols])
+        fam[key] = {"col_nom": c_nom, "col_mir": c_mir, "col_own": c_own,
+                    "hyp_cols": h_cols, "g_hyp": g_h,
+                    "g_site": g_h.max(axis=0)}
+    worst = fam[WORST_CURVE]
+    col_nom, col_mir, col_own = (worst["col_nom"], worst["col_mir"],
+                                 worst["col_own"])
+    hyp_cols, g_hyp, g_site = worst["hyp_cols"], worst["g_hyp"], worst["g_site"]
     finite = np.isfinite(g_site)
-    out["rule"] = _rule_text(len(vendors), shared)
+    out["rule"] = _rule_text(len(vendors), shared, wind_headline, headline)
     if not finite.any():
         out["combined"] = None
         out["curve"] = None
@@ -520,6 +865,16 @@ def combine_reports(reports, per_session_columns=True):
                                        " under every sign hypothesis"
                                        if unverified else "")})
         return out
+
+    def _is_mirror(i, node_i, h_star_i, F):
+        """Whether session i's placement that sets node node_i under the
+        headline hypothesis is the mirror one."""
+        if vendor_of[i] is None:
+            return False
+        if shared:
+            return hyps[h_star_i][vendor_of[i]] == "mirror"
+        return bool(F["col_mir"][i, node_i] > F["col_nom"][i, node_i])
+
     best_i, head = _headline(nodes, g_site)
     best = head["g90_worst_best_gev_inv"]
     h_star = int(np.argmax(g_hyp[:, best_i]))
@@ -588,6 +943,7 @@ def combine_reports(reports, per_session_columns=True):
             "placements, then the min over sessions"
             % (len(vendors), MAX_SIGN_VENDORS)),
     })
+    split_txt = None
     if unverified and shared:
         splits = sorted(set(
             round(float(np.mean(np.abs(placements[i][0] - placements[i][1]))),
@@ -598,67 +954,11 @@ def combine_reports(reports, per_session_columns=True):
                      ("%.0f to %.0f Hz = %.3g to %.3g ueV"
                       % (splits[0], splits[-1], splits[0] * EV_PER_HZ * 1e6,
                          splits[-1] * EV_PER_HZ * 1e6)))
-        cond_best = min(if_sign[l]["g90_worst_best_gev_inv"] for l in order)
-        factor = best / cond_best
-        lone_console = (len(vendors) == 1
-                        and vendors[0].startswith(UNRECORDED_VENDOR_PREFIX))
-        out["combined"]["robust_over_conditional_factor"] = factor
-        out["combined"]["sign_note"] = (
-            "the sign-robust headline %.3g GeV^-1 %s the tighter "
-            "sign-conditional headline (%s) because %d session(s) are taken "
-            "to share %s, so the bound at each mass must hold with their "
-            "lines placed at carrier + offset and at carrier - offset, %s "
-            "apart --- a single sign determination for %s (a tof-shift "
-            "test, vendor checklist item 2: confirm the tof sign and "
-            "reference convention) collapses the site bound to the "
-            "conditional value at the corresponding mass"
-            % (best,
-               ("is %.1fx weaker than" % factor) if factor >= 1.05 else
-               "matches to within %.0f%%" % (100 * (factor - 1.0)),
-               "; ".join("if %s %.3g GeV^-1 at %.7f ueV"
-                         % (l, if_sign[l]["g90_worst_best_gev_inv"],
-                            if_sign[l]["m_a_at_best_uev"]) for l in order),
-               len(unverified),
-               ("ONE unverified frequency-axis sign (%s)"
-                % _vendor_text(vendors[0]))
-               if len(vendors) == 1 else
-               ("ONE unverified frequency-axis sign per vendor (%s)"
-                % ", ".join(_vendor_text(v, len(groups[v]))
-                            for v in vendors)),
-               split_txt,
-               "that session's console" if lone_console else
-               "that vendor" if len(vendors) == 1 else "each such vendor"))
-        # the bound without the premise: the independent-sign rule
-        g_ind = col_own.min(axis=0)
-        ind = None
-        if np.isfinite(g_ind).any():
-            i_ind, ind = _headline(nodes, g_ind)
-            del ind["band_10x_segments_uev"]
-            ind["session_setting_best"] = labels[int(np.argmin(
-                col_own[:, i_ind]))]
-        out["combined"]["independent_sign"] = ind
-        out["combined"]["sign_premise"] = (
-            "the shared sign is a premise the data do not check: every "
-            "sign-unverified session of one vendor at this site is taken to "
-            "follow one axis convention (one console, one acquisition-"
-            "software version, the offset read the same way in every "
-            "bundle); a second console, another software version or a "
-            "per-experiment axis reversal at this site breaks it, and the "
-            "site bound is then tighter than the truth wherever the shared "
-            "rule beats the independent-sign rule --- without the premise "
-            "(each session the max over its two placements, then the min "
-            "over sessions) the headline is %s"
-            % (("%.3g GeV^-1 at %.7f ueV (set by %s), %s"
-                % (ind["g90_worst_best_gev_inv"], ind["m_a_at_best_uev"],
-                   ind["session_setting_best"],
-                   ("%.1fx weaker than the sign-robust headline"
-                    % (ind["g90_worst_best_gev_inv"] / best))
-                   if ind["g90_worst_best_gev_inv"] / best >= 1.005 else
-                   "the same as the sign-robust headline (the premise does "
-                   "not tighten the headline here)"))
-               if ind else
-               "undefined (no site node lies under both placements of one "
-               "session)"))
+        for k, v in _sign_block(best, if_sign, order,
+                                "g90_worst_best_gev_inv", len(unverified),
+                                vendors, groups, split_txt, nodes, col_own,
+                                labels):
+            out["combined"][k] = v
     elif unverified:
         out["combined"]["sign_note"] = (
             "%d sign-unverified session(s) span %d vendor axis conventions, "
@@ -674,6 +974,98 @@ def combine_reports(reports, per_session_columns=True):
             "reference convention)"
             % (len(unverified), len(vendors), MAX_SIGN_VENDORS,
                MAX_SIGN_VENDORS + 1))
+
+    # ---- v0.8 additive: the wind-aware families, each the same rule
+    def _family_block(F, gkey):
+        """The headline of one wind-aware family: the same fields as the
+        worst-parallel headline plus the line offset at the best node,
+        the per-hypothesis headlines and the shared-sign texts."""
+        b_i, blk = _headline(nodes, F["g_site"], gkey)
+        h_s = int(np.argmax(F["g_hyp"][:, b_i]))
+        w_i = int(np.argmin(F["hyp_cols"][h_s][:, b_i]))
+        blk["offset_at_best_hz"] = _offset_at(
+            nodes[b_i], used[w_i][2], _is_mirror(w_i, b_i, h_s, F))
+        blk["session_setting_best"] = labels[w_i]
+        blk["hypothesis_setting_best"] = order[h_s] if order else None
+        blk["statistical_fraction_of_P90_at_best"] = (
+            sessions[w_i]["statistical_fraction_of_P90"])
+        ifs = {}
+        if shared and vendors:
+            for j, h in enumerate(hyps):
+                i_h, head_h = _headline(nodes, F["g_hyp"][j], gkey)
+                head_h["session_setting_best"] = labels[int(np.argmin(
+                    F["hyp_cols"][j][:, i_h]))]
+                head_h["assignment"] = h
+                ifs[hypothesis_label(h, vendors)] = head_h
+        blk["if_sign"] = ifs
+        if unverified and shared:
+            for k, v in _sign_block(blk[gkey], ifs, order, gkey,
+                                    len(unverified), vendors, groups,
+                                    split_txt, nodes, F["col_own"], labels):
+                blk[k] = v
+        return blk
+
+    comb = out["combined"]
+    wc = (_family_block(fam[WIND_CONSERVATIVE_CURVE],
+                        "g90_wind_conservative_best_gev_inv")
+          if wind_headline else None)
+    wn = (_family_block(fam[WIND_NOMINAL_CURVE],
+                        "g90_wind_nominal_best_gev_inv")
+          if wind_nominal else None)
+    thetas = [s["wind_theta_deg_range"] for s in sessions
+              if s.get("wind_theta_deg_range")]
+    comb["headline_curve"] = out["headline_curve"]
+    comb["headline_basis"] = headline
+    comb["wind_sessions_missing"] = wind_missing
+    comb["wind_conservative"] = wc
+    comb["wind_nominal"] = wn
+    comb["g90_wind_conservative_best_gev_inv"] = (
+        wc["g90_wind_conservative_best_gev_inv"] if wc else None)
+    comb["m_a_at_best_wind_conservative_ev"] = (wc["m_a_at_best_ev"]
+                                                if wc else None)
+    comb["m_a_at_best_wind_conservative_uev"] = (wc["m_a_at_best_uev"]
+                                                 if wc else None)
+    comb["offset_at_best_wind_conservative_hz"] = (wc["offset_at_best_hz"]
+                                                   if wc else None)
+    comb["band_10x_wind_conservative_uev"] = (wc["band_10x_uev"]
+                                              if wc else None)
+    comb["session_setting_best_wind_conservative"] = (
+        wc["session_setting_best"] if wc else None)
+    comb["g90_wind_nominal_best_gev_inv"] = (
+        wn["g90_wind_nominal_best_gev_inv"] if wn else None)
+    comb["m_a_at_best_wind_nominal_uev"] = (wn["m_a_at_best_uev"]
+                                            if wn else None)
+    comb["offset_at_best_wind_nominal_hz"] = (wn["offset_at_best_hz"]
+                                              if wn else None)
+    comb["session_setting_best_wind_nominal"] = (wn["session_setting_best"]
+                                                 if wn else None)
+    comb["wind_theta_deg_range"] = ([min(t[0] for t in thetas),
+                                     max(t[1] for t in thetas)]
+                                    if (wc and thetas) else None)
+    comb["worst_over_wind_conservative_factor"] = (
+        best / wc["g90_wind_conservative_best_gev_inv"] if wc else None)
+    comb["robustness_note"] = (
+        ("headline g_ap < %.3g GeV^-1 at %.7f ueV with %s%s (set by %s); "
+         "even with the wind along B_0 the bound is g_ap < %.3g GeV^-1 at "
+         "%.7f ueV (set by %s), %.2fx weaker%s"
+         % (wc["g90_wind_conservative_best_gev_inv"], wc["m_a_at_best_uev"],
+            WIND_DIRECTION_TEXT,
+            (" (theta %.0f-%.0f degrees over the sessions)"
+             % tuple(comb["wind_theta_deg_range"]))
+            if comb["wind_theta_deg_range"] else "",
+            wc["session_setting_best"], best, head["m_a_at_best_uev"],
+            labels[winner], comb["worst_over_wind_conservative_factor"],
+            ("; with D_cal = 1 and the same wind g_ap < %.3g GeV^-1 at "
+             "%.7f ueV" % (wn["g90_wind_nominal_best_gev_inv"],
+                           wn["m_a_at_best_uev"])) if wn else ""))
+        if wc else
+        ("headline g_ap < %.3g GeV^-1 at %.7f ueV on the worst-parallel "
+         "curve (%s, the v0.7 construction, set by %s): the wind-aware "
+         "curve.%s is absent from %s, so the v0.7 combination stands "
+         "unchanged (rule and headline_basis say so)"
+         % (best, head["m_a_at_best_uev"], WORST_DIRECTION_TEXT,
+            labels[winner], WIND_CONSERVATIVE_CURVE,
+            _wind_missing_detail(len(used), wind_missing, wind_why))))
     nodes_r, g_r, cols_r = nodes[finite], g_site[finite], col_own[:, finite]
     out["curve"] = {
         "m_a_ev": (nodes_r * EV_PER_HZ).tolist(),
@@ -709,6 +1101,27 @@ def combine_reports(reports, per_session_columns=True):
             "per-session and per-hypothesis curves live in "
             "site_exclusion_<slug>.json/.txt written by "
             "analysis/site_exclusion.py, not in report.json")
+    # v0.8 additive curve columns (the same grid and finiteness: a node
+    # is inside or outside a session's band whichever curve is read)
+    out["curve"]["headline_curve"] = out["headline_curve"]
+    out["curve"]["g_site_wind_conservative"] = (
+        fam[WIND_CONSERVATIVE_CURVE]["g_site"][finite].tolist()
+        if wind_headline else None)
+    out["curve"]["g_site_wind_nominal"] = (
+        fam[WIND_NOMINAL_CURVE]["g_site"][finite].tolist()
+        if wind_nominal else None)
+    if per_session_columns:
+        out["curve"]["per_session_wind_conservative"] = ([
+            [(None if not np.isfinite(v) else float(v)) for v in col]
+            for col in fam[WIND_CONSERVATIVE_CURVE]["col_own"][:, finite]]
+            if wind_headline else None)
+        if order and wind_headline:
+            any_h = np.isfinite(g_hyp).any(axis=0)
+            out["curve"]["if_sign"]["g_wind_conservative"] = {
+                label: [(None if not np.isfinite(v) else float(v))
+                        for v in gh[any_h]]
+                for label, gh in zip(
+                    order, fam[WIND_CONSERVATIVE_CURVE]["g_hyp"])}
     return out
 
 
@@ -729,13 +1142,22 @@ def write_outputs(site, out_dir):
     order = comb.get("sign_hypotheses") or []
     with open(tpath, "w") as fh:
         labels = [s["label"] for s in site["sessions"]]
-        fh.write("# site %s: worst-case exclusion on g_ap, min over %d "
+        wind_cols = [k for k in ("g_site_wind_conservative",
+                                 "g_site_wind_nominal")
+                     if curve.get(k) is not None]
+        fh.write("# site %s: %s exclusion on g_ap, min over %d "
                  "session(s) of one-sided 90%% CL bounds%s --- unpublished, "
                  "far above astrophysical bounds\n"
-                 % (slug, site["n_sessions"],
+                 % (slug,
+                    "wind-aware conservative (headline column "
+                    "g_site_wind_conservative; g_site the worst-parallel "
+                    "robustness line)" if wind_cols else "worst-case",
+                    site["n_sessions"],
                     " under each axis-sign hypothesis, the weaker "
                     "hypothesis quoted as g_site" if order else ""))
         fh.write("# rule: %s\n" % site["rule"])
+        if comb.get("robustness_note"):
+            fh.write("# headline: %s\n" % comb["robustness_note"])
         if comb.get("coverage_note"):
             fh.write("# coverage: %s\n" % comb["coverage_note"])
         if comb.get("sign_note"):
@@ -750,10 +1172,12 @@ def write_outputs(site, out_dir):
                      "(max over its placements) on g_site's grid; inf = no "
                      "statement carried\n")
         fh.write("# m_a [eV]   g_site [GeV^-1]   %s\n"
-                 % "   ".join(["%s [GeV^-1]" % _column_name(l) for l in order]
+                 % "   ".join(["%s [GeV^-1]" % k for k in wind_cols]
+                              + ["%s [GeV^-1]" % _column_name(l) for l in order]
                               + ["g_%s [GeV^-1]" % l for l in labels]))
         if curve:
-            per = curve.get("per_session") or []
+            per = [curve[k] for k in wind_cols] + (curve.get("per_session")
+                                                   or [])
             if ifs:
                 # rows on every node some hypothesis covers, the robust and
                 # per-session columns looked up by node index
@@ -812,13 +1236,37 @@ def main(argv=None):
         comb["total_noise_seconds"]))
     for s in site["sessions"]:
         print("  %s: g_ap < %.3g GeV^-1 at %.7f ueV (carrier %s MHz, "
-              "statistical term %s of P_90%s)"
+              "statistical term %s of P_90%s)%s"
               % (s["label"], s["g90_worst_best_gev_inv"] or float("nan"),
                  s["m_a_at_best_uev"] or float("nan"), s["carrier_mhz"],
                  ("%.0f%%" % (100 * s["statistical_fraction_of_P90"]))
                  if s["statistical_fraction_of_P90"] is not None else "n/a",
                  ", axis sign UNVERIFIED" if s["sign_verified"] is False
-                 else ""))
+                 else "",
+                 (" --- wind-aware conservative g_ap < %.3g GeV^-1 (theta "
+                  "%s)" % (s["g90_wind_conservative_best_gev_inv"],
+                           ("%.1f-%.1f deg" % tuple(s["wind_theta_deg_range"]))
+                           if s.get("wind_theta_deg_range") else "n/a"))
+                 if s.get("g90_wind_conservative_best_gev_inv") else
+                 " --- no wind-aware curve"))
+    if comb.get("wind_conservative"):
+        wc = comb["wind_conservative"]
+        print("combined wind-aware conservative (HEADLINE%s): g_ap < %.3g "
+              "GeV^-1 at m_a = %.7f ueV (offset %s Hz), within-10x band "
+              "%.7f..%.7f ueV, set by %s%s"
+              % (", sign-robust" if comb["sign_hypotheses"] else "",
+                 wc["g90_wind_conservative_best_gev_inv"],
+                 wc["m_a_at_best_uev"],
+                 ("%.1f" % wc["offset_at_best_hz"])
+                 if wc["offset_at_best_hz"] is not None else "n/a",
+                 wc["band_10x_uev"][0], wc["band_10x_uev"][1],
+                 wc["session_setting_best"],
+                 ("; D_cal = 1 companion g_ap < %.3g GeV^-1 at %.7f ueV"
+                  % (comb["g90_wind_nominal_best_gev_inv"],
+                     comb["m_a_at_best_wind_nominal_uev"]))
+                 if comb.get("wind_nominal") else ""))
+    else:
+        print("headline: %s" % comb.get("robustness_note"))
     print("combined worst-case%s: g_ap < %.3g GeV^-1 at m_a = %.7f ueV, "
           "within-10x band around the best %.7f..%.7f ueV (%d segment(s) "
           "in total, set by %s)"

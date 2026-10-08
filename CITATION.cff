@@ -3,8 +3,8 @@
 cff-version: 1.2.0
 type: software
 title: "spin-noise-network (CASPEr@night acquisition and ingest stack)"
-version: 0.7.9
-date-released: "2026-10-06"
+version: 0.8.0
+date-released: 2026-10-08
 license: MIT
 message: "If you use this software, please cite it as below."
 authors:

@@ -216,6 +216,24 @@ script — and press OK at its shimming dialog, which says so since
 v0.7.5. Tuning and P90 calibration done beforehand are likewise harmless
 no-ops on top of a good state.
 
+**TopSpin answers `Acquisition is already running` when the script calls
+`atma` (and again at the gain ladder's `zg`), before anything has been
+acquired** (Avance III 400, TopSpin 3.2, 2026-10-06; the desk test on the
+same console had passed).
+The console's acquisition state is busy or stuck — not the script, which
+has not started an acquisition yet. Another experiment or an automation
+(IconNMR, the spooler queue) owns the acquisition, a `delayed` entry sits
+in the spooler, or a flag was left set by a run that did not end cleanly.
+Every later acquisition command is refused for the same reason, so
+answering the script's dialog with **Cancel**, as the operator did, is
+right: OK would only carry the fault into the next step. Check, in order: nothing else is running on the console (status
+bar, other TopSpin windows, IconNMR); type `stop`, and `halt` if `stop`
+does not clear it; open the spooler (`spooler`) and make sure it is
+empty; if TopSpin still claims an acquisition, close and restart TopSpin.
+Then start the script again — the desk test does not need repeating. If
+it recurs, send a photo of the spooler window and of the status bar with
+the message.
+
 ---
 
 ## 2. During / after the run (Bruker TopSpin)
@@ -616,6 +634,63 @@ re-zip a partially extracted tree.
   row); `calibration.row_probe` records which. The blocks' rows were
   resized to keep their durations. A console property, recorded, not a
   fault of the session.
+- **"wind-aware halo" WARN, "not built (orientation | coordinates |
+  timing)"** (v0.8) — the report could not place the dark-matter wind for
+  this session: the B₀ orientation is unknown (a Magritek or Nanalysis
+  bundle without `spectrometer.b0_orientation`, or `unknown` recorded), the
+  site has no coordinates (`facility.latitude_deg` / `longitude_east_deg`
+  absent and the registry gazetteer does not know the city), or the noise
+  rows cannot be placed in UTC (no clock-audit block times and no usable
+  `started_local` + `local_timezone_offset_min`). The exclusion headline
+  then stays the v0.7 worst-parallel construction,
+  `halo.wind_model_unavailable` names the reason, no `g90_wind_*` key is
+  written, and the sidereal fit skips with `skip_reason`
+  `wind_model_unavailable: <reason>`. Not a fault of the session:
+  coordinates can be supplied at analysis time (`--meta-override`), and the
+  released numbers are unchanged.
+- **"wind-aware halo: row time zone" WARN** (v0.8) — the rows were timed
+  from `started_local` + `local_timezone_offset_min`, and that offset came
+  from the packing machine's zone (`local_timezone_offset_basis`
+  `packing_machine`) or is unrecorded, not from the console. An hour of zone
+  error rotates the wind angle by 15° of hour angle. Packer users: put the
+  console's `local_timezone_offset_min` in `answers.json`.
+- **"wind-aware halo: row times" WARN** (v0.8) — a
+  `clock_audit.blocks[].row_started_offsets_ms` list was present but not
+  acceptable (a noise block without a list while another has one, non-numeric
+  entries, a length that is not the block's row count, a negative first entry,
+  an entry smaller than the one before it, or a last entry at or beyond the
+  block's wall span), so the rows of every block were spread evenly over the
+  block's wall time instead
+  (`rows_timed_basis` `block_spread`). The misplacement this can cause is
+  bounded by the block's audited excess (about 10 s on a 9.5 h block),
+  under 0.05° of hour angle.
+- **"sidereal-modulation fit" OK, "skipped: ..."** (v0.8) — informational.
+  `skip_reason` is one of exactly these strings: `exclusion_unavailable`
+  (no exclusion, so nothing to modulate),
+  `wind_model_unavailable: orientation | coordinates | timing` (above), or
+  `no modulation leverage in this session's hours` (fewer than 30 rows
+  carry a line power, or the
+  template's std(f) at the wind-aware best offset is below 0.02 — a short
+  run, or one at hours where the wind angle barely moves). The report-level
+  honesty line prints the reason. The remedy is a longer run or one placed
+  across the template's extremum, not a change to the bundle.
+- **"sidereal-modulation fit: rows" WARN** (v0.8) — more than 10% of the
+  rows were removed by the robust clip (|r − median| > 5 × 1.4826 × MAD of
+  the all-row residuals). The primary `fit` is still the clipped one and is
+  not changed silently; `fit_allrows` is recorded beside it. Heavy-tailed
+  per-row powers (Agilent sessions at low SNR) do this.
+- **"sidereal-modulation fit: estimator" WARN** (v0.8) — the row mean of
+  the fixed-shape per-row power differs by more than 10% from the
+  exclusion's `P_net` over the window fraction. The two estimators weigh
+  the dispersive wing and the baseline curvature differently; on the two Oulu
+  sessions with modulation leverage the ratio is 0.93 and 1.04, so the WARN
+  does not fire there. It does fire on SIU session 4 (ratio 1.54), where the
+  alignment gate also fired and the fit is a demonstration. Diagnostic only.
+- **The exclusion headline of a v0.8 report differs from the v0.7.9 report
+  of the same bundle** — expected. v0.8 reports the wind at its actual
+  direction (`g90_wind_conservative`); the v0.7 worst-parallel number is
+  still in the report as the robustness line and under its old keys,
+  unchanged. Both are UNPUBLISHED, preliminary constructions.
 
 ---
 

@@ -47,6 +47,11 @@ jobs:
           python3 -m pip install --quiet numpy matplotlib
           python3 testing/test_report_qa_flags.py --out-dir "${{ runner.temp }}/qaflags"
 
+      - name: Wind-aware halo construction + sidereal-modulation fit (spec Sec. 7 (v) unit checks; Sec. 7 (vi) recovery on one 240-row synthetic, the untimed skip path and the site combiner; --full for null, lab cycle, orientation skip)
+        # Quick mode (one 240-row report, a few minutes); the long cases run
+        # locally with --full.  Needs the numpy install of the previous step.
+        run: python3 testing/test_wind_sidereal.py --out-dir "${{ runner.temp }}/windsidereal"
+
       - name: Construct and validate a synthetic v1.2 bundle (back-compat; what the TopSpin orchestrator writes)
         run: |
           BUNDLE=$(python3 testing/make_synthetic_bundle.py --schema-version 1.2 --out-dir "${{ runner.temp }}")
