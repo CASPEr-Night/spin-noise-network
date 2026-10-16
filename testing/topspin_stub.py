@@ -46,12 +46,17 @@ import os
 # In production TopSpin they do not exist and the script's NameError
 # guards skip them.
 __all__ = [
+    "SPIN_NOISE_STUB",
     "MSG", "ERRMSG", "CONFIRM", "SELECT", "INPUT_DIALOG", "VIEWTEXT",
     "SHOW_STATUS", "XCMD", "WAIT_TILL_DONE", "GETPAR", "GETPARSTAT",
     "PUTPAR", "GETACQUDIM", "CURDATA", "RE", "WR", "RE_PATH", "EXIT",
     "SLEEP", "ZG",
     "HARNESS_WALL_MS", "HARNESS_ADVANCE_S", "HARNESS_MOCK_ACQ",
 ]
+
+# Marker for the script: the API it imported is this stub, not TopSpin.
+# ask_select_live() must not open a real Swing window under the harness.
+SPIN_NOISE_STUB = 1
 
 WAIT_TILL_DONE = 0            # sentinel; value irrelevant, only the name
 

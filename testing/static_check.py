@@ -26,7 +26,8 @@ Python 3, and is checked, in order:
   3. HARDWARE GUARDING: every spectrometer-hardware command goes through
      the guarded wrapper (safe_hw_cmd / the hw_skip()-guarded ZG() in
      run_zg_and_wait), so SIMULATE and DESKTEST can never touch hardware:
-       - XCMD( appears only inside safe_xcmd (and the desk-test stub);
+       - XCMD( appears only inside safe_xcmd / _xcmd_once (and the
+         desk-test stub); _xcmd_once( is called only from safe_xcmd;
        - safe_xcmd( is called only from safe_hw_cmd;
        - safe_hw_cmd checks hw_skip() before delegating;
        - ZG() appears only inside run_zg_and_wait, after an
@@ -287,8 +288,13 @@ def find_offenders(token, allowed_owners, skip_def_of=None):
     return bad
 
 
-bad = find_offenders("XCMD(", {"safe_xcmd", "XCMD"}, skip_def_of="XCMD")
-check("guard: XCMD( only inside safe_xcmd (+ desk stub)",
+bad = find_offenders("XCMD(", {"safe_xcmd", "_xcmd_once", "XCMD"},
+                     skip_def_of="XCMD")
+check("guard: XCMD( only inside safe_xcmd / _xcmd_once (+ desk stub)",
+      not bad, "; ".join(bad))
+
+bad = find_offenders("_xcmd_once(", {"safe_xcmd"}, skip_def_of="_xcmd_once")
+check("guard: _xcmd_once( called only from safe_xcmd",
       not bad, "; ".join(bad))
 
 bad = find_offenders("safe_xcmd(", {"safe_hw_cmd"}, skip_def_of="safe_xcmd")
@@ -637,6 +643,12 @@ check("guard: the stub models the console -- PARMODE by name only "
       and '"ts44-f1echo"' in STUB_SRC and '"ts44-dimlie"' in STUB_SRC
       and '"ts44-f1route"' in STUB_SRC and '"ts44-f1mismatch"' in STUB_SRC
       and 'raise NameError("GETACQUDIM")' in STUB_SRC)
+check("stub: exports SPIN_NOISE_STUB (the non-modal operator window must "
+      "never open under the harness) and the script opens it only when "
+      "IN_TOPSPIN and not STUBBED",
+      '"SPIN_NOISE_STUB"' in STUB_SRC and "SPIN_NOISE_STUB = 1" in STUB_SRC
+      and "if IN_TOPSPIN and not STUBBED:" in SRC
+      and "STUBBED = int(SPIN_NOISE_STUB)" in SRC)
 check("guard: the stub models the observed consoles (3.7.0 Oulu, 4.4.0 "
       "Torino) on EVERY flavor -- PARMODE 2D accepted, no acqu2 from a "
       "scripted write, the console's dialog on F1 access, every write into "

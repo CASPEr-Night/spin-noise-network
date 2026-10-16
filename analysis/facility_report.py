@@ -3209,7 +3209,8 @@ def lock_referencing_sign(bundle, meta, refs, noise_expnos,
                        " -- equal to the report's line_position_guess_hz"
                        if abs(guess - f_app) < 0.05 else
                        " -- %+.1f Hz from the report's line_position_guess_"
-                       "hz %.1f Hz, which averages every readable reference"
+                       "hz %.1f Hz, which averages the seed-anchoring "
+                       "references (science.reference_seed)"
                        % (f_app - guess, guess)))
     sign_status["referencing_check"] = rc
     label = "verdict %s%s" % (rc.get("verdict"),
@@ -3489,13 +3490,14 @@ def _wind_row_times(meta, noise_res):
             exps[int(e.get("expno"))] = e
         except (TypeError, ValueError):
             pass
-    blocks, row_offsets = {}, {}
+    blocks, row_offsets, expected = {}, {}, {}
     for b in (meta.get("clock_audit") or {}).get("blocks") or []:
         ws, we = b.get("wall_start_ms"), b.get("wall_end_ms")
         try:
             if _is_num(ws) and _is_num(we) and float(we) > float(ws):
                 ex = int(b.get("expno"))
                 blocks[ex] = (float(ws), float(we))
+                expected[ex] = b.get("ocxo_expected_s")
                 offs = b.get("row_started_offsets_ms")
                 if isinstance(offs, list):
                     row_offsets[ex] = offs
@@ -3559,17 +3561,61 @@ def _wind_row_times(meta, noise_res):
                             blocks[ex][0]
                             + float(offs[a if a is not None else j]))
                 return times, "per_row", tz, tz_basis, None, ext("clock_audit")
+        # v0.8.1: the console's own acquisition stamps bound a block whose
+        # zg returned long after the acquisition ended.  Torino, 2026-10-01:
+        # acqus DATE_START..DATE span 9.58 h = 1791 x 19.25 s, the script's
+        # wall span 18.54 h -- zg completed 8.96 h after the last row.
+        # Spreading the rows over the wall span mis-times the late rows by
+        # hours and the wind angle with them.  The acqus span is used when
+        # it is shorter than the wall span by more than 10% (and a minute)
+        # and itself consistent with the block's expected duration; the QA
+        # row names the gap.  Spans come from the main flow
+        # (noise_res['_acq_spans'], private): Bruker bundles only.
+        acq = noise_res.get("_acq_spans") or {}
+        late = []
         for ex in order:
-            place(ex, hw.utc_from_epoch_ms(blocks[ex][0]),
-                  hw.utc_from_epoch_ms(blocks[ex][1]))
-        note = None
+            t0_ms, t1_ms = blocks[ex]
+            wall = (t1_ms - t0_ms) / 1000.0
+            sp = acq.get(ex)
+            use_acq = False
+            if (isinstance(sp, (list, tuple)) and len(sp) >= 2
+                    and _is_num(sp[0]) and _is_num(sp[1])
+                    and float(sp[1]) > float(sp[0])):
+                aspan = float(sp[1]) - float(sp[0])
+                expct = expected.get(ex)
+                plausible = (not (_is_num(expct) and expct > 0)
+                             or 0.5 * float(expct) <= aspan
+                             <= 1.5 * float(expct))
+                if wall - aspan > max(60.0, 0.10 * aspan) and plausible:
+                    use_acq = True
+            if use_acq:
+                place(ex, hw.utc_from_epoch_ms(float(sp[0]) * 1000.0),
+                      hw.utc_from_epoch_ms(float(sp[1]) * 1000.0))
+                late.append("expno %s: the acquisition stamps (acqus "
+                            "DATE_START..DATE) span %.2f h, the script's "
+                            "wall time %.2f h -- zg returned %.2f h after "
+                            "the acquisition ended"
+                            % (ex, aspan / 3600.0, wall / 3600.0,
+                               (t1_ms / 1000.0 - float(sp[1])) / 3600.0))
+            else:
+                place(ex, hw.utc_from_epoch_ms(t0_ms),
+                      hw.utc_from_epoch_ms(t1_ms))
+        basis = "block_spread"
+        notes = []
         if reasons:
-            note = ("clock_audit.blocks[].row_started_offsets_ms ignored "
-                    "(%s): every row is spread over its block's wall time "
-                    "instead (rows_timed_basis block_spread)"
-                    % "; ".join(reasons))
-        return times, "block_spread", tz, tz_basis, None, ext("clock_audit",
-                                                              note)
+            notes.append("clock_audit.blocks[].row_started_offsets_ms ignored "
+                         "(%s): every row is spread over its block's wall "
+                         "time instead (rows_timed_basis block_spread)"
+                         % "; ".join(reasons))
+        if late:
+            basis = "block_spread_acqus"
+            notes.append("%s; the rows of %s are spread over the acquisition "
+                         "stamps instead of the wall time (rows_timed_basis "
+                         "block_spread_acqus)"
+                         % ("; ".join(late),
+                            "that block" if len(late) == 1 else "those blocks"))
+        note = " --- ".join(notes) or None
+        return times, basis, tz, tz_basis, None, ext("clock_audit", note)
     if tz is None:
         return (None, None, tz, tz_basis,
                 "no clock_audit block wall times and no "
@@ -3608,6 +3654,33 @@ def _wind_row_times(meta, noise_res):
               starts[ex] + datetime.timedelta(seconds=float(rs) * n_of(ex)))
     return (times, "block_spread_estimated", tz, tz_basis, None,
             ext("started_local"))
+
+
+def _acqus_time_spans(bundle, noise_res):
+    """{expno: (DATE_START, DATE)} in Unix seconds from each noise expno's
+    acqus (Bruker).  TopSpin writes DATE_START when zg starts and DATE when
+    the acquisition finishes; the audit trail's 'completed at' and the
+    script's wall_end_ms are the zg command's RETURN, which can come hours
+    later (Torino, 2026-10-01: 8.96 h).  Empty when the files or the
+    fields are absent (Agilent bundles, old packers)."""
+    out = {}
+    if bundle is None or not noise_res:
+        return out
+    exs = list(noise_res.get("expnos") or [])
+    if not exs and noise_res.get("expno") is not None:
+        exs = [noise_res.get("expno")]
+    for ex in exs:
+        try:
+            a = bundle.acqus(int(ex))
+        except Exception:
+            a = {}
+        try:
+            ds, de = float(a.get("DATE_START")), float(a.get("DATE"))
+        except (TypeError, ValueError):
+            continue
+        if ds > 0 and de > ds:
+            out[int(ex)] = (ds, de)
+    return out
 
 
 def wind_session_model(meta, noise_res, vendor):
@@ -3818,6 +3891,22 @@ def axion_exclusion(meta, noise_res, refs, detection, floor_cal, ladder,
                          "the statistical term")
         return out
     readable = [r for r in refs if r.get("readable") and r.get("A0_counts")]
+    # v0.8.1: a reference that carries no line carries no transduction
+    # either -- Torino 2026-10-01, the signal-free closing reference (A0
+    # 1/1500 of the opening one) halved the mean kappa*M0 and doubled the
+    # bound.  The same line-quality gate that anchors the seed decides;
+    # with none passing, all readable references are used, as before.
+    gated = [r for r in readable if _line_quality_ok(r)]
+    km0_excluded = [r for r in readable if not _line_quality_ok(r)]
+    km0_gate_note = None
+    if gated:
+        readable = gated
+    else:
+        if readable:
+            km0_gate_note = ("no reference passes the line-quality gate; all "
+                             "%d readable reference(s) used (the pre-v0.8.1 "
+                             "rule) -- kappa*M0 unverified" % len(readable))
+        km0_excluded = []
     if not readable:
         out["reason"] = ("no readable reference with an A0 "
                          "back-extrapolation: no transduction constant")
@@ -3859,6 +3948,10 @@ def axion_exclusion(meta, noise_res, refs, detection, floor_cal, ladder,
             "kappa_M0_counts": float(r["A0_counts"]
                                      / math.sin(math.radians(tip)) * bridge)})
     if not per_ref:
+        if km0_excluded:
+            unresolved.append("excluded by the line-quality gate: %s" % ", ".join(
+                "expno %s (%s)" % (r.get("expno"), r.get("role"))
+                for r in km0_excluded))
         out["reason"] = "reference tip angle unresolved (%s)" % " --- ".join(
             unresolved)
         return out
@@ -3908,8 +4001,22 @@ def axion_exclusion(meta, noise_res, refs, detection, floor_cal, ladder,
     if bridge_note:
         d_note += " --- " + bridge_note
     out["construction"] = _construction_text(d_text, bridged)
+    if km0_gate_note:
+        km0_note += " --- " + km0_gate_note
+    if km0_excluded:
+        km0_note += (" --- excluded by the line-quality gate: %s"
+                     % "; ".join("expno %s (%s, A0 %.4g counts): %s"
+                                 % (r.get("expno"), r.get("role"),
+                                    float(r["A0_counts"]),
+                                    (r.get("line_quality") or {}).get("why"))
+                                 for r in km0_excluded))
     transduction = {"kappa_M0_counts": km0, "basis": km0_note,
                     "references": per_ref, "matched_references": matched,
+                    "references_excluded": [
+                        {"expno": r.get("expno"), "role": r.get("role"),
+                         "A0_counts": float(r["A0_counts"]),
+                         "why": (r.get("line_quality") or {}).get("why")}
+                        for r in km0_excluded] or None,
                     "rg_bridged": bridged, "rg_bridge_note": bridge_note,
                     "noise_rg": rg_noise, "unresolved": unresolved or None}
 
@@ -5347,9 +5454,37 @@ def analyze_clock_audit(meta, bundle=None):
                "ocxo_recorded_s": rec, "expected_source": src,
                "rows": n_rows}
         row.update(rinfo)
+        # v0.8.1: the acquisition stamps.  A wall time far longer than the
+        # acqus DATE_START..DATE span means zg RETURNED late, not that the
+        # rows took longer (Torino 2026-10-01: 18.54 h wall, 9.58 h
+        # acquisition); such a block is not a clock measurement at all.
+        # Only an ACQUISITION block (one with an OCXO prediction) can be
+        # judged this way: the setup block's wall time is tune, shim and
+        # dialogs by design (pre-merge regression, torino_s2 expno 1).
+        late_s = None
+        if (bundle is not None and isinstance(exp, (int, float))
+                and exp > 0):
+            try:
+                a = bundle.acqus(int(b.get("expno")))
+                ds, de = float(a.get("DATE_START")), float(a.get("DATE"))
+                if (de > ds > 0 and 0.5 * exp <= (de - ds) <= 1.5 * exp
+                        and wall_s - (de - ds) > max(60.0, 0.1 * (de - ds))):
+                    late_s = wall_s - (de - ds)
+                    row["acqus_span_s"] = de - ds
+                    row["zg_returned_late_s"] = late_s
+            except Exception:
+                late_s = None
         if exp is None:
             row.update({"used": False,
                         "why": "no OCXO prediction (tune/shim/dialog time)"})
+        elif late_s is not None:
+            row.update({"used": False,
+                        "why": "zg returned %.2f h after the acquisition "
+                               "ended (acqus DATE_START..DATE span %.0f s, "
+                               "wall %.0f s): the wall time is not the "
+                               "acquisition's duration"
+                               % (late_s / 3600.0, row["acqus_span_s"],
+                                  wall_s)})
         elif not isinstance(exp, (int, float)) or exp <= 0 or wall_s <= 0:
             row.update({"used": False, "why": "non-positive duration"})
         elif abs(wall_s / exp - 1.0) > CLOCK_CONSISTENCY_MAX:
@@ -8137,9 +8272,42 @@ def main(argv=None):
             refs.append(analyze_reference_exp(bundle, e, fs_default))
     readable_refs = [r for r in refs if r.get("readable") and
                      r.get("line_center_hz") is not None]
-    if readable_refs:
-        f0_guess = float(np.mean([r["line_center_hz"] for r in readable_refs]))
-        w_ref = float(np.mean([r["fwhm_amp_hz"] for r in readable_refs
+    # v0.8.1: a reference that carries no line must not anchor the seed.
+    # Torino, 2026-10-01: the closing reference of the 18.5 h session ran
+    # on a probe without the sample's signal (A0 1/1500 of the opening
+    # one), was halted after four rows, and its per-row 'line centres'
+    # were noise argmaxes 250-1450 Hz out; the mean of a good and a bad
+    # reference put the +/-40 Hz search window 314 Hz from the line and
+    # 1791 rows with the dip plainly in every one were read as
+    # featureless.  The carrier-displacement calibration's gate
+    # (reference_line_quality: peak >= 10 robust sigmas, width resolved
+    # and off the fit bound) decides which references anchor; with none
+    # passing, all readable ones do, as before, and the report says so.
+    seed_refs = [r for r in readable_refs if _line_quality_ok(r)]
+    excluded_refs = [r for r in readable_refs if not _line_quality_ok(r)]
+    seed_basis = "every readable reference passes the line-quality gate"
+    if not readable_refs:
+        seed_basis = ("no readable reference: no seed -- the line position "
+                      "0.0 Hz is a placeholder, not a measurement")
+    if readable_refs and not seed_refs:
+        seed_refs = readable_refs
+        excluded_refs = []
+        seed_basis = ("no reference passes the line-quality gate; every "
+                      "readable reference anchors the seed (the pre-v0.8.1 "
+                      "rule) -- treat the line position as unverified")
+    elif excluded_refs:
+        seed_basis = ("%s excluded from the seed by the line-quality gate"
+                      % ", ".join("expno %s (%s)" % (r["expno"], r.get("role"))
+                                  for r in excluded_refs))
+    reference_seed = {
+        "anchoring_expnos": [r["expno"] for r in seed_refs],
+        "excluded": [{"expno": r["expno"], "role": r.get("role"),
+                      "why": (r.get("line_quality") or {}).get("why")}
+                     for r in excluded_refs],
+        "basis": seed_basis}
+    if seed_refs:
+        f0_guess = float(np.mean([r["line_center_hz"] for r in seed_refs]))
+        w_ref = float(np.mean([r["fwhm_amp_hz"] for r in seed_refs
                                if r.get("fwhm_amp_hz")]) or 12.0)
     else:
         f0_guess, w_ref = 0.0, 12.0
@@ -8314,6 +8482,10 @@ def main(argv=None):
             noise_res = res
             f0_detect = f0_guess + (seed or 0.0)
             break
+    if noise_res is not None:
+        # the console's acquisition stamps, for the row timing of a block
+        # whose zg returned late (private; read by _wind_row_times)
+        noise_res["_acq_spans"] = _acqus_time_spans(bundle, noise_res)
     sign_status = frequency_axis_sign_status(bundle, meta, f0_guess)
     # ---- 3c. carrier-displacement sign calibration (vendor bundles):
     # sweep_signcal 1Ds are analyzed like references and paired with the
@@ -8578,14 +8750,19 @@ def main(argv=None):
     ref_pair = reference_pair_check(refs)
     floor_cal = {}
     if noise_res and readable_refs:
-        opens = [r for r in readable_refs if r["role"] == "reference_open"]
-        closes = [r for r in readable_refs if r["role"] == "reference_close"]
+        # the open/close drift and A0 ratio compare LINES: only the
+        # references that anchor the seed (line-quality gate) enter
+        opens = [r for r in seed_refs if r["role"] == "reference_open"]
+        closes = [r for r in seed_refs if r["role"] == "reference_close"]
         if opens and closes:
             floor_cal["line_stability_open_close_hz"] = float(
                 closes[0]["line_center_hz"] - opens[0]["line_center_hz"])
             if opens[0].get("A0_counts") and closes[0].get("A0_counts"):
                 floor_cal["a0_ratio_close_over_open"] = float(
                     closes[0]["A0_counts"] / opens[0]["A0_counts"])
+        elif reference_seed["excluded"]:
+            floor_cal["line_stability_open_close_note"] = (
+                "not computed: " + seed_basis)
         rg_noise = noise_res.get("rg") or 1.0
         rg_ref = readable_refs[0].get("rg") or 1.0
         gain = rg_noise / rg_ref if rg_ref else None
@@ -8702,6 +8879,20 @@ def main(argv=None):
     if ref_pair and not ref_pair.get("matched"):
         qa.append({"level": "WARN", "check": "reference pair",
                    "detail": ref_pair["note"]})
+    if reference_seed.get("excluded"):
+        qa.append({"level": "WARN", "check": "reference line quality",
+                   "detail": "%s -- excluded from the line-position seed, "
+                             "from the open/close stability and from the "
+                             "transduction constant (kappa*M0); the seed "
+                             "is anchored on expno %s"
+                             % ("; ".join("expno %s (%s): %s"
+                                          % (x["expno"], x["role"], x["why"])
+                                          for x in reference_seed["excluded"]),
+                                ", ".join(str(e) for e in
+                                          reference_seed["anchoring_expnos"]))})
+    elif "unverified" in (reference_seed.get("basis") or ""):
+        qa.append({"level": "WARN", "check": "reference line quality",
+                   "detail": reference_seed["basis"]})
     if noise_aggregation and noise_aggregation.get("time_order_note"):
         qa.append({"level": "WARN", "check": "noise row time order",
                    "detail": noise_aggregation["time_order_note"]})
@@ -9028,6 +9219,7 @@ def main(argv=None):
 
     report["science"] = strip_private({
         "line_position_guess_hz": f0_guess,
+        "reference_seed": reference_seed,
         "reference_linewidth_hz": w_ref,
         "reference_linewidth_note": (
             "magnitude-spectrum FWHM of the pulsed reference line (fit on "

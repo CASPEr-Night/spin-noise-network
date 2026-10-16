@@ -217,22 +217,69 @@ v0.7.5. Tuning and P90 calibration done beforehand are likewise harmless
 no-ops on top of a good state.
 
 **TopSpin answers `Acquisition is already running` when the script calls
-`atma` (and again at the gain ladder's `zg`), before anything has been
-acquired** (Avance III 400, TopSpin 3.2, 2026-10-06; the desk test on the
-same console had passed).
-The console's acquisition state is busy or stuck — not the script, which
-has not started an acquisition yet. Another experiment or an automation
-(IconNMR, the spooler queue) owns the acquisition, a `delayed` entry sits
-in the spooler, or a flag was left set by a run that did not end cleanly.
-Every later acquisition command is refused for the same reason, so
-answering the script's dialog with **Cancel**, as the operator did, is
-right: OK would only carry the fault into the next step. Check, in order: nothing else is running on the console (status
-bar, other TopSpin windows, IconNMR); type `stop`, and `halt` if `stop`
-does not clear it; open the spooler (`spooler`) and make sure it is
-empty; if TopSpin still claims an acquisition, close and restart TopSpin.
-Then start the script again — the desk test does not need repeating. If
-it recurs, send a photo of the spooler window and of the status bar with
-the message.
+`atma`, the gain-ladder rungs each end in the script's "cannot see a
+raw-data file" dialog, and the spooler window shows `atma Running` /
+`topshim Waiting`** (Avance III 400, TopSpin 3.2, 2026-10-06 and
+2026-10-15; the desk test on the same console had passed).
+The console's command spooler is set to **queue acquisition commands**
+("Enable Auto-Spooling", under *Administration Items* in the User
+Preferences — command `set`, or *Options → Preferences*; Bruker's
+default is off). With it on, `zg`, `go`, `rga`, `atma` and `topshim`
+are not executed when called — they are put in the spooler queue and the
+call returns at once. The script, told that `atma` had finished, walked
+on to `topshim` (queued behind it), to the pulse calibration and to the
+gain ladder, whose `zg` calls were refused because the spooler's `atma`
+job now owned the acquisition — hence `Acquisition is already running`
+from `atma` itself, and no `fid` for any rung. Answering the script's
+dialogs with **Cancel** was right.
+**Script v0.8.1 and later issue every spoolable command with the `noqu`
+("no queue") prefix — the prefix TopSpin 4 automation uses to run a
+command directly whatever the preference; the script checks by timing
+that it did** — and time every hardware command: an `atma`, `topshim`,
+`rga` or `zg` that comes back in under a few seconds on a live console
+did not run and the status line says so; a fast `topshim` goes straight
+to the manual-shim dialog, and the first fast `atma`/`pulsecal` asks
+whether to stop (recommended) with this explanation. The bundle
+records what happened (`environment.spooler_noqu`,
+`environment.hw_fast_returns`). On a console whose TopSpin rejects
+the prefix the script falls back to the bare command once and keeps
+the answer for the session — then the preference itself must be
+switched off: **`set` → Administration Items → untick *Enable
+Auto-Spooling*** (needs the NMR-superuser login on most consoles),
+open the spooler (`spooler`) and delete anything waiting, `stop`, and
+start the script again — the desk test does not need repeating.
+Before v0.8.1 the only fix was the preference.
+
+**The sweep's "set field step" (or "baseline" / "restore field")
+dialog is open and the BSMS Control Suite does not react — the lock
+shift cannot be changed while the instructions are on screen**
+(script v0.8.0 and earlier; Avance III HD 500, 2026-10-16, the first
+live sweep ended at its first step this way).
+TopSpin's own dialogs are application-modal: while one is open nothing
+else in TopSpin takes input, the BSMS Control Suite and the command
+line included. **From v0.8.1 every step that needs the BSMS window —
+the lock and field-sweep questions at the start, the sweep's baseline,
+step, lock-off and restore dialogs — opens as a separate window that
+does not block TopSpin** where the console can show one (its last line
+says so); set the shift, re-lock, lock off, then come back and press
+the button. The window stays on top; if it is hidden behind TopSpin,
+it is still waiting. If the dialog you see is TopSpin's own (no such
+last line; the status line said the window was unavailable), the
+console could not show it: answer *End the sweep here* as on v0.8.0 —
+everything acquired so far is kept and the closing reference still
+runs — and tell us which TopSpin version it was.
+
+**The sweep's restore check reports the line hundreds of Hz off the
+baseline (`field_restored: false`, `restored_offset_hz` large) while
+the closing reference right after it sits at the baseline** (Oulu 500,
+2026-10-16: 404 Hz at the check, back within 2 Hz seven seconds later).
+The field was still walking in after the re-lock when the check was
+pressed — autolock captures first and settles after. Nothing is wrong
+with the data: the closing reference, not the check, is the record of
+where the field ended. **From v0.8.1 an off-target reading — at a step
+or at the restore — waits 10 s and measures once more before it is
+recorded or a dialog opens** (`restored_offset_first_hz` /
+`restore_remeasured` keep the first reading).
 
 ---
 

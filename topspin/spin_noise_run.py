@@ -77,6 +77,9 @@
 # ----------------------------------------------------------------------------
 # GLOBAL SWITCHES -- edit here
 # ----------------------------------------------------------------------------
+USE_NOQU = True           # v0.8.1: prefix spoolable commands with 'noqu'
+                          # (argv 'nonoqu' switches it off for a console
+                          # that misbehaves with the prefix)
 SIMULATE = False          # True: skip all spectrometer commands (zg, rga,
                           # atma, topshim, pulsecal) AND the setup blocks
                           # that lead to them.  Dataset bookkeeping, dialogs,
@@ -122,7 +125,7 @@ AUTOSTEP = False          # True (with SWEEP): TIER-2 programmatic field
 
 # Single source of truth for the script version.  KEEP IN SYNC with the
 # repository VERSION file (testing/static_check.py enforces the match).
-SCRIPT_VERSION  = "0.8.0"
+SCRIPT_VERSION  = "0.8.1"
 # NOTE: no module constant named PROGRAM_VERSION -- TopSpin's TopCmds
 # exports a FUNCTION of that name and `from TopCmds import *` (below)
 # overwrote the alias, so v0.7.3 bundles carry "<function PROGRAM_VERSION
@@ -406,6 +409,15 @@ except ImportError:
     def SLEEP(seconds):
         pass
 
+# The Jython test harness stubs TopCmds (testing/topspin_stub.py) and
+# exports this marker; the non-modal operator window (ask_select_live)
+# must not open a real window there.
+STUBBED = 0
+try:
+    STUBBED = int(SPIN_NOISE_STUB)
+except CATCHABLE:
+    STUBBED = 0
+
 # Java classes: always available under Jython, used for SHA-256 / ZIP /
 # timezone (the corresponding Python stdlib modules are NOT reliable on
 # old TopSpin Jython builds).
@@ -481,6 +493,8 @@ try:
             SWEEP = True
         if _al in ("autostep", "--autostep"):
             AUTOSTEP = True
+        if _al in ("nonoqu", "--nonoqu", "--no-noqu"):
+            USE_NOQU = False       # escape hatch: never prefix (v0.8.1)
 except CATCHABLE:
     pass
 
@@ -1007,19 +1021,52 @@ def remove_tree(path):
 # Defensive TopSpin wrappers
 # ============================================================================
 
-def safe_xcmd(cmd, describe=None):
-    """Run a TopSpin command; return (ok, result).
+# ----------------------------------------------------------------------------
+# TopSpin's command spooler.  With "Enable Auto-Spooling" ON in the User
+# Preferences (Options > Preferences, command 'set', under Administration
+# Items; Bruker's default is OFF) the console does not EXECUTE zg, go, rga,
+# atma or topshim -- it QUEUES them: the call returns at once, the script
+# walks on believing the step done, and the queued job later collides with
+# the script's own acquisitions ("Acquisition is already running"; every
+# zg refused; no raw-data file for any rung).  Oulu's Avance III 400
+# (TopSpin 3.2) runs with auto-spooling on: 2026-10-06 and again
+# 2026-10-15, the spooler window showing "atma Running / topshim Waiting"
+# while the script was already at the gain ladder.  The escape is the
+# 'noqu' prefix ("no queue": run the command directly, whatever the
+# preference) -- the prefix the autostep tier already uses for lopo/lock
+# and the one third-party TopSpin 4 automation issues for zg and lock.
+# Every spoolable hardware command is therefore issued as 'noqu <cmd>'
+# first; a console that does not know the prefix reports failure, the
+# bare command is retried once, and the answer is remembered for the
+# session.  As a net under both, every hardware command is TIMED: a live
+# atma, topshim, rga or zg that comes back faster than the acquisition it
+# stands for could possibly take did not run, and the operator is told so
+# -- with the preference to switch off -- instead of discovering it rung
+# by rung.
+# ----------------------------------------------------------------------------
+NOQU_VERBS = ("atma", "topshim", "pulsecal", "rga", "zg", "lopo", "lock")
+NOQU_STATE = {"supported": None,    # None: untested; 1: works; 0: not here
+              "argv_disabled": int(not USE_NOQU),   # 'nonoqu' given
+              "timing_checked": 0}  # 1 once the prefix's timing self-test
+                                    # is settled (a prefixed command took
+                                    # real time, or the test was run)
+NOQU_SELFTEST_VERBS = ("atma", "topshim", "pulsecal")   # re-issue harmless
+HW_MIN_SECONDS = {"atma": 4.0, "topshim": 4.0, "pulsecal": 4.0,
+                  "rga": 1.5, "zg": 1.0}
+FAST_RETURNS = []                   # [[command, seconds], ...] -> meta
 
-    XCMD's documented default is wait=WAIT_TILL_DONE (the call blocks until
-    the command is finished).  If the command is unknown / the call raises,
-    we return ok=0 so the caller can degrade to an operator dialog.
 
-    NOTE: hardware commands must NOT call this directly -- they go through
-    safe_hw_cmd() below, which mocks them in SIMULATE / DESKTEST mode.
-    """
-    if describe is None:
-        describe = cmd
-    say("running: %s" % describe)
+def _hw_verb(cmd):
+    toks = str(cmd).strip().split()
+    if toks and toks[0] == "noqu":
+        toks = toks[1:]
+    if toks:
+        return toks[0]
+    return ""
+
+
+def _xcmd_once(cmd):
+    """One XCMD call; (ok, result) with the manual's negative-result rule."""
     try:
         ct = XCMD(cmd)               # blocks (WAIT_TILL_DONE default)
         res = None
@@ -1046,6 +1093,125 @@ def safe_xcmd(cmd, describe=None):
         except CATCHABLE:
             pass
         return (0, None)
+
+
+def _fast_return_check(bare, elapsed):
+    """A live hardware command that returned faster than it could have
+    run did not run: queued by the spooler (see the note above), or
+    accepted as a no-op by a console that does not act on it.  Recorded
+    in meta.  Returns 1 when the caller should treat the command as NOT
+    run (so its operator-dialog fallback follows), else 0.  topshim is
+    silent (its quick refusal with the lock off is the documented path);
+    the first fast atma/pulsecal asks the operator, who is at the
+    console at that stage, whether to stop and fix the preference."""
+    verb = _hw_verb(bare)
+    floor = HW_MIN_SECONDS.get(verb)
+    if floor is None or elapsed >= floor:
+        return 0
+    FAST_RETURNS.append([bare, round(elapsed, 2)])
+    say("WARNING: '%s' returned after %.1f s -- too fast to have run "
+        "(spooler auto-spooling, or a no-op on this console)"
+        % (bare, elapsed))
+    if verb not in ("atma", "topshim", "pulsecal"):
+        # rga and zg are recorded only: both have their own handling
+        # (the dataset's RG stands; run_zg_and_wait waits the block out
+        # and checks the raw data), and run_rga's fallback is a MODAL
+        # dialog that must never open at the unattended noise block
+        # (referee F1, 2026-10-16).
+        return 0
+    if verb == "topshim":
+        return 1
+    if verb in ("atma", "pulsecal") and len(
+            [f for f in FAST_RETURNS if _hw_verb(f[0]) in
+             ("atma", "pulsecal")]) == 1:
+        ans = CONFIRM(
+            "spin_noise_run: did '%s' run?" % verb,
+            "The command '%s' came back after %.1f s.  On a\n"
+            "spectrometer that is too fast for it to have run.\n\n"
+            "Two known causes.  (1) TopSpin's command spooler is set to\n"
+            "queue acquisition commands ('Enable Auto-Spooling' under\n"
+            "Administration Items in the User Preferences, command 'set';\n"
+            "Bruker's default is off): the command is WAITING in the\n"
+            "spooler (type 'spooler' to see the queue) and will collide\n"
+            "with the script's own acquisitions later ('Acquisition is\n"
+            "already running').  (2) This console accepts the command\n"
+            "but does nothing (no ATM unit; or it does not know the\n"
+            "'noqu' prefix -- start the script with 'xpy spin_noise_run\n"
+            "nonoqu' to drop it).\n\n"
+            "If the spooler shows a waiting job: press Cancel, switch\n"
+            "Auto-Spooling OFF, empty the queue, start the run again.\n"
+            "Otherwise press OK: the script treats the step as NOT done\n"
+            "and asks you to do it by hand."
+            % (verb, elapsed))
+        if ans != 1:
+            abort("Aborted: '%s' did not run (spooler auto-spooling, or "
+                  "a no-op on this console)" % verb)
+    return 1
+
+
+def safe_xcmd(cmd, describe=None):
+    """Run a TopSpin command; return (ok, result).
+
+    XCMD's documented default is wait=WAIT_TILL_DONE (the call blocks until
+    the command is finished).  If the command is unknown / the call raises,
+    we return ok=0 so the caller can degrade to an operator dialog.
+
+    v0.8.1: spoolable commands (NOQU_VERBS) are issued as 'noqu <cmd>'
+    (the spooler note above); a console that rejects the prefix gets the
+    bare command once and is remembered.  Every call is timed.
+
+    NOTE: hardware commands must NOT call this directly -- they go through
+    safe_hw_cmd() below, which mocks them in SIMULATE / DESKTEST mode.
+    """
+    if describe is None:
+        describe = cmd
+    say("running: %s" % describe)
+    bare = str(cmd).strip()
+    if bare.startswith("noqu "):
+        bare = bare[5:].strip()
+    verb = _hw_verb(bare)
+    floor = HW_MIN_SECONDS.get(verb)
+    t_start = time.time()
+    if not USE_NOQU or verb not in NOQU_VERBS \
+            or NOQU_STATE["supported"] == 0:
+        ok, res = _xcmd_once(bare)
+    else:
+        ok, res = _xcmd_once("noqu " + bare)
+        if ok:
+            NOQU_STATE["supported"] = 1
+            el = time.time() - t_start
+            if floor is not None and el >= floor:
+                NOQU_STATE["timing_checked"] = 1
+            elif floor is not None and not NOQU_STATE["timing_checked"] \
+                    and verb in NOQU_SELFTEST_VERBS:
+                # Accepted but instantaneous, and no prefixed command has
+                # yet been seen to take real time: either the spooler
+                # queued it, or this console answers an unknown 'noqu'
+                # with success and did nothing.  The bare command decides
+                # once: if IT takes its time, the prefix is useless here
+                # and is dropped for the session (referee H1, 2026-10-16).
+                say("'noqu %s' returned in %.1f s; testing '%s' without "
+                    "the prefix" % (bare, el, bare))
+                t_bare = time.time()
+                ok_b, res_b = _xcmd_once(bare)
+                if ok_b and time.time() - t_bare >= floor:
+                    NOQU_STATE["supported"] = 0
+                    say("the 'noqu' prefix is a no-op on this console; "
+                        "bare commands from now on")
+                    ok, res, t_start = ok_b, res_b, t_bare
+                else:
+                    NOQU_STATE["timing_checked"] = 1
+        elif NOQU_STATE["supported"] is None:
+            # The first prefixed call failed: the prefix, or the command
+            # itself?  The bare command decides -- once per session.
+            say("'noqu %s' failed; retrying '%s' without the prefix"
+                % (bare, bare))
+            ok, res = _xcmd_once(bare)
+            if ok:
+                NOQU_STATE["supported"] = 0
+    if ok and _fast_return_check(bare, time.time() - t_start):
+        return (0, res)
+    return (ok, res)
 
 
 # The spectrometer-hardware commands this script can issue.  Everything
@@ -1150,6 +1316,152 @@ def ask_fields(title, header, items, defaults, comments=None):
 def ask_select(title, message, buttons, default_abort=1):
     """SELECT wrapper; negative (ESC/close) aborts."""
     v = SELECT(title, message, buttons)
+    try:
+        v = int(v)
+    except CATCHABLE:
+        v = -1
+    if v < 0:
+        if default_abort:
+            abort("Cancelled in dialog: " + title)
+        v = 0
+    return v
+
+
+def _swing_select(title, message, buttons):
+    """A NON-modal window with the message and one button per choice,
+    drawn with Swing (TopSpin's own toolkit) from the script's thread and
+    polled until a button is pressed.  Returns the button index, -1 if
+    the window was closed, None if it could not be shown here (no Swing,
+    headless, or the script runs on the event thread -- polling there
+    would freeze the very window it waits for)."""
+    try:
+        from javax.swing import JDialog, JTextArea, JButton, JPanel
+        from javax.swing import JScrollPane, SwingUtilities
+        from java.awt import BorderLayout, FlowLayout, Font, Insets
+        from java.awt.event import ActionListener, WindowAdapter
+        from java.lang import Runnable, Thread
+    except CATCHABLE:
+        return None
+    try:
+        if SwingUtilities.isEventDispatchThread():
+            return None
+    except CATCHABLE:
+        return None
+    result = [None]
+    holder = [None]
+
+    class _Press(ActionListener):
+        def __init__(self, idx):
+            self.idx = idx
+
+        def actionPerformed(self, event):
+            result[0] = self.idx
+
+    class _Close(WindowAdapter):
+        def windowClosing(self, event):
+            result[0] = -1
+
+        def windowClosed(self, event):
+            # disposed by anything but the X button (TopSpin closing
+            # its windows): the poll below must still end
+            if result[0] is None:
+                result[0] = -1
+
+    class _Build(Runnable):
+        def run(self):
+            dlg = JDialog()
+            dlg.setTitle(title)
+            dlg.setModal(0)
+            dlg.setDefaultCloseOperation(JDialog.DISPOSE_ON_CLOSE)
+            dlg.addWindowListener(_Close())
+            area = JTextArea(message)
+            area.setEditable(0)
+            area.setFont(Font("Monospaced", Font.PLAIN, 13))
+            area.setMargin(Insets(14, 16, 14, 16))
+            row = JPanel(FlowLayout(FlowLayout.RIGHT))
+            i = 0
+            while i < len(buttons):
+                b = JButton(buttons[i])
+                b.addActionListener(_Press(i))
+                row.add(b)
+                i = i + 1
+            dlg.getContentPane().add(JScrollPane(area), BorderLayout.CENTER)
+            dlg.getContentPane().add(row, BorderLayout.SOUTH)
+            dlg.pack()
+            dlg.setLocationRelativeTo(None)
+            try:
+                dlg.setAlwaysOnTop(1)
+            except CATCHABLE:
+                pass
+            holder[0] = dlg          # before it is shown: never a stray
+            dlg.setVisible(1)
+            try:
+                dlg.toFront()
+            except CATCHABLE:
+                pass
+
+    class _Dispose(Runnable):
+        def run(self):
+            try:
+                holder[0].dispose()
+            except CATCHABLE:
+                pass
+
+    try:
+        SwingUtilities.invokeAndWait(_Build())
+    except CATCHABLE:
+        return None
+    if holder[0] is None:
+        return None
+    while result[0] is None:
+        try:
+            Thread.sleep(300)
+        except CATCHABLE:
+            # an interrupt is a stop request: never let it read as a
+            # button press (referee F4, 2026-10-16)
+            try:
+                SwingUtilities.invokeLater(_Dispose())
+            except CATCHABLE:
+                pass
+            abort("Interrupted while waiting in: " + title)
+    try:
+        SwingUtilities.invokeLater(_Dispose())
+    except CATCHABLE:
+        pass
+    return result[0]
+
+
+LIVE_WINDOW_NOTE = ("\n\n(This window does not block TopSpin: the BSMS "
+                    "window and the\ncommand line stay usable while it is "
+                    "open.)")
+
+
+def ask_select_live(title, message, buttons, default_abort=1):
+    """ask_select for a step the operator performs in ANOTHER TopSpin
+    window while reading the instructions: the BSMS Control Suite (lock
+    on/off, lock shift, field sweep) or the command line ('lock off',
+    'bsmsdisp').
+
+    TopSpin's own SELECT/CONFIRM dialogs are application-modal: while one
+    is open nothing else in TopSpin takes input, the BSMS window included,
+    so "set the lock shift, re-lock, then press Continue" cannot be done
+    at all (Oulu 500, 2026-10-16: the first live sweep ended at its first
+    field step for exactly this reason).  This shows a non-modal window of
+    its own (_swing_select) and waits on it; the operator works the BSMS
+    window and comes back to press the button.  Same return convention
+    as ask_select, to which it falls back wherever the window cannot be
+    shown (desk stub, test harness, headless console)."""
+    v = None
+    if IN_TOPSPIN and not STUBBED:
+        try:
+            v = _swing_select(title, message + LIVE_WINDOW_NOTE, buttons)
+        except CATCHABLE:
+            v = None
+        if v is None:
+            say("operator window unavailable on this console -- TopSpin's "
+                "own (blocking) dialog follows for: " + title)
+    if v is None:
+        return ask_select(title, message, buttons, default_abort)
     try:
         v = int(v)
     except CATCHABLE:
@@ -2674,23 +2986,55 @@ def run_zg_and_wait(expno_dir, what, ocxo_s=None, rows=1, attended=1):
         mock_acquisition(expno_dir, rows, ocxo_s)
         return
     ok = 0
-    try:
-        ZG()          # documented per-command function; blocks
-        ok = 1
-    except CATCHABLE:
-        ok = 0
+    t_start = time.time()
+    # v0.8.1: 'noqu zg' through safe_hw_cmd first -- the queue-proof form
+    # (the per-command function below goes through the same dispatcher
+    # and is spooled with everything else when auto-spooling is on: Oulu
+    # 400, 2026-10-15, no rung acquired); the per-command function stays
+    # as the fallback for a console that rejects both forms.
+    ok, _r = safe_hw_cmd("zg", "zg (%s)" % what)
     if not ok:
-        ok, _r = safe_hw_cmd("zg", "zg (%s)" % what)
+        try:
+            ZG()          # documented per-command function; blocks
+            ok = 1
+        except CATCHABLE:
+            ok = 0
+    elapsed = time.time() - t_start
+    # An acquisition call that returns within seconds of a block that
+    # should have taken far longer either never ran (queued) or returned
+    # at START rather than at the end (an undocumented possibility for
+    # the prefixed form, referee H2, 2026-10-16).  The content check must
+    # not read a file that is still being written, and the next zg must
+    # not collide with this one: wait the block's expected duration out
+    # first.  A queued block still has no raw-data file afterwards and is
+    # reported below.  The 30 s cap keeps a block the receiver REFUSED
+    # after its first row (the DRU shape: ~40 s, ok=0 or a full-size ser
+    # of zeros) on the immediate retry path (pre-merge review C2).
+    if ok and ocxo_s and ocxo_s > 0 and elapsed < min(0.5 * ocxo_s, 30.0):
+        FAST_RETURNS.append(["zg:" + what, round(elapsed, 2)])
+        say("zg returned after %.0f s of an expected %.0f s -- waiting "
+            "for the acquisition before reading the block (%s)"
+            % (elapsed, ocxo_s, what))
+        while time.time() - t_start < 1.05 * ocxo_s + 10.0:
+            sleep_s(5)
     # verify a raw-data file landed on disk (its CONTENT is the caller's
     # check: block_data_check)
     if expno_dir and raw_data_file(expno_dir) is None:
+        hint = ""
+        if elapsed < HW_MIN_SECONDS["zg"]:
+            hint = ("\n\n(zg returned after %.1f s.  If TopSpin's spooler "
+                    "is set to\nqueue acquisition commands -- 'Enable "
+                    "Auto-Spooling' in the\nUser Preferences -- the zg is "
+                    "WAITING in the spooler rather\nthan running: type "
+                    "'spooler' to look.  Cancel, switch\nAuto-Spooling off, "
+                    "and start again.)" % elapsed)
         if attended:
             ans = CONFIRM("spin_noise_run: acquisition check",
                           "The script cannot see a raw-data file (ser/fid) "
                           "for\nthe experiment it just started:\n  %s\n\n"
                           "If the acquisition is still running, wait for it "
                           "to\nfinish, then press OK.  Press Cancel to abort "
-                          "the run." % what)
+                          "the run." % what + hint)
             if ans != 1:
                 abort("Acquisition did not complete: " + what)
         else:
@@ -3032,10 +3376,13 @@ def acquire_noise_block(meta, expno, role, what, expno_dir, o1_hz,
 # Design: docs/design_rdopt_locksweep.md.
 # ============================================================================
 
-RDOPT_OFFSETS_DEFAULT = "0, -100, -200, -350, -500, 100, 250"  # kHz;
-# cryoprobe spin-noise optima sit 150-500 kHz BELOW nominal in the
+RDOPT_OFFSETS_DEFAULT = "0, -100, -200, -350, -500, 100, 250, 400, 600"
+# kHz; cryoprobe spin-noise optima sit 150-500 kHz BELOW nominal in the
 # literature (Nausner 2010; Poeschko 2014; 600 TCI measured -488 kHz),
-# hence the down-weighted ladder
+# hence the down-weighted ladder.  v0.8.1 adds +400/+600: the first live
+# scan (Oulu 500, RT BBO, 2026-10-16) rose monotonically to the top of
+# the old range (+250 kHz, decay +11%, dip 36% vs 29%), so the optimum
+# above nominal was never bracketed.  Nine offsets = RDOPT_MAX_OFFSETS.
 RDOPT_RG = 8.0               # fixed gain across the scan (comparability)
 RDOPT_MAX_OFFSETS = 9
 RDOPT_MIN_IMPROVEMENT = 0.10  # keep D=0 unless >=10% faster decay
@@ -3051,6 +3398,11 @@ SWEEP_SPAN_HZ_DEFAULT = 1500.0
 SWEEP_MIN_STEP_SECS = 300.0
 SWEEP_TOL_FRAC = 0.2          # accept |deviation| <= max(20%, 30 Hz)
 SWEEP_TOL_HZ = 30.0
+SWEEP_SETTLE_S = 10.0         # pause before ONE automatic re-measurement
+                              # of an off-target step or restore check
+                              # (the field is still walking in after a
+                              # re-lock: Oulu 500, 2026-10-16, 404 Hz off
+                              # at the check, back within 2 Hz 7 s later)
 SWEEP_SPAN_PPM_MAX = 25.0     # half-span cap, ppm of B0: conservative
                               # lock-shift excursion (hardware range is
                               # +/-200 ppm; lock phase/gain calibrated at
@@ -3528,7 +3880,10 @@ def sleep_s(seconds):
     try:
         SLEEP(seconds)
     except CATCHABLE:
-        pass
+        try:
+            time.sleep(seconds)
+        except CATCHABLE:
+            pass
 
 
 def find_tshome():
@@ -4226,7 +4581,7 @@ def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
     # Baseline gate: the operator can decline the sweep here and fall
     # back to a standard single-block session (never an abort -- the
     # ladder and opening reference are already on disk).
-    sel = ask_select(
+    sel = ask_select_live(
         "spin-noise sweep: baseline",
         "The sweep needs a field baseline first.\n\n"
         "1. Note the current LOCK SHIFT value (BSMS display, shift\n"
@@ -4325,6 +4680,8 @@ def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
                         % (jump, nhops, hop_hz / bf1_mhz))
         auto_used = 0
         auto_retry = 0
+        settled = 0
+        remeasure = 0
         if ast is not None and ast["available"]:
             auto_used = autostep_actuate(ast, sweep, target, bf1_mhz, k)
             if not auto_used:
@@ -4332,9 +4689,12 @@ def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
                     "dialog fallback" % (k + 1))
         while 1:
             attempt += 1
-            if auto_used:
+            if remeasure:
+                remeasure = 0        # settle-and-measure-again: no dialog
+                attempt -= 1         # the same attempt, measured again
+            elif auto_used:
                 if ast["semi"]:
-                    sel = ask_select(
+                    sel = ask_select_live(
                         "spin-noise sweep: lock off",
                         "Step %d/%d was set automatically (shift "
                         "written,\nautolock done).\n\n"
@@ -4351,7 +4711,7 @@ def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
                         ended = 1
                         break
             else:
-                sel = ask_select(
+                sel = ask_select_live(
                     "spin-noise sweep: set field step",
                     "Step %d of %d -- target shift %+.0f Hz from "
                     "baseline.\n\n"
@@ -4418,6 +4778,19 @@ def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
                 if auto_used and ast["actuator_sign"] == 0:
                     ast["actuator_sign"] = 1     # first step confirms it
                 break
+            # Settle first (v0.8.1): the restore check of Oulu's first
+            # live sweep (2026-10-16) caught the line 404 Hz off seven
+            # seconds before the closing reference found it back within
+            # 2 Hz -- the field was still walking in after the re-lock.
+            # One free re-measurement after a pause, before any dialog.
+            if not settled:
+                settled = 1
+                remeasure = 1
+                say("sweep: line %.0f Hz off this step's target -- "
+                    "letting the field settle %.0f s, then measuring "
+                    "again" % (abs(local_dev), SWEEP_SETTLE_S))
+                sleep_s(SWEEP_SETTLE_S)
+                continue
             # Autostep self-recovery, before any dialog: (a) the actuator
             # sign may be inverted (field landed at -target on the first
             # step) -- flip once, deterministically; (b) otherwise allow
@@ -4431,6 +4804,7 @@ def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
                 auto_used = autostep_actuate(ast, sweep, target,
                                              bf1_mhz, k)
                 if auto_used:
+                    settled = 0      # a new re-lock: settle again
                     continue
             if auto_used and auto_retry == 0:
                 auto_retry = 1
@@ -4439,6 +4813,7 @@ def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
                 auto_used = autostep_actuate(ast, sweep, target,
                                              bf1_mhz, k)
                 if auto_used:
+                    settled = 0      # a new re-lock: settle again
                     continue
             if sflip:
                 devtxt = "%+.0f Hz (physical)" % (sflip * local_dev)
@@ -4462,7 +4837,9 @@ def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
                 break
             if sel == 1 and auto_used:
                 auto_used = 0    # operator takes over this step by hand
-            # sel == 1 -> loop back and re-instruct
+            # sel == 1 -> loop back and re-instruct; the operator's new
+            # re-lock earns its own settle-and-remeasure
+            settled = 0
         if ended:
             sweep["ended_early"] = True
             break
@@ -4523,7 +4900,7 @@ def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
         say("autostep: restoring the lock table and the baseline field")
         autostep_restore(ast, sweep)
         if ast["semi"] or ast["keep_locked"]:
-            ask_select(
+            ask_select_live(
                 "spin-noise sweep: restore (autostep)",
                 "The lock table is restored and the baseline solvent\n"
                 "re-locked.\n\n"
@@ -4545,7 +4922,7 @@ def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
                             % (-last_set_hz, hop_hz / bf1_mhz))
         except CATCHABLE:
             pass
-        sel = ask_select(
+        sel = ask_select_live(
             "spin-noise sweep: restore field",
             "Sweep done. Restore the baseline field now:\n\n"
             "1. Reset the LOCK SHIFT to its baseline value (skip this if\n"
@@ -4562,6 +4939,19 @@ def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
         off = sweep_verify_1d(meta, template, dsname, expno_r, o1_hz,
                               p90_us, p90_db, db_par)
         verify_expnos.append(expno_r)
+        if off is not None and base_off is not None \
+                and abs(off - base_off) > 2.0 * SWEEP_TOL_HZ:
+            # the field may still be walking in after the re-lock (see
+            # SWEEP_SETTLE_S): keep the first reading, measure once more
+            sweep["restored_offset_first_hz"] = \
+                (off - base_off) * (sflip or 1)
+            say("sweep: restore check finds the line %.0f Hz off the "
+                "baseline -- letting the field settle %.0f s, then "
+                "measuring again" % (abs(off - base_off), SWEEP_SETTLE_S))
+            sleep_s(SWEEP_SETTLE_S)
+            off = sweep_verify_1d(meta, template, dsname, expno_r, o1_hz,
+                                  p90_us, p90_db, db_par)
+            sweep["restore_remeasured"] = True
         if off is not None and base_off is not None:
             sweep["restored_offset_hz"] = (off - base_off) * (sflip or 1)
             sweep["field_restored"] = (
@@ -4985,7 +5375,7 @@ def main():
     # ---------------------------------------------------------------- 4
     # CRITICAL housekeeping dialogs (recorded, never silent).
     # Lock state.
-    lsel = ask_select(
+    lsel = ask_select_live(
         "spin-noise run: lock",
         "For clean noise records the LOCK should be OFF for the noise\n"
         "block (lock rf leaks into the 1H channel on some systems).\n\n"
@@ -4997,7 +5387,7 @@ def main():
     # BSMS field sweep -- THE 2022 lesson: a sweeping B0 shows up as
     # spurious structure in long noise records.  No portable command
     # exists to switch it, so this is operator-confirmed, always.
-    ssel = ask_select(
+    ssel = ask_select_live(
         "spin-noise run: BSMS FIELD SWEEP -- IMPORTANT",
         "The BSMS FIELD SWEEP MUST BE OFF during the noise block.\n"
         "(In 2022 a sweeping field quietly contaminated weeks of noise\n"
@@ -5179,6 +5569,11 @@ def main():
             "locked": locked,
             "lock_sweep_confirmed_off": sweep_off,
             "operator_notes": "",
+            # v0.8.1 spooler bookkeeping: the SAME objects the hardware
+            # wrappers fill during the run (see the spooler note above
+            # safe_xcmd); null/empty on a console that behaves.
+            "spooler_noqu": NOQU_STATE,
+            "hw_fast_returns": FAST_RETURNS,
         },
         "calibration": {
             "p90_us": None,

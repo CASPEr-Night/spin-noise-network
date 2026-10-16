@@ -1020,13 +1020,17 @@ def main(argv=None):
             [("/w/rep_a/report.json", rep_wa), ("/w/rep_b/report.json", rep_b)])
         changed, removed = diff_keys(site_old, site)
         changed_m, removed_m = diff_keys(site_m_old, site_m)
-        check("committed v0.7 combiner vs this module on the v0.7-only set "
-              "and on the mixed set: construction byte-identical, the only "
-              "changed key is rule, nothing removed",
+        # master carried the v0.7 combiner when this guard was written
+        # (changed == ["rule"]); since the v0.8.0 merge it carries this
+        # module's own headline rule, so no key may change at all
+        check("committed combiner (master) vs this module on the v0.7-only "
+              "set and on the mixed set: construction byte-identical, no "
+              "changed key but rule (none once master carries v0.8), "
+              "nothing removed",
               site_old["construction"] == site["construction"]
               and site_m_old["construction"] == site_m["construction"]
-              and changed == ["rule"] and removed == []
-              and changed_m == ["rule"] and removed_m == [],
+              and changed in ([], ["rule"]) and removed == []
+              and changed_m in ([], ["rule"]) and removed_m == [],
               json.dumps({"changed": changed, "removed": removed,
                           "changed_mixed": changed_m,
                           "removed_mixed": removed_m})[:600])
