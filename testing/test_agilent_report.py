@@ -2723,9 +2723,12 @@ def main(argv=None):
     # (g) a quality-failing closing reference (a single-bin spike at -100
     # Hz: readable, with a center, usable_for_sign_calibration False)
     # under mirrored referencing: the measured offset is the quality-
-    # passing reference's line alone (+600 Hz -> mirrored), not the two-
-    # reference mean the report seeds its line search with (+250 Hz,
-    # which matches neither placement within the 120 Hz tolerance)
+    # passing reference's line alone (+600 Hz -> mirrored).  Since v0.8.1
+    # the report's own line-position seed applies the same gate (Torino
+    # 2026-10-01: a halted, signal-free closing reference had pulled the
+    # two-reference mean 314 Hz off the line), so the seed equals this
+    # offset, science.reference_seed names the excluded expno and QA
+    # carries the 'reference line quality' WARN.
     rep_q, _html_q, _p = _ref_fixture(
         "spike", 83, lambda fb_: (fb_.replace_fid(13, synth_line_row(
             fb_.rng, 8192, gen.SW_HZ, 400.0, F0_LINE_HZ - 700.0, 0.0, 20.0)),
@@ -2739,8 +2742,10 @@ def main(argv=None):
           "usable_for_sign_calibration False) under mirrored referencing: "
           "measured_offset_hz is the quality-passing reference's line "
           "(expno 11, ~+600 Hz), measured_offset_expnos [11], verdict "
-          "mirrored, sign -1 VERIFIED; the basis names the gap to the "
-          "report's two-reference line_position_guess_hz (%s Hz)"
+          "mirrored, sign -1 VERIFIED; the report's line_position_guess_hz "
+          "(%s Hz) is seeded on the same quality-passing reference (v0.8.1 "
+          "gate: reference_seed excludes expno 13, QA WARN 'reference line "
+          "quality')"
           % (fmt3(ref13.get("line_center_hz")),
              fmt3(rc_q.get("line_position_guess_hz"))),
           ref13.get("readable") is True
@@ -2751,17 +2756,46 @@ def main(argv=None):
           and abs(rc_q.get("measured_offset_hz", 0) - F0_LINE_HZ) < 3.0
           and finite(rc_q.get("line_position_guess_hz"))
           and abs(rc_q["line_position_guess_hz"]
-                  - rc_q["measured_offset_hz"]) > 300.0
+                  - rc_q["measured_offset_hz"]) < 0.05
           and abs((s_q.get("line_position_guess_hz") or 0)
                   - rc_q["line_position_guess_hz"]) < 1e-6
-          and "from the report's line_position_guess_hz" in rc_q.get(
+          and "equal to the report's line_position_guess_hz" in rc_q.get(
               "measured_offset_basis", "")
+          and (s_q.get("reference_seed") or {}).get("anchoring_expnos") == [11]
+          and [x.get("expno") for x in (s_q.get("reference_seed") or {})
+               .get("excluded", [])] == [13]
+          and any(q.get("check") == "reference line quality"
+                  and q.get("level") == "WARN"
+                  for q in s_q.get("qa_flags") or [])
           and rc_q.get("verdict") == "mirrored" and rc_q.get("sign") == -1
           and fas_q.get("verified") is True and fas_q.get("sign") == -1
           and fas_q.get("basis") == "vnmrj_lock_referencing",
           json.dumps({"rc": rc_q, "ref13": {
               k: ref13.get(k) for k in ("readable", "line_center_hz",
                                         "line_quality")}})[:700])
+    # the same gate on the transduction constant and the open/close
+    # stability (v0.8.1; Torino 2026-10-01: the spike-only reference had
+    # halved kappa*M0)
+    ex_q = s_q.get("axion_exclusion") or {}
+    tr_q = ex_q.get("transduction") or {}
+    fc_q = s_q.get("floor_calibration") or {}
+    check("quality-failing closing reference: the transduction constant is "
+          "built from the quality-passing reference alone (references [11], "
+          "references_excluded [13] with the gate's reason, basis names the "
+          "exclusion) and the open/close stability is not computed but "
+          "noted (line_stability_open_close_note)",
+          [r.get("expno") for r in tr_q.get("references") or []] == [11]
+          and [x.get("expno") for x in tr_q.get("references_excluded") or []]
+          == [13]
+          and "excluded by the line-quality gate" in (tr_q.get("basis") or "")
+          and "line_stability_open_close_hz" not in fc_q
+          and "not computed" in (fc_q.get("line_stability_open_close_note")
+                                 or ""),
+          json.dumps({"available": ex_q.get("available"),
+                      "reason": ex_q.get("reason"),
+                      "transduction": {k: tr_q.get(k) for k in
+                                       ("basis", "references_excluded")},
+                      "floor_cal": fc_q})[:900])
 
     # ------------------------------------------------------------------
     # 13. co-add alignment gate: weak rows are never self-aligned

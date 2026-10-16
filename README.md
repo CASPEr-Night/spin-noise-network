@@ -295,6 +295,26 @@ covers ~10 GB), set the shared token, and hand facilities the endpoint + token p
   within one sigma, null on spin noise alone); no real session shows a significant
   modulation. Every bound they print is UNPUBLISHED, an internal sensitivity
   bookkeeping; what has not been tested is the response to a real signal.
+- **v0.8.1 is a console-side release** from the first live tests of the optional modes
+  (Oulu, 16 October 2026). `rdopt` ran to completion on the 500 and chose a tuning
+  250 kHz above the pulse optimum, where the spin-noise dip came out 36% of the floor
+  against 29% at the standard tuning in the three earlier sessions. The first live
+  `sweep` stalled at its first field step: TopSpin's dialogs are application-modal, so
+  the lock shift could not be changed while the instructions were on screen — every
+  dialog that needs the BSMS window now opens as a separate, non-blocking window, and an
+  off-target reading is re-measured once after a 10 s settle before anything is recorded
+  (the restore check had caught the field 404 Hz off, seven seconds before the closing
+  reference found it back). On the Oulu 400 (TopSpin 3.2) the spooler's *Enable
+  Auto-Spooling* preference queued `atma`/`topshim` instead of running them, and the
+  session collapsed into `Acquisition is already running`; the script now issues every
+  spoolable command with the `noqu` prefix, times every hardware command, records one that
+  came back too fast to have run, and — the first time an `atma` or `pulsecal` does — names
+  the preference to switch off. Analysis: the line-position seed, the open/close stability and the transduction
+  constant now use only references that pass the line-quality gate (`science.reference_seed`,
+  `transduction.references_excluded`), and a noise block whose `zg` returned long after the
+  acquisition ended is timed from the console's acquisition stamps (`block_spread_acqus`) —
+  both from Torino's 18.5 h session, whose halted, signal-free closing reference had hidden a
+  line present in every row and whose `zg` came back nine hours late.
 - Sweep/lock state cannot be commanded portably — it is confirmed by the operator and
   recorded (a hard-won lesson: a field sweep left on smears the line by kHz).
 - Bundle size is a non-issue up to 5 GiB: the uploader switches to a chunked,

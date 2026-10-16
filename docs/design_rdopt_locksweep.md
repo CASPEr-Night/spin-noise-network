@@ -30,7 +30,8 @@ kHz on cryoprobes. We scan it empirically instead of assuming.
 HOW. After the standard setup block (atma + shim + P90):
 
 1. For each offset Dk in an operator-editable ladder (default
-   0, -100, -200, -350, -500, +100, +250 kHz -- weighted BELOW nominal
+   0, -100, -200, -350, -500, +100, +250, +400, +600 kHz -- weighted BELOW nominal
+   (+400/+600 added in v0.8.1: Oulu's first live scan peaked at the old +250 edge)
    because the spin-noise literature finds cryoprobe optima 150-500 kHz
    below the pulse tune: Nausner 2010, Poeschko 2014, and a measured
    -488 kHz on a 600 TCI; 0 is always first, as the baseline):

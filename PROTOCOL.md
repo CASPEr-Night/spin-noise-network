@@ -178,7 +178,14 @@ documented in `docs/design_rdopt_locksweep.md`:
   ~30 s acquisition, no operator action). The script verifies each
   step by measuring the sample's line — the *measured* position is
   what enters the record — and verifies the restoration too. The BSMS
-  field sweep stays off throughout.
+  field sweep stays off throughout. The dialogs that ask you to work
+  the BSMS window (baseline, each step, lock off, restore) open as
+  separate windows that do **not** block TopSpin where the console can
+  show one (v0.8.1 — TopSpin's own dialogs do, and the first live sweep
+  stalled on that): set the shift, re-lock, lock off, then press the
+  button. An off-target reading waits 10 s and is measured once more
+  before the step is judged or a dialog opens, because the field is
+  still settling after a re-lock.
 
 ## What gets uploaded
 

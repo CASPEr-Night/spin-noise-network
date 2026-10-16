@@ -368,6 +368,47 @@ def row_time_cases(fr, hw):
           and ext == {"time_source": "clock_audit", "note": None}
           and tz is None and tz_basis == "unknown",
           (basis, why, ext))
+    # v0.8.1: a zg that RETURNED long after the acquisition ended (Torino
+    # 2026-10-01: wall 18.54 h, acqus DATE_START..DATE 9.58 h) -- the
+    # acquisition stamps bound the rows, the note names the gap
+    acq = {20: (start_ms / 1000.0, (start_ms + span_ms) / 1000.0)}
+    nres_late = {"per_row": _rows([(20, n)]), "_acq_spans": acq}
+    meta_late = json.loads(json.dumps(meta_audit))
+    meta_late["clock_audit"]["blocks"][0]["wall_end_ms"] = start_ms + 2 * span_ms
+    meta_late["clock_audit"]["blocks"][0]["ocxo_expected_s"] = span_ms / 1000.0
+    times_l, basis_l, _t, _tb, why_l, ext_l = fr._wind_row_times(meta_late,
+                                                                 nres_late)
+    check("8.4 row times: wall span twice the acqus DATE_START..DATE span -> "
+          "rows_timed_basis block_spread_acqus, rows spread over the "
+          "acquisition stamps (identical to the clean case), note names the "
+          "late zg return",
+          basis_l == "block_spread_acqus" and times_l is not None
+          and why_l is None
+          and all(abs((a - b).total_seconds()) < 1e-3
+                  for a, b in zip(times_l, exp))
+          and ext_l["time_source"] == "clock_audit"
+          and "returned" in (ext_l["note"] or ""),
+          (basis_l, why_l, ext_l))
+    nres_same = {"per_row": _rows([(20, n)]), "_acq_spans": acq}
+    times_s, basis_s, _a, _b, _c, ext_s = fr._wind_row_times(meta_audit,
+                                                             nres_same)
+    check("8.4 row times: acqus spans consistent with the wall time leave "
+          "block_spread untouched (byte-for-byte for every well-behaved "
+          "session)",
+          basis_s == "block_spread" and ext_s["note"] is None
+          and all(abs((a - b).total_seconds()) < 1e-3
+                  for a, b in zip(times_s, exp)),
+          (basis_s, ext_s))
+    nres_short = {"per_row": _rows([(20, n)]),
+                  "_acq_spans": {20: (start_ms / 1000.0,
+                                      start_ms / 1000.0 + 0.2 * span_ms / 1000.0)}}
+    times_x, basis_x, _a, _b, _c, ext_x = fr._wind_row_times(meta_late,
+                                                             nres_short)
+    check("8.4 row times: an acqus span inconsistent with the expected "
+          "duration (20% of it) is not trusted -> block_spread over the wall "
+          "time as before",
+          basis_x == "block_spread" and times_x is not None,
+          (basis_x, ext_x))
     offs = [i * 20000.0 for i in range(n)]
     meta_pr = json.loads(json.dumps(meta_audit))
     meta_pr["clock_audit"]["blocks"][0]["row_started_offsets_ms"] = offs
