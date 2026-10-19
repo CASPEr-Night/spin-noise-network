@@ -315,6 +315,27 @@ covers ~10 GB), set the shared token, and hand facilities the endpoint + token p
   acquisition ended is timed from the console's acquisition stamps (`block_spread_acqus`) —
   both from Torino's 18.5 h session, whose halted, signal-free closing reference had hidden a
   line present in every row and whose `zg` came back nine hours late.
+- **v0.8.2 (unreleased) keeps the pulse calibration as data.** Until now the 90° pulse
+  entered every bundle as one number from `pulsecal` or the operator, and every stored
+  pulsed experiment was a ~1° flip derived from it by attenuating the power 39.08 dB — so
+  the tip angle behind the transduction constant, and behind every exclusion, could not be
+  re-derived from the raw files. The console script now acquires a nutation curve after the
+  gain ladder: ten quick 1Ds at the console's calibrated 90° power with P1 from 0.25 to
+  3 × P90 (expnos 80–95, `rga` once on the 90° step and that gain kept, about four minutes,
+  attended; skipped and recorded as such where the calibrated power cannot be read back, or
+  with `nonutation`). The report fits A(P1) = A₉₀ |sin(π P1 / 2 P90)|, prints the fitted P90
+  against the declared one, marks clipped steps, and predicts the small-flip reference
+  amplitude from A₉₀ as a cross-check of the attenuation arithmetic; the exclusion headline
+  keeps the declared tip, so existing reports gain keys and change nothing else. The schema
+  gains the optional `calibration.nutation` object and the `nutation` role without a version
+  bump (additive, as `rd_optimize` and `row_probe` were). The same release densifies the
+  receiver-gain ladder — about seventeen levels from RG 1 to the noise gain at two per octave,
+  the reference and noise gains always among them, each visited twice in a seeded random order
+  and its reverse (expnos 300–363, three to four minutes, `sparseladder` to skip) — so the
+  report separates receiver compression from drift and measures the reference-to-noise gain
+  bridge the transduction constant assumes, as a cross-check (WARN "RG ladder bridge" beyond
+  ±3%) while the headline keeps the declared linear bridge. The Agilent path is unchanged. Not
+  yet run on hardware; the first live run is attended.
 - Sweep/lock state cannot be commanded portably — it is confirmed by the operator and
   recorded (a hard-won lesson: a field sweep left on smears the line by kHz).
 - Bundle size is a non-issue up to 5 GiB: the uploader switches to a chunked,

@@ -33,7 +33,13 @@
 #      handling of a receiver unit that refuses blocks; since v0.7.8 the
 #      acquisition-mode writes per flavor (DIGMOD once per session, no
 #      DSPFIRM write on a coupling console, the name ladder on
-#      legacy-nocouple) and zero GetEnuOrd[DSPFIRM] dialogs.
+#      legacy-nocouple) and zero GetEnuOrd[DSPFIRM] dialogs; since v0.8.2
+#      the nutation curve (expnos 80..89, role nutation, section 8c of the
+#      script): the 1.0 x P90 step first with rga on it alone, every step
+#      at the calibrated power with its physics FID from the stub, the
+#      amplitudes fitted back to the stub's P90_true (3% off the declared
+#      value), the RG-1 fallback under legacy-rgafail and the recorded
+#      skip under the nonutation flag.
 #
 # The template parameter values are plausible reals taken from the 2020
 # archival 600 MHz cryoprobe dataset that motivated this project
@@ -70,8 +76,45 @@ import topspin_stub
 FLAVORS = ("legacy", "ts44", "ts44-stale", "ts44-strict", "ts44-f1echo",
            "ts44-dimlie", "ts44-f1route", "ts44-f1mismatch",
            "legacy-2dtemplate", "legacy-noacqu2",
-           "legacy-dru", "legacy-dru-refused", "legacy-nocouple")
+           "legacy-dru", "legacy-dru-refused", "legacy-nocouple",
+           "legacy-rgafail")
 DRU_FLAVORS = ("legacy-dru", "legacy-dru-refused")
+# The nutation fixture (v0.8.2): the fixture answers 8.5 us in the
+# 90-degree dialog (DIALOG_ANSWERS below), the stub's probe is 3% longer.
+# The script scales its steps from the declared value; the FIDs follow
+# the truth; the harness fits them back and must see the difference.
+NUTATION_P90_TRUE_US = 8.5 * 1.03
+NUTATION_EXPNOS = range(80, 90)
+NUTATION_MULTS = [1.0, 0.25, 0.5, 0.75, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0]
+# The dense receiver-gain ladder (v0.8.2 addendum), re-derived here
+# independently of the script: max_rg is the mocked rga's 101, so the
+# levels are 2^(k/2) rounded to 0.01 up to 90.51, plus the reference gain
+# 25.25 (= 101/4) and the noise gain 101 as levels of their own -- 16
+# levels x 2 visits = 32 rungs in expnos 300..331, visit 1 in the seeded
+# permutation (seed = the session date YYYYMMDD; _lcg_permutation below
+# is the documented algorithm), visit 2 in its reverse.
+DENSE_LEVELS = [1.0, 1.41, 2.0, 2.83, 4.0, 5.66, 8.0, 11.31, 16.0, 22.63,
+                25.25, 32.0, 45.25, 64.0, 90.51, 101.0]
+DENSE_EXPNOS = range(300, 300 + 2 * len(DENSE_LEVELS))
+
+
+def _lcg_permutation(n, seed):
+    """Fisher-Yates over range(n) with v = v*1103515245 + 12345 mod 2^31,
+    j = (v >> 8) % (i + 1), from v = seed & 0x7fffffff -- the script's
+    seeded_permutation, written out again so a change there is seen."""
+    order = list(range(n))
+    v = long(seed) & 0x7fffffff
+    i = n - 1
+    while i > 0:
+        v = (v * 1103515245 + 12345) & 0x7fffffff
+        j = int((v >> 8) % (i + 1))
+        order[i], order[j] = order[j], order[i]
+        i = i - 1
+    return order
+# legacy-rgafail (v0.8.2): legacy-noacqu2 on which rga fails on the
+# nutation block's full-power 90-degree step (and nowhere else): the
+# curve is acquired at the RG-1 fallback, recorded, no dialog; every
+# other expectation is legacy-noacqu2's.
 # legacy-dru / legacy-dru-refused (v0.7.7): legacy-noacqu2 on an Avance III
 # HD whose AQS DRU refuses a pseudo-2D block (Oulu, 2026-09-30: "too much
 # data for the LAN capacity"; first row acquired, the rest zeros, full-size
@@ -354,16 +397,18 @@ CONFIRM_ANSWERS_F1 = {
 def main():
     if len(sys.argv) < 2 or sys.argv[1] not in ("simulate", "desktest"):
         print "usage: jython jython_entry.py {simulate|desktest} " \
-              "[rdopt] [sweep]"
+              "[rdopt] [sweep] [autostep] [nonutation] [sparseladder]"
         return 2
     mode = sys.argv[1]
     features = []
     for a in sys.argv[2:]:
-        if a in ("rdopt", "sweep", "autostep"):
+        if a in ("rdopt", "sweep", "autostep", "nonutation", "sparseladder"):
             features.append(a)
     rdopt_on = "rdopt" in features
     sweep_on = "sweep" in features
     autostep_on = "autostep" in features
+    nutation_on = "nonutation" not in features
+    dense_on = "sparseladder" not in features
 
     workdir = os.environ.get("HARNESS_WORKDIR")
     if not workdir:
@@ -394,6 +439,7 @@ def main():
     topspin_stub.configure(template, template_params,
                            DIALOG_ANSWERS, SELECT_ANSWERS,
                            confirm_answers, flavor=flavor)
+    topspin_stub.NUTATION_P90_TRUE_US[0] = NUTATION_P90_TRUE_US
 
     # Register the stub as TopCmds (so `from TopCmds import *` succeeds
     # and IN_TOPSPIN=1 -> real java zip/digest paths) AND inject the API
@@ -531,9 +577,22 @@ def main():
         expected_expnos += [20, 21, 22]
         expected_roles += ["rdopt_scan"] * 3
     # v0.7.7: the row probe (expno 17) sits between the ladder and the
-    # opening reference.
-    expected_expnos += [10, 14, 15, 16, 17, 11]
-    expected_roles += ["rg_ladder"] * 4 + ["row_probe", "reference_open"]
+    # opening reference; v0.8.2: the nutation curve (expnos 80..89, the
+    # 1.0 x P90 step first) between the ladder and the row probe, unless
+    # the nonutation flag skips it.
+    expected_expnos += [10, 14, 15, 16]
+    expected_roles += ["rg_ladder"] * 4
+    # v0.8.2 addendum: the dense two-visit ladder (expnos 300..331, role
+    # rg_ladder) between the legacy rungs and the nutation block, unless
+    # the sparseladder flag skips it.
+    if dense_on:
+        expected_expnos += list(DENSE_EXPNOS)
+        expected_roles += ["rg_ladder"] * len(DENSE_EXPNOS)
+    if nutation_on:
+        expected_expnos += list(NUTATION_EXPNOS)
+        expected_roles += ["nutation"] * len(NUTATION_EXPNOS)
+    expected_expnos += [17, 11]
+    expected_roles += ["row_probe", "reference_open"]
     if sweep_on:
         # v0.6: baseline verify (30), then the carrier-displacement
         # sign-calibration 1D (29), then 3 x (verify + noise), then the
@@ -794,6 +853,12 @@ def main():
                                 verified=1, src="getpar", already_min=3,
                                 unverified_min=0, c2d=0, cf1=0, msg=0,
                                 notice=None, pm="1", acqudim=2),
+        # The failing rga of the nutation block (v0.8.2): Oulu's dialect
+        # again; the RG-1 fallback is checked with the nutation block.
+        "legacy-rgafail": dict(form="name", f1form="1 TD", failed=[],
+                               verified=1, src="getpar", already_min=3,
+                               unverified_min=0, c2d=0, cf1=0, msg=0,
+                               notice=None, pm="1", acqudim=2),
     }[flavor]
     # F1 parameter files (v0.7.5).  No console is known to create acqu2 on
     # a scripted PARMODE write -- TopSpin 3.7.0 (Oulu, 2026-09-25) and
@@ -861,12 +926,19 @@ def main():
                      "ts44-f1route": 6, "ts44-f1mismatch": 4,
                      "legacy-2dtemplate": 3,
                      "legacy-dru": 2, "legacy-dru-refused": 2,
-                     "legacy-nocouple": 2}[flavor]
+                     "legacy-nocouple": 2, "legacy-rgafail": 2}[flavor]
+    # ts44-dimlie (v0.8.2): the ten nutation steps are 1D datasets made
+    # by WR from the last rung, and with the readback unreliable each
+    # make_1d writes PARMODE and reloads once more, like the rungs -> +10.
+    if flavor == "ts44-dimlie" and nutation_on:
+        _E["reloads"] = _E["reloads"] + len(NUTATION_EXPNOS)
+    if flavor == "ts44-dimlie" and dense_on:    # the 32 dense rungs likewise
+        _E["reloads"] = _E["reloads"] + len(DENSE_EXPNOS)
     # Every dataset must have the dimensionality its role needs at
     # acquisition time, whatever the template was: the stub's parameter
     # store is inspected per expno (PARMODE ordinal "0"/"1" or name).
     _one_d_roles = ("setup", "rg_ladder", "rdopt_scan", "sweep_verify",
-                    "sweep_signcal")
+                    "sweep_signcal", "nutation")
     _bad_dims = []
     for _e, _role in zip(expected_expnos, expected_roles):
         _pm = topspin_stub._PARAMS.get(os.path.join(name_dir, str(_e)),
@@ -1015,17 +1087,27 @@ def main():
                 "sweep_verify": "zg", "sweep_signcal": "zg",
                 "reference_open": "zgref2d", "reference_close": "zgref2d",
                 "noise": "zgnoise2d", "noise_sweep": "zgnoise2d",
-                "row_probe": "zgnoise2d"}
+                "row_probe": "zgnoise2d", "nutation": "zg"}
     # RG: set_common_acq's 1 (the setup expno and the row probe), the
     # ladder rungs 1/8/64/rga(101 mocked), max_rg/4 = 25.25 for the
     # references, the mocked rga for the noise blocks, RDOPT_RG = 8 for
-    # the quick 1Ds of rdopt / sweep.
+    # the quick 1Ds of rdopt / sweep; the nutation curve (v0.8.2) its own
+    # rga on the 1.0 x P90 step (101 mocked) kept for every step, or the
+    # RG-1 fallback where the modelled rga fails (legacy-rgafail).
     _want_rg = {"setup": 1.0, "reference_open": 25.25,
                 "reference_close": 25.25, "noise": 101.0,
                 "noise_sweep": 101.0, "rdopt_scan": 8.0,
                 "sweep_verify": 8.0, "sweep_signcal": 8.0,
-                "row_probe": 1.0}
+                "row_probe": 1.0, "nutation": 101.0}
+    if flavor == "legacy-rgafail":
+        _want_rg["nutation"] = 1.0
     _ladder_rg = {10: 1.0, 14: 8.0, 15: 64.0, 16: 101.0}
+    # the dense rungs (v0.8.2 addendum) were given the level their
+    # calibration.rg_ladder entry records; the levels themselves are
+    # checked against DENSE_LEVELS below
+    for _r in ((_mo.get("calibration") or {}).get("rg_ladder") or []):
+        if isinstance(_r, dict) and _r.get("expno") in DENSE_EXPNOS:
+            _ladder_rg[_r["expno"]] = _r.get("rg")
     # Row geometry (v0.7.7): TD 262144 everywhere the ladder is walked in
     # this harness -- legacy-dru's winner is its second entry (262144,
     # 3.0), legacy-dru-refused falls back to the first (262144, 1.0) and
@@ -1085,8 +1167,8 @@ def main():
           "; ".join(_rgl_bad))
     _n_pm_writes = len([1 for a, s in _log
                         if a == "PUTPAR" and s.startswith(u"PARMODE = ")])
-    if flavor in ("legacy", "legacy-noacqu2", "legacy-nocouple") \
-            or flavor in DRU_FLAVORS:
+    if flavor in ("legacy", "legacy-noacqu2", "legacy-nocouple",
+                  "legacy-rgafail") or flavor in DRU_FLAVORS:
         check("PARMODE written exactly once (the dialect probe's 2D; setup "
               "already 1D; the row probe is WR-copied from expno 11)",
               _n_pm_writes == 1, "writes %d" % _n_pm_writes)
@@ -1535,15 +1617,18 @@ def main():
         exp = b.get("ocxo_expected_s")
         # Blocks with a meaningful OCXO prediction must show a wall
         # duration consistent with it (stub advances the virtual clock by
-        # expected*(1 + 3e-7) + ~0.2 s overhead), i.e. within 1 percent --
-        # except a block the modelled receiver unit refused (recorded as
-        # not acquired): its wall time is one row plus the abort, as at
-        # Oulu (39.9 s for 168 s expected), which the report's gate drops.
+        # expected*(1 + 3e-7) + ~0.2 s overhead), i.e. within 1 percent
+        # or 0.25 s, whichever is larger (v0.8.2: the stub's ~0.2 s
+        # per-block overhead is 0.95% of a 21 s nutation step, and its
+        # ms-scale jitter would cross a bare 1%) -- except a block the
+        # modelled receiver unit refused (recorded as not acquired): its
+        # wall time is one row plus the abort, as at Oulu (39.9 s for
+        # 168 s expected), which the report's gate drops.
         _rb = _rp_by_expno.get(b.get("expno"))
         if _rb is not None and not _rb.get("acquired"):
             continue
         if exp is not None and exp > 10.0:
-            if abs(wall_s / exp - 1.0) > 0.01:
+            if abs(wall_s - exp) > max(0.01 * exp, 0.25):
                 consistent = False
                 detail.append("block %s: wall %.3f s vs ocxo %.3f s"
                               % (b.get("expno"), wall_s, exp))
@@ -1580,6 +1665,8 @@ def main():
         elif _role in ("rg_ladder", "rdopt_scan", "sweep_verify",
                        "sweep_signcal"):
             _want = _aq_1d + 2.0
+        elif _role == "nutation":
+            _want = _aq_1d + 20.0        # NUTATION_D1_S (v0.8.2)
         else:
             continue
         _got = b.get("ocxo_expected_s")
@@ -1590,6 +1677,226 @@ def main():
           "(zgref2d: one d1 + d11 per row; zgnoise2d: one d1 + d11; zg: one "
           "d1) at each block's recorded row geometry",
           not _bad_exp, "; ".join(_bad_exp)[:600])
+
+    # ---- dense receiver-gain ladder (v0.8.2 addendum, section 8d of the
+    # script).  The four legacy rungs stay as they were; then 16 levels x
+    # 2 visits in expnos 300..331, role rg_ladder, small flip, visit 1 in
+    # the seeded permutation of the levels (seed = the session date) and
+    # visit 2 in its reverse; the reference gain 25.25 and the noise gain
+    # 101 are levels of their own; entries appended to calibration.
+    # rg_ladder with "visit"; calibration.rg_ladder_dense once, or the
+    # skipped form under the sparseladder flag.
+    _rgl_all = (_mo.get("calibration") or {}).get("rg_ladder") or []
+    _dense = (_mo.get("calibration") or {}).get("rg_ladder_dense")
+    _legacy_rungs = [(r.get("expno"), r.get("rg"), r.get("tip_deg"),
+                      "visit" in r) for r in _rgl_all[:4]]
+    check("dense ladder: the four legacy rungs lead calibration.rg_ladder "
+          "unchanged (10/14/15/16 at RG 1/8/64/101, tip 1.0, no visit key)",
+          _legacy_rungs == [(10, 1.0, 1.0, False), (14, 8.0, 1.0, False),
+                            (15, 64.0, 1.0, False), (16, 101.0, 1.0, False)],
+          repr(_legacy_rungs))
+    try:
+        _seed_want = int(dsname[10:18])
+    except ValueError:
+        _seed_want = None
+    if not dense_on:
+        check("dense ladder[sparseladder]: calibration.rg_ladder_dense is "
+              "the skipped form with why 'sparseladder flag'; rg_ladder has "
+              "the four legacy rungs only; no expno 300..363 created",
+              _dense == {"skipped": True, "why": "sparseladder flag"}
+              and len(_rgl_all) == 4
+              and not [e for e in range(300, 364)
+                       if os.path.isdir(os.path.join(name_dir, str(e)))],
+              repr((_dense, len(_rgl_all))))
+    else:
+        _dense_rungs = [r for r in _rgl_all[4:]]
+        _v1 = [r.get("rg") for r in _dense_rungs if r.get("visit") == 1]
+        _v2 = [r.get("rg") for r in _dense_rungs if r.get("visit") == 2]
+        _perm = _lcg_permutation(len(DENSE_LEVELS), _seed_want or 0)
+        _v1_want = [DENSE_LEVELS[k] for k in _perm]
+        _v2_want = _v1_want[:]
+        _v2_want.reverse()
+        check("dense ladder: calibration.rg_ladder_dense is the acquired form "
+              "-- expnos 300..331, levels == the 16 re-derived levels "
+              "(2^(k/2) to 90.51 plus 25.25 and 101), seed == the session "
+              "date %r, visits 2, skipped false" % _seed_want,
+              isinstance(_dense, dict) and _dense.get("skipped") is False
+              and _dense.get("expnos") == list(DENSE_EXPNOS)
+              and _dense.get("levels") == DENSE_LEVELS
+              and _dense.get("seed") == _seed_want
+              and _dense.get("visits") == 2 and "why" not in _dense,
+              repr(_dense)[:400])
+        check("dense ladder: 32 entries follow the legacy rungs in "
+              "calibration.rg_ladder, expnos 300..331 in acquisition order, "
+              "tip 1.0, every level visited exactly once per visit, visit 1 "
+              "in the seeded permutation re-derived here and visit 2 in its "
+              "exact reverse (every level once early and once late)",
+              len(_dense_rungs) == len(DENSE_EXPNOS)
+              and [r.get("expno") for r in _dense_rungs] == list(DENSE_EXPNOS)
+              and not [r for r in _dense_rungs if r.get("tip_deg") != 1.0]
+              and sorted(_v1) == DENSE_LEVELS and sorted(_v2) == DENSE_LEVELS
+              and _v1 == _v1_want and _v2 == _v2_want
+              and [r.get("visit") for r in _dense_rungs]
+              == [1] * len(DENSE_LEVELS) + [2] * len(DENSE_LEVELS),
+              "visit1 %r visit2 %r want1 %r" % (_v1, _v2, _v1_want))
+        check("dense ladder: the reference gain (max_rg/4 = 25.25) and the "
+              "noise gain (max_rg = 101) are levels of their own, each "
+              "acquired twice, and every dense rung recorded td 16384 / zg "
+              "in experiments[]",
+              _v1.count(25.25) == 1 and _v2.count(25.25) == 1
+              and _v1.count(101.0) == 1 and _v2.count(101.0) == 1
+              and not [e for e in DENSE_EXPNOS
+                       if (_exps.get(e) or {}).get("td") != 16384
+                       or (_exps.get(e) or {}).get("pulprog") != "zg"],
+              repr([(e, (_exps.get(e) or {}).get("rg"))
+                    for e in DENSE_EXPNOS])[:400])
+
+    # ---- nutation curve (v0.8.2, section 8c of the script): the pulse
+    # calibration kept as data.  Ten quick 1Ds (expnos 80..89) at the
+    # CALIBRATED power (the fixture's PLdB 1 -11.79), P1 = multiplier x
+    # the declared 8.5 us, the 1.0 step first with rga on it alone (RG
+    # 101 mocked; the RG-1 fallback under legacy-rgafail), never the
+    # ladder's gain; the stub writes each step's physics FID from its own
+    # P90_true (3% above the declared value) and the amplitudes must fit
+    # back to that truth; calibration.nutation carries the acquired form,
+    # or the skipped form with the reason under the nonutation flag.
+    _nut = (_mo.get("calibration") or {}).get("nutation")
+    _nut_fids = topspin_stub.NUTATION_FIDS
+    _rga_dirs = [s for a, s in _log if a == "RGA"]
+    if not nutation_on:
+        check("nutation[nonutation]: calibration.nutation is the skipped "
+              "form with why 'nonutation flag'",
+              _nut == {"skipped": True, "why": "nonutation flag"}, repr(_nut))
+        # rga still runs where the headline protocol runs it (the ladder's
+        # rung 16, the noise block's expno 12), never on an expno 80..95
+        _rga_nut = [s for s in _rga_dirs
+                    if [1 for e in range(80, 96) if s.endswith(u"/%d" % e)]]
+        check("nutation[nonutation]: no expno 80..95 created, no physics "
+              "FID written, no clock block of role nutation, rga never ran "
+              "on an expno 80..95 (rung 16 as before)",
+              not [e for e in range(80, 96)
+                   if os.path.isdir(os.path.join(name_dir, str(e)))]
+              and not _nut_fids and "nutation" not in roles
+              and not _rga_nut
+              and [s for s in _rga_dirs if s.endswith(u"/16")],
+              repr((_nut_fids, _rga_dirs)))
+    else:
+        _nut_rg_want = _want_rg["nutation"]
+        _p1_ok = (isinstance(_nut, dict) and isinstance(_nut.get("p1_us"),
+                                                        list)
+                  and len(_nut["p1_us"]) == len(NUTATION_MULTS)
+                  and not [1 for p, m in zip(_nut["p1_us"], NUTATION_MULTS)
+                           if abs(p - m * 8.5) > 1e-6])
+        check("nutation: calibration.nutation is the acquired form -- expnos "
+              "80..89 in acquisition order, multipliers 1.0 first then the "
+              "list, p1_us = multiplier x the declared 8.5 us, "
+              "p90_us_assumed 8.5, power_db -11.79 on 'PLdB 1', rg %g, d1_s "
+              "20, td 16384, skipped false" % _nut_rg_want,
+              isinstance(_nut, dict) and _nut.get("skipped") is False
+              and _nut.get("expnos") == list(NUTATION_EXPNOS)
+              and _nut.get("multipliers") == NUTATION_MULTS and _p1_ok
+              and _nut.get("p90_us_assumed") == 8.5
+              and _nut.get("power_db") == -11.79
+              and _nut.get("power_parname") == "PLdB 1"
+              and _nut.get("rg") == _nut_rg_want
+              and _nut.get("d1_s") == 20.0 and _nut.get("td") == 16384
+              and "why" not in _nut, repr(_nut)[:500])
+        _rga_80 = [s for s in _rga_dirs if s.endswith(u"/80")]
+        _rga_nut_other = [s for s in _rga_dirs
+                          if [1 for e in range(81, 96)
+                              if s.endswith(u"/%d" % e)]]
+        _rga_16 = [s for s in _rga_dirs if s.endswith(u"/16")]
+        check("nutation: rga ran exactly once in the block, on the 1.0 x P90 "
+              "step (expno 80), never on another step; the ladder's rga on "
+              "rung 16 as before",
+              len(_rga_80) == 1 and not _rga_nut_other and len(_rga_16) == 1,
+              repr(_rga_dirs))
+        _nut_exps = [(_exps.get(e) or {}).get("rg") for e in NUTATION_EXPNOS]
+        _ladder_16 = (_exps.get(16) or {}).get("rg")
+        if flavor == "legacy-rgafail":
+            check("nutation[legacy-rgafail]: the modelled rga failed on "
+                  "expno 80 only; the curve fell back to RG 1 -- recorded "
+                  "in calibration.nutation.rg and on every step's "
+                  "experiments[] entry -- while rung 16 kept the ladder's "
+                  "rga RG 101 (never reused); said as a WARNING, no dialog",
+                  len(topspin_stub.RGA_FAILURES) == 1
+                  and topspin_stub.RGA_FAILURES[0].endswith(u"/80")
+                  and _nut_exps == [1.0] * len(NUTATION_EXPNOS)
+                  and _ladder_16 == 101.0
+                  and len([s for a, s in _log if a == "SHOW_STATUS"
+                           and u"rga failed on the 90-degree step" in s]) == 1,
+                  repr((topspin_stub.RGA_FAILURES, _nut_exps, _ladder_16)))
+        else:
+            check("nutation[%s]: the modelled rga succeeded everywhere; the "
+                  "block's RG (101) is rga's own result on expno 80, not an "
+                  "inherited gain, on every step" % flavor,
+                  not topspin_stub.RGA_FAILURES
+                  and _nut_exps == [101.0] * len(NUTATION_EXPNOS)
+                  and not [s for a, s in _log if a == "SHOW_STATUS"
+                           and u"rga failed" in s],
+                  repr((topspin_stub.RGA_FAILURES, _nut_exps)))
+        _fid_expnos = []
+        _fid_bad = []
+        for _fd, _p1, _pl, _rg, _tip, _amp in _nut_fids:
+            try:
+                _fid_expnos.append(int(_fd.rstrip(u"/").split(u"/")[-1]))
+            except ValueError:
+                _fid_expnos.append(-1)
+            if abs(_pl + 11.79) > 1e-6 or abs(_rg - _nut_rg_want) > 1e-6:
+                _fid_bad.append("%s: PL %r RG %r" % (_fd, _pl, _rg))
+        check("nutation: the stub wrote a full-power physics FID for exactly "
+              "the ten nutation expnos (80..89), each at PLdB 1 -11.79 and at "
+              "the block's RG %g -- no other 1D of the session ran at full "
+              "power" % _nut_rg_want,
+              sorted(_fid_expnos) == list(NUTATION_EXPNOS) and not _fid_bad,
+              repr((sorted(_fid_expnos), _fid_bad))[:400])
+        # amplitudes from the files the script will bundle: the first
+        # sample is the amplitude (phase 0), the noise floor +/- 2000
+        import struct as _struct
+        _amps = {}
+        for _e, _m in zip(NUTATION_EXPNOS, NUTATION_MULTS):
+            _p = os.path.join(name_dir, str(_e), "fid")
+            try:
+                _fh = open(_p, "rb")
+                _buf = _fh.read(400 * 4)
+                _fh.close()
+                _vals = _struct.unpack("<%di" % (len(_buf) // 4), _buf)
+                _amps[_m] = max([abs(v) for v in _vals])
+            except CATCHABLE:
+                _amps[_m] = None
+        _best = None
+        if None not in _amps.values() and len(_amps) == len(NUTATION_MULTS):
+            _p90 = 7.0
+            while _p90 <= 11.0:
+                _ss = 0.0
+                _sa = 0.0
+                for _m in NUTATION_MULTS:
+                    _s = abs(_math.sin(_math.pi / 2.0 * _m * 8.5 / _p90))
+                    _ss = _ss + _s * _s
+                    _sa = _sa + _amps[_m] * _s
+                _a = _ss and (_sa / _ss) or 0.0
+                _res = 0.0
+                for _m in NUTATION_MULTS:
+                    _s = abs(_math.sin(_math.pi / 2.0 * _m * 8.5 / _p90))
+                    _res = _res + (_amps[_m] - _a * _s) ** 2
+                if _best is None or _res < _best[0]:
+                    _best = (_res, _p90, _a)
+                _p90 = _p90 + 0.001
+        _fit_ok = 0
+        if _best is not None:
+            _s1 = abs(_math.sin(_math.pi / 2.0 * 8.5 / _best[1]))
+            _fit_ok = (abs(_best[1] - NUTATION_P90_TRUE_US) < 0.03
+                       and abs(_best[1] - 8.5) > 0.17
+                       and _amps[2.0] == min(_amps.values())
+                       and abs(_amps[1.0] - _best[2] * _s1) < 0.01 * _best[2]
+                       and _amps[1.0] > 0.9 * _best[2])
+        check("nutation: the ten FID amplitudes follow A90 |sin(pi/2 P1 / "
+              "P90_true)| -- a grid fit recovers the stub's P90_true %.3f us "
+              "within 0.03 us, 3%% away from the declared 8.5 us the steps "
+              "were scaled from; the 2.0 step is the smallest (the "
+              "180-degree null), the 1.0 step within 1%% of the fitted A90"
+              % NUTATION_P90_TRUE_US, _fit_ok,
+              "fit %r amps %r" % (_best, _amps))
     # For the wrapper: the recovery check (facility_report must refit the
     # injected offset within its stated uncertainty) runs in python3.
     print "INJECTED_CLOCK_OFFSET: %.6e" % topspin_stub.INJECTED_CLOCK_OFFSET

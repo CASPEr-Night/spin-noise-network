@@ -44,7 +44,7 @@ TESTING="$REPO/testing"
 command -v jython >/dev/null || { echo "ERROR: jython not on PATH"; exit 2; }
 command -v python3 >/dev/null || { echo "ERROR: python3 not on PATH"; exit 2; }
 
-# Seventeen end-to-end variants: the two plain modes on the legacy console
+# Twenty end-to-end variants: the two plain modes on the legacy console
 # model, the desktest under seven TopSpin 4.4 fault flavors (strict F1
 # map; F1 map stale until RE(); enum name rejected -> one scripted operator
 # step; F1 readback echoing the direct TD; lying dimensionality readback;
@@ -62,8 +62,15 @@ command -v python3 >/dev/null || { echo "ERROR: python3 not on PATH"; exit 2; }
 # must run, "sharp(standard)" first, no dialog -- every legacy flavor
 # models Oulu's 3.7.0 of 2026-10-02, where PUTPAR DSPFIRM "sharp" popped
 # a console dialog without raising, so the v0.7.7 script, which wrote it
-# on every expno, fails them all), plus desktest with the optional rdopt
-# + sweep features
+# on every expno, fails them all), the desktest on a 3.x console whose
+# rga fails on the nutation block's full-power step (legacy-rgafail,
+# v0.8.2: the curve must fall back to RG 1, recorded, no dialog) and the
+# desktest with the nonutation flag (the block skipped with the reason
+# recorded; every flavor acquires the nutation curve otherwise), the
+# desktest with the sparseladder flag (the dense two-visit RG ladder of
+# the v0.8.2 addendum skipped with the reason recorded; every flavor
+# acquires it otherwise), plus desktest with the optional rdopt + sweep
+# features
 # on under legacy AND the strict flavor (structure/dialog/meta coverage --
 # mock modes exercise the flow, not the physics).
 for RUN in "legacy simulate" "legacy desktest" "ts44 desktest" \
@@ -74,6 +81,9 @@ for RUN in "legacy simulate" "legacy desktest" "ts44 desktest" \
            "legacy-noacqu2 simulate" "legacy-noacqu2 desktest" \
            "legacy-dru desktest" "legacy-dru-refused desktest" \
            "legacy-nocouple desktest" \
+           "legacy-rgafail desktest" \
+           "legacy desktest nonutation" \
+           "legacy desktest sparseladder" \
            "legacy desktest rdopt sweep autostep" \
            "ts44-strict desktest rdopt sweep autostep"; do
     set -- $RUN
@@ -280,7 +290,11 @@ echo "--- wind-aware halo + sidereal-modulation fit (test_wind_sidereal) ---"
 python3 "$TESTING/test_wind_sidereal.py" --out-dir "$CLOCKWORK/windsidereal"
 
 echo ""
-echo "JYTHON HARNESS: ALL PASS (simulate + desktest x 13 console flavors"
+echo "JYTHON HARNESS: ALL PASS (simulate + desktest x 14 console flavors"
+echo "                + nutation curve: physics FIDs fitted, rga fallback,"
+echo "                  nonutation skip"
+echo "                + dense two-visit RG ladder: levels, seeded order,"
+echo "                  sparseladder skip"
 echo "                + selftest"
 echo "                + packer round-trip"
 echo "                + clock-offset recovery: realism, powered, null,"

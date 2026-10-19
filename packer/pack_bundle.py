@@ -128,13 +128,13 @@ import zipfile
 
 # Kept in sync with the repository VERSION file (a literal, because this
 # script may be copied standalone); testing/static_check.py enforces it.
-PACKER_VERSION = "0.8.1"
+PACKER_VERSION = "0.8.2"
 SCHEMA_VERSION = "2.0"
 
 GAMMA_1H_MHZ_PER_T = 42.5774806   # same constant spin_noise_run.py uses
 
 ROLES = ("setup", "rg_ladder", "reference_open", "noise", "reference_close",
-         "noise_tune", "sweep_signcal", "row_probe")
+         "noise_tune", "sweep_signcal", "row_probe", "nutation")
 RUN_MODES = ("live", "simulate", "desktest", "archival-repackage",
              "synthetic-injection", "external-acquisition")
 
@@ -1703,7 +1703,7 @@ def build_meta(vendor, reader, data_dir, answers):
     # the row geometry the console's receiver unit accepted and the data
     # content check of every pseudo-2D block).  A repack must not lose the
     # record of a refused block.
-    for key in ("rd_optimize", "row_probe"):
+    for key in ("rd_optimize", "row_probe", "nutation", "rg_ladder_dense"):
         if isinstance(cal_ans.get(key), dict):
             cal[key] = cal_ans[key]
 

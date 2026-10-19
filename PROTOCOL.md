@@ -133,18 +133,112 @@ pseudo-2D **reference** before the noise block; the **noise acquisition**
 itself — a pseudo-2D using the `zgnoise2d` pulse program, which contains *no
 pulse at all*, just receiver-open acquisition row after row at maximum
 stable gain; and a closing reference identical to the opening one (drift
-check). Nothing in the protocol pulses your sample at high power, and
-nothing touches your probe beyond ordinary tune/match and shimming. On the
+check). Apart from the ten short pulses of the calibration block below
+(from v0.8.2 — at the console's own calibrated 90° power, the same pulses
+`pulsecal` uses), nothing in the protocol pulses your sample at high
+power, and nothing touches your probe beyond ordinary tune/match and
+shimming. On the
 vendor paths (the packer's Agilent quickstart, from v0.7.1) the gain ladder
 is randomized and repeated — integer-dB levels in ~5 dB steps from 0 to the
 sample's non-overflow maximum, each visited three times in one random
 order — because a monotonic ladder cannot separate receiver compression
 from signal drift: both SIU sessions showed a ~10% amplitude roll-off
 toward the top rung that was degenerate with drift; the TopSpin script
-follows in a later release.
+follows from v0.8.2 with the dense ladder described below.
 
 **Expected wall-clock time:** ~45 minutes for the default run, of which you
-are needed for the first ~5 (the dialogs). Then walk away.
+are needed for the first ~5 (the dialogs) and, from v0.8.2, the seven or
+eight minutes of the dense gain ladder and the pulse-calibration block
+that follow the four legacy rungs. Then walk away.
+
+### A dense receiver-gain ladder (new in v0.8.2, unreleased)
+
+The four legacy rungs stay exactly as they are (RG 1, 8, 64 and the
+`rga` maximum at expnos 10, 14, 15, 16), but four rungs visited once
+cannot separate receiver compression from signal drift — the report has
+said so on every bundle (`rg_ladder.model = degenerate_single_visit`) —
+and the step from the reference gain to the noise gain, which the
+transduction constant assumes to be exactly the ratio of the two RG
+numbers, was an extrapolation between rungs that merely bracket it. From
+v0.8.2 the script therefore adds a dense ladder right after the legacy
+rungs, at expnos 300–363: about seventeen levels, geometric from RG 1 to
+the ladder maximum at two per octave (1, 1.4, 2, 2.8, 4, 5.7, 8, …), with
+the reference gain (a quarter of the maximum) and the noise gain (the
+maximum) always among them as levels of their own. Every level is
+visited **twice**: once in a seeded random order and once in the reverse
+of that order, so each gain is seen once early and once late in the
+ladder — that is what lets a slow drift of the signal be told apart from
+a gain-dependent compression. The seed is the session date, recorded, so
+the order is reproducible. About 34 small-flip 1Ds, each the ~1° quick
+acquisition the legacy rungs use: three to four minutes, attended. Your
+console quantises a requested gain to its own table (about 1 dB steps on
+Avance III and Neo, 3 dB on older consoles); the gain it took is what
+`acqus` records and what the report uses. The argument `sparseladder`
+skips the dense ladder and `meta.json` says so
+(`calibration.rg_ladder_dense.skipped`, `why`); the rungs otherwise
+appear in `calibration.rg_ladder` with their visit number, and
+`rg_ladder_dense` records the levels, the seed and the visit count.
+
+What the report derives from it: the compression of each gain level
+with the drift fitted out (one amplitude, one drift rate and one
+compression factor per level over both visits), the envelope of the
+drift-corrected compression as today, and — new — the **bridge measured
+at the two gains that matter**: the ratio of the fitted amplitudes at
+the noise gain and the reference gain against the linear ratio of the
+two RG numbers (`rg_ladder.bridge_measured`, `ratio_of_ratios` with its
+error). From it the report computes the transduction constant the
+headline would have with the measured bridge
+(`transduction.rg_bridge_cross_check`, `applied_to_headline: false`);
+the headline keeps the declared linear bridge, so every existing bundle's
+report changes by added keys only. QA: WARN "RG ladder bridge" when the
+ratio of ratios leaves 0.97–1.03, INFO — never FAIL — when the dense
+ladder is absent or was skipped.
+
+### Pulse calibration kept as data (new in v0.8.2, unreleased)
+
+Every bundle so far records the 90° pulse only as a number
+(`calibration.p90_us`, with the power it applies at), and every stored
+pulsed experiment — the ladder rungs and the references — is acquired at
+the ~1° small flip, which the script derives from that number by
+attenuating the calibrated power by 39.08 dB. The tip angle that enters
+the transduction constant, and so every exclusion, therefore rests on an
+attenuation arithmetic that nobody can re-check from the raw files. From
+v0.8.2 the calibration itself travels in the bundle: after the gain
+ladders and before the row probe, while you are still at the console, the script
+acquires ten quick 1D FIDs (`zg`, one scan, 20 s recycle delay) at the
+**console's calibrated 90° power**, with the pulse length set to 0.25,
+0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5 and 3 times the calibrated P90 — a
+nutation curve, at expnos 80–95 (ten used, sixteen reserved). The 1 × P90
+step is acquired first and `rga` is run once on it; that receiver gain is
+kept for every step and recorded — the small-flip ladder's gain is never
+reused for a full-power FID. Cost: about four minutes, attended.
+
+The block runs **only at the calibrated power the script has read back
+from the console** — the same parameter it attenuates for the small flip.
+On a console where that power cannot be read (a legacy parameter set, a
+blank calibration dialog) the block is skipped rather than run at a
+guessed power, and `meta.json` says why (`calibration.nutation.skipped`,
+`why`); the argument `nonutation` skips it deliberately. Nothing else
+pulses at full power, and the noise blocks remain pulse-free. The block
+has not yet run on hardware; its first live run is attended, as for
+everything new.
+
+What the report derives from it (`science.nutation`): the early-time
+amplitude of each FID, a least-squares fit of
+A(P1) = A₉₀ |sin(π P1 / 2 P90)| with P90 and A₉₀ free, and the fitted P90
+against the declared one — the 180° null at 2 × P90 and the 270° peak at
+3 × P90 locate P90 by symmetry, independently of any amplitude
+calibration. A step whose samples reach the ADC's full scale is marked
+clipped and left out of the fit. From A₉₀ the report predicts the
+amplitude of a ~1° reference FID at the reference gain and compares it
+with what the references measured — the small-flip cross-check, a direct
+test of the 39 dB attenuation arithmetic and of the receiver between the
+two gains. Both enter the report as cross-check keys and QA rows (WARN
+when the fitted P90 differs from the declared one by more than 5%, or
+when the cross-check ratio leaves 0.9–1.1; INFO, never FAIL, when the
+block is absent or skipped); the exclusion headline keeps the declared
+tip, so reports of earlier bundles do not change. Bundles from the
+Agilent path do not carry the block until that driver gains it.
 
 ### Optional modes (off by default)
 
@@ -156,7 +250,9 @@ documented in `docs/design_rdopt_locksweep.md`:
   carrier), measures the small-flip FID decay rate at each (the decay is
   1/T2* + the radiation-damping rate), and runs the whole session at the
   offset with the strongest radiation damping. Needs an ATM probe;
-  without one it skips itself with a note.
+  without one it skips itself with a note. Why a tuning away from the
+  conventional optimum helps, and what it costs: *Tuning: spin noise
+  versus pulses*, below.
 - `xpy spin_noise_run sweep` — **field-stepped sweep** (v0.6:
   carrier-follow "spectral tiling"): instead of one long noise block, a
   ladder of noise blocks at stepped fields — up to 15 steps over up to
@@ -186,6 +282,81 @@ documented in `docs/design_rdopt_locksweep.md`:
   button. An off-target reading waits 10 s and is measured once more
   before the step is judged or a dialog opens, because the field is
   still settling after a re-lock.
+
+## Tuning: spin noise versus pulses
+
+A probe has two tuning optima, and the one every operator knows is not
+the one spin noise wants.
+
+**The conventional optimum** — `atma`, `wobb`, the minimum of the
+reflected-power curve at the Larmor frequency — matches the probe to
+50 Ω at the line. It is the *transmit* optimum: the shortest 90° pulse
+per watt, and the state the probe's power ratings assume.
+
+**The receive optimum** is where the preamplifier sees the source
+impedance at which its own noise contribution is smallest. Noise
+matching and power matching are different conditions, and the cable
+between probe and preamplifier transforms the impedance with frequency,
+so the receive optimum sits some hundreds of kHz from the conventional
+tune — above or below, depending on the probe and its cabling (on
+cryoprobes the literature finds it 150–500 kHz below nominal). The
+spin-noise literature calls it the spin-noise tuning optimum: there the
+thermal spin-noise line is a pure absorptive dip; detuned from it the
+line acquires a dispersive component and, far enough away, turns into a
+bump. That progression is what the report's `tuning_ladder` section
+reads, and the dispersive fraction of the headline line (`coadd_fit
+.disp_norm`) is the number to watch. (Marion & Desvaux, J. Magn. Reson.
+193, 153 (2008); Nausner et al., J. Magn. Reson. 198, 73 (2009);
+Pöschko et al., ChemPhysChem 15, 3639 (2014).)
+
+**What the network has measured so far — provisional.** Oulu, Avance III
+HD 500, room-temperature BBO probe, 90/10 H₂O/D₂O, 16 October 2026:
+`xpy spin_noise_run rdopt` scanned seven tunings from −500 to +250 kHz
+and kept +250 kHz; the session then ran there.
+
+| | conventional tune (three sessions, 5–6 Oct) | +250 kHz (16 Oct) |
+|---|---|---|
+| spin-noise dip, fraction of the floor | 0.287–0.295 | 0.355 |
+| dispersive fraction of the line | 0.24 | 0.08 |
+| 90° pulse | 8.44 µs | 9.66 µs |
+| reference FID decay rate | 94.1–94.6 /s | 94.8 /s |
+| noise floor at the noise gain (counts²/Hz) | 10.65 | 11.02 |
+
+A deeper, more symmetric dip is the receive optimum showing itself; the
+longer pulse is the transmit efficiency paid for it. Two caveats, which
+is why this table will be replaced: the scan that ran (v0.8.0 defaults)
+stopped at +250 kHz, the very setting it chose, so the optimum was not
+bracketed — v0.8.1 scans to +600 kHz; and the scan's own figure of
+merit, the decay rate of a small-flip FID, ranked +250 kHz 11% above the
+conventional tune while the session's references show no such
+difference, so the dispersive fraction of the spin-noise line is the
+better criterion and the one a future version will rank by. The example
+will be updated once a scan brackets the optimum.
+
+**Advice by application.**
+
+- *Spin-noise sessions, and any receive-limited acquisition* (weak
+  signals, dilute samples, long signal averaging): tune to the receive
+  optimum. The same noise-matching condition gives the best
+  signal-to-noise for ordinary pulsed spectra — the literature above
+  reports ten to twenty percent — at the price of a longer pulse. In the
+  network, start sessions with `xpy spin_noise_run rdopt`; the report's
+  `rd_optimize` block records what was scanned and chosen.
+- *Transmit-limited work* (hard broadband pulses, decoupling, anything
+  near the probe's power limit): keep the conventional tune. The pulses
+  are shorter and the probe stays inside the regime its ratings were
+  measured in.
+- *Hygiene.* The script leaves the probe at the tuning it chose. A
+  probe parked a few hundred kHz off is harmless for the next user,
+  whose `atma` brings it back, but run `atma` yourself before handing
+  the instrument over — until the script does it at the end of a
+  session (queued).
+- *Seeing it on your own instrument without the script:* with the lock
+  off and no pulses, record a minute of noise around the water line at
+  the conventional tune and at a few steps of detuning either side; the
+  spin-noise dip is deepest and most symmetric at the receive optimum.
+  The `tuning_ladder` role in the bundle format is exactly this
+  measurement, and the report compares the settings.
 
 ## What gets uploaded
 

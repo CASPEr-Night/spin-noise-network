@@ -243,6 +243,12 @@ and the axion-mass / axial-vector bookkeeping (g_A = g_aNN * m_a * v).
   added cost, and an operational burden on non-expert facilities.
   Small-angle calibration pulses are the pragmatic channel; only the
   noise blocks themselves must stay pulse-free.
+  v0.8.2 gives that channel its own record (design note:
+  docs/design_nutation_calibration.md): a ten-step
+  nutation curve at the console's calibrated 90-degree power, expnos
+  80..95, P1 = 0.25..3 x P90, rga once on the 90-degree step, so the
+  P90 behind the small-flip tip -- including the one recalibrated at
+  D* in step 4 of section 1 -- can be re-derived from the raw files.
 
 ## 4. Safety posture
 
@@ -250,5 +256,7 @@ No new hardware command names: the features reuse `atma` and `zg`
 through the existing safe_hw_cmd / xcmd_or_dialog guards, and
 everything else is dialogs. static_check's guard assertions continue
 to apply; the clock-audit begin/end pairing check covers the new
-blocks. Nothing pulses beyond the existing small-flip machinery, and
-the noise blocks remain pulse-free zgnoise2d.
+blocks. Nothing pulses beyond the existing small-flip machinery -- except, from
+v0.8.2, the nutation block of section 3, which pulses at the calibrated
+90-degree power through the same guards and never at an unknown one --
+and the noise blocks remain pulse-free zgnoise2d.

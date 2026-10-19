@@ -507,6 +507,51 @@ verifies the outcome from the data. Close the message if it is modal;
 the run continues. (`zgref2d`, which pulses, carries the same `acqt0`
 line as Bruker's `zg2d`.)
 
+**A dense-ladder rung (script v0.8.2 or later, expnos 300–363) reads
+back a different RG from the one requested, two rungs show the same
+gain, or the status line counts an `acq_write_mismatch` during the
+ladder.**
+Expected on most consoles, and not a fault. The dense ladder asks for
+levels two per octave (1, 1.4, 2, 2.8, 4, 5.7, 8, 11, …), but a console
+quantises a written RG to its own gain table — about 1 dB steps on
+Avance III and Neo, 3 dB on older consoles (Torino's Neo returned 22.6
+for a written 25.25) — so a requested 2.8 comes back as the nearest
+table entry, and on a 3 dB console two neighbouring levels can land on
+the same gain. The script treats a readback within one gain step as the
+same gain (as it does for every RG write) and acquires the rung at
+whatever the console took; a readback further off is rewritten once and
+then counted, never dialogued. The gain in `acqus` is the record, and the
+report fits the ladder against that value, so two levels on one gain are
+simply two more visits of it and a shifted level is a level at its real
+gain; `calibration.rg_ladder_dense.levels` keeps the requested list for
+comparison. Only a rung whose `zg` the console refuses outright (a gain
+outside its range — unlikely, since the levels stop at the `rga` maximum
+the legacy rung found) is missing from the 300.. series, and the fit
+uses the rest. Nothing to do on your side.
+
+**TopSpin's receiver-overflow message during the pulse-calibration
+block (script v0.8.2 or later, expnos 80–95), or the report lists
+nutation steps as `clipped`.**
+The block pulses at the console's calibrated 90° power, so its FIDs are
+tens of dB larger than anything else the script acquires: a gain that
+suits the ~1° ladder rungs overloads the receiver at 90°. That is why
+the script runs `rga` once on the first step — the 1 × P90 step, as
+large an FID as the curve contains (3 × P90 matches it only in the ideal
+sine) — and keeps that gain for the other nine; it is recorded in `calibration.nutation.rg`. If
+`rga` itself fails on that step (the console refuses it or returns
+nothing) the script falls back to RG 1, records it, and the block still
+runs. In the report (`science.nutation`) a clipped step is one whose
+largest sample reaches the ADC's full scale, usually with a run of
+flat-topped samples behind it; it is listed under `clipped`, shown on
+the nutation figure, and left out of the fit, which then rests on the
+remaining steps (`n_steps` says how many). One clipped step near 1 × or
+3 × P90 costs precision, not the result; with too few clean steps the
+fit cannot be made and the report says so, and the session is otherwise
+untouched — the noise blocks never pulse. Nothing to do on your side;
+if it recurs on the same console, include the report's nutation table
+in the failure report (section 7) so the fallback gain for that console
+can be lowered.
+
 **Morning screen shows a "final notes" dialog and there is no zip
 yet.** Normal and by design: the bundle is written AFTER you answer
 the morning notes question. Answer it; the zip appears seconds later.
@@ -738,6 +783,39 @@ re-zip a partially extracted tree.
   direction (`g90_wind_conservative`); the v0.7 worst-parallel number is
   still in the report as the robustness line and under its old keys,
   unchanged. Both are UNPUBLISHED, preliminary constructions.
+- **"nutation P90" WARN, or a large `chi2_dof` under `science.nutation`,
+  with the steps around 2 × P90 sitting well off the fitted curve**
+  (v0.8.2) — radiation damping, not a wrong pulse. Water at the
+  calibrated power is a strongly radiation-damped sample: after a pulse
+  near 180° the magnetisation lies close to −z, where the damping torque
+  that returns it to +z is weakest and any residual transverse component
+  grows before it decays, so the early-time amplitude of the 1.75 ×, 2 ×
+  and 2.5 × steps is neither the sine-curve value nor repeatable from
+  shot to shot, and the null comes out shallower and shifted. The fit
+  therefore takes its P90 mainly from the 90° and 270° steps, where the
+  transverse magnetisation is largest and the curve's sensitivity to P90
+  steepest, and prints `chi2_dof` so a reader can see how far the rest of
+  the curve departs from the sine. A WARN on the fitted-to-declared ratio
+  (beyond 5%) beside a clean small-flip cross-check is more often this
+  than a mis-calibrated P90. The declared P90 still sets the tip the
+  headline uses; nothing is re-weighted silently.
+- **"RG ladder bridge" WARN** (v0.8.2) — the dense ladder measured the
+  step from the reference gain to the noise gain and found it more than
+  3% away from the ratio of the two RG numbers
+  (`rg_ladder.bridge_measured.ratio_of_ratios` outside 0.97–1.03): the
+  fitted amplitude per unit gain is not the same at the two gains, either
+  because the receiver compresses at the noise gain or because the
+  console's gain table is not exactly what its RG numbers say. It is a
+  diagnosis of the bridge, not a fault in the data: the transduction
+  constant and the exclusion headline still use the declared linear
+  bridge, and `transduction.rg_bridge_cross_check` prints the κ·M₀ the
+  measured bridge would give (`applied_to_headline: false`) so the size of
+  the effect is visible. Look at the compression curve in the ladder
+  figure: a roll-off at the top rungs with a flat drift term is
+  compression; a flat curve with a drift term is the receiver behaving and
+  the sample drifting. An INFO row instead of this one means the bundle has
+  no dense ladder (older script, or `sparseladder`), and the bridge is the
+  bracketed extrapolation it always was.
 
 ---
 

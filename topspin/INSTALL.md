@@ -107,7 +107,10 @@ operator dialog when missing).
    `baseopt`, 2026-09-30) makes it walk a ladder of a longer transfer
    delay and shorter rows, up to ~5 min, and the row length it settles
    on is recorded in `meta.json` (`calibration.row_probe`) — a console
-   property, not a fault. Then walk away. Default total time is ~45 min
+   property, not a fault. From v0.8.2 the dense gain ladder (expnos
+   300–363, 3–4 min) and the pulse-calibration block (expnos 80–95,
+   ~4 min) run between the four rungs and the row probe; stay for them
+   too. Then walk away. Default total time is ~45 min
    (30 min noise block + setup/references). Overnight option available.
 7. A final dialog shows the path of the finished bundle zip
    (`spinnoise_<slug>_<timestamp>_<hex>.zip`) and the one-line upload
@@ -129,6 +132,8 @@ Dataset `SPINNOISE_<date>_<time>` in your current data directory:
 |---|---|
 | 1 | setup: tune/match, shim, P90 calibration |
 | 10, 14, 15, 16 | RG ladder: quick 1° 1D at RG = 1, 8, 64, max (rungs 2–4 sit at 14–16 because 11–13 are reserved) |
+| 300–363 | dense RG ladder (v0.8.2, unreleased): ~17 small-flip quick 1Ds per visit, RG geometric from 1 to the `rga` maximum at two per octave plus the reference gain (max/4) and the noise gain (max); two visits — a seeded random order, then its reverse — ~34 rungs, 3–4 min attended; the console's quantised RG in `acqus` is the record; `sparseladder` skips it (recorded) |
+| 80–95 | nutation (v0.8.2, unreleased): `zg` at the console's calibrated 90° power, P1 = 0.25–3 × P90 in ten steps (1 × P90 first, `rga` once there and that RG kept), 1 scan, D1 20 s, ~4 min attended — the pulse calibration kept as data; skipped and recorded where the power cannot be read back, or with `nonutation` |
 | 17 | row_probe (v0.7.7): `zgnoise2d`, RG 1, 2+ rows per attempt — finds the row length / transfer delay `d11` the receiver unit accepts; the last attempt's data stay here |
 | 11 | reference_open: `zgref2d`, 1° pseudo-2D, ~170 s of rows (8 × ~21 s at the default row) |
 | 12 | **noise**: `zgnoise2d`, *no pulse at all*, NS=1/row, RG max stable, rows fill the chosen duration |

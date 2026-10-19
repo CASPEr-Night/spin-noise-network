@@ -98,6 +98,14 @@ matplotlib):
      single-visit ladder cannot, and says so (monotonic, bracketed,
      randomized or time order unknown). Rungs without a line (amplitude <= 0) are
      excluded and listed, never fitted.
+  4b. Nutation block (calibration.nutation, script 0.8.2+): the pulse
+     calibration kept as data -- quick 1Ds at the calibrated 90-degree
+     power with P1 = 0.25..3 x P90, fitted to A90 |sin(pi P1 / (2 P90))|
+     over the unclipped steps; the fitted P90 and a small-flip cross-
+     check against the references are reported (science.nutation,
+     transduction.tip_cross_check, WARN/OK/INFO rows) while kappa*M0
+     and the exclusion keep the declared tip. Absent on older bundles
+     and on the Agilent path: stated, nothing else changes.
   5. References: A0 back-extrapolation, linewidth, open/close line-position
      stability, reference-tail floor vs gain-bridged noise floor.
   6. Headline numbers: spin-coupled floor fraction, temperature-contrast
@@ -203,6 +211,19 @@ PAIRING_FACTOR_2020 = 1.4          # A0-vs-window pairing factor (absolute calib
 BACKACTION_RANGE_2020 = (2.7, 3.7)  # cold-circuit back-action suppression range
 RG_POWER_ENVELOPE_UNTESTED = 0.20   # +/-20% in power if the RG ladder is absent
 RG_LEVEL_REL_TOL = 0.005            # rungs within 0.5% in rg are one gain level
+# Pulse calibration kept as data (v0.8.2): the nutation block's thresholds.
+# The protocol's small-flip attenuation (spin_noise_run.py
+# SMALL_FLIP_EXTRA_DB: P1 = P90 at the calibrated power + 20 log10(90) dB,
+# a ~1 degree tip); the nutation cross-check states the tip the references
+# would have at the FITTED P90 with this attenuation when the power
+# levels are not comparable.
+SMALL_FLIP_EXTRA_DB = 39.08
+NUTATION_P90_WARN_FRAC = 0.05          # |P90_fit / P90_declared - 1| -> WARN
+NUTATION_SMALL_FLIP_BAND = (0.9, 1.1)  # measured / predicted reference A0
+NUTATION_CLIP_FULLSCALE = 0.90         # max |sample| / full scale -> clipped
+NUTATION_FLAT_TOP_RUN = 4              # consecutive samples at the maximum
+NUTATION_FLAT_TOP_MIN_FRACTION = 0.10  # ... counted only above this level
+
 
 # Carrier-displacement sign calibration (role sweep_signcal): the apparent
 # offset must move by -d (physical) or +d (mirrored) within this fraction
@@ -4811,6 +4832,8 @@ def analyze_rg_ladder(bundle, meta, f0_guess, fs_default):
                 "n_points_complex": int(rows.shape[1]),
                 "group_delay_points_used": g,
                 "started_local": exps[expno].get("started_local")}
+        if entry.get("visit") is not None:
+            rung["visit"] = entry.get("visit")      # dense ladder (0.8.2)
         # the gain the receiver actually applied is the one its own
         # parameter file records; the declared ladder step can differ
         # when the console rounds a requested gain (Agilent DD2: integer
@@ -4915,6 +4938,7 @@ def analyze_rg_ladder(bundle, meta, f0_guess, fs_default):
             "model": "drift_compression",
             "slope_counts_per_rg": k0,
             "levels": lv_out,
+            "_fit_cov": cov.tolist(),       # level-scale covariance (bridge)
             "drift": {"beta_per_min": beta, "beta_err_per_min": beta_err,
                       "beta_pct_per_min": 100.0 * beta,
                       "beta_err_pct_per_min": 100.0 * beta_err,
@@ -5014,6 +5038,867 @@ def analyze_rg_ladder(bundle, meta, f0_guess, fs_default):
             "delay of the 2020 consoles was assumed for the FID start, as "
             "for the references" % (grpdly_assumed, GRPDLY_DEFAULT))
     return out
+
+
+# ============================================================================
+# Dense receiver-gain ladder (v0.8.2 addendum): the measured gain bridge
+# ============================================================================
+# calibration.rg_ladder_dense (spin_noise_run.py 0.8.2+): up to 64 extra
+# small-flip rungs at expnos 300.., two visits per level at two levels per
+# octave from RG 1 to max_rg plus the reference gain (max_rg/4) and the
+# noise gain (max_rg) exactly, appended to calibration.rg_ladder with a
+# "visit" key.  analyze_rg_ladder's multi-visit model (amp = A rg c(rg)
+# (1 + beta (t - t0))) then separates compression from drift, and the
+# fitted per-level amplitudes at the two gains the transduction bridges
+# give the MEASURED bridge.  Everything here is a cross-check: the
+# headline kappa*M0 keeps the declared linear bridge rg_noise / rg_ref
+# (axion_exclusion), the measurement enters as rg_ladder.bridge_measured
+# and transduction.rg_bridge_cross_check, and its QA row is WARN/OK/INFO,
+# never FAIL.
+
+RG_BRIDGE_BAND = (0.97, 1.03)        # ratio_of_ratios outside -> WARN
+RG_BRIDGE_LEVEL_MATCH_FRAC = 0.10    # a level this close stands in, noted
+
+
+def _dense_ladder_summary(dense_meta):
+    if not isinstance(dense_meta, dict):
+        return {"present": False}
+    if dense_meta.get("skipped"):
+        return {"present": True, "skipped": True,
+                "why": dense_meta.get("why") or "no reason recorded"}
+    expnos = dense_meta.get("expnos") or []
+    return {"present": True, "skipped": False,
+            "n_expnos": len(expnos),
+            "n_levels": len(dense_meta.get("levels") or []),
+            "visits": dense_meta.get("visits"),
+            "seed": dense_meta.get("seed")}
+
+
+def _nearest_level(levels, rg):
+    """(index, level, note) of the fitted ladder level at rg: an exact
+    match within RG_LEVEL_REL_TOL, else the nearest within
+    RG_BRIDGE_LEVEL_MATCH_FRAC with a note, else (None, None, why)."""
+    best, best_d = None, None
+    for i, lv in enumerate(levels):
+        d = abs(lv["rg"] / rg - 1.0)
+        if best_d is None or d < best_d:
+            best, best_d = i, d
+    if best is None:
+        return None, None, "no fitted ladder level"
+    if best_d <= RG_LEVEL_REL_TOL:
+        return best, levels[best], None
+    if best_d <= RG_BRIDGE_LEVEL_MATCH_FRAC:
+        return best, levels[best], ("nearest level rg %.4g stands in for "
+                                    "rg %.4g (%.1f%% off)"
+                                    % (levels[best]["rg"], rg, 100 * best_d))
+    return None, None, ("no ladder level within %.0f%% of rg %.4g (nearest "
+                        "%.4g)" % (100 * RG_BRIDGE_LEVEL_MATCH_FRAC, rg,
+                                   levels[best]["rg"]))
+
+
+def ladder_bridge_measured(ladder, rg_ref, rg_noise, dense_meta=None):
+    """rg_ladder.bridge_measured: the amplitude ratio between the noise
+    gain and the reference gain as the ladder's drift-corrected
+    per-level fit measures it, against the linear ratio the transduction
+    applies.  amplitude_ratio_fitted = (c_noise rg_noise) / (c_ref
+    rg_ref) with c the fitted per-level compression (lowest level = 1),
+    amplitude_ratio_linear = rg_noise / rg_ref, ratio_of_ratios their
+    quotient (= c_noise / c_ref on exactly matched levels) with its
+    1-sigma error from the fit covariance.  available False with `why`
+    when the ladder model carries no per-level compression (a single-
+    visit ladder), when either gain has no level, or when a gain is
+    unknown; the dense_ladder summary says whether the 0.8.2 block was
+    acquired, skipped, or is absent (older bundles)."""
+    out = {"available": False, "rg_ref": rg_ref, "rg_noise": rg_noise,
+           "band": list(RG_BRIDGE_BAND),
+           "dense_ladder": _dense_ladder_summary(dense_meta)}
+    if not isinstance(rg_ref, (int, float)) or not rg_ref > 0 \
+            or not isinstance(rg_noise, (int, float)) or not rg_noise > 0:
+        out["why"] = ("reference or noise receiver gain unknown: no bridge "
+                      "to measure")
+        return out
+    if not ladder.get("available"):
+        out["why"] = "no usable RG ladder: %s" % ladder.get("note", "?")
+        return out
+    if ladder.get("model") != "drift_compression" or not ladder.get("levels"):
+        out["why"] = ("ladder model '%s' carries no fitted per-level "
+                      "compression (levels must repeat with usable time "
+                      "stamps to separate compression from drift)"
+                      % ladder.get("model"))
+        return out
+    cov = ladder.get("_fit_cov")
+    levels = ladder["levels"]
+    ir, lr, note_r = _nearest_level(levels, float(rg_ref))
+    inn, ln, note_n = _nearest_level(levels, float(rg_noise))
+    if lr is None or ln is None:
+        out["why"] = "; ".join(w for w in (note_r if lr is None else None,
+                                           note_n if ln is None else None)
+                               if w)
+        return out
+    notes = [n for n in (note_r, note_n) if n]
+    c_r, c_n = float(lr["compression"]), float(ln["compression"])
+    lin = float(rg_noise) / float(rg_ref)
+    fitted = (c_n * float(ln["rg"])) / (c_r * float(lr["rg"]))
+    ratio = fitted / lin
+    err = None
+    if cov is not None and ir is not None and inn is not None:
+        var = float(cov[inn][inn] + cov[ir][ir] - 2.0 * cov[inn][ir])
+        err = float(ratio * math.sqrt(max(var, 0.0)))
+    lo, hi = RG_BRIDGE_BAND
+    out.update({
+        "available": True,
+        "level_ref": {"rg": float(lr["rg"]), "compression": c_r,
+                      "compression_err": lr.get("compression_err"),
+                      "expnos": lr.get("expnos")},
+        "level_noise": {"rg": float(ln["rg"]), "compression": c_n,
+                        "compression_err": ln.get("compression_err"),
+                        "expnos": ln.get("expnos")},
+        "amplitude_ratio_fitted": float(fitted),
+        "amplitude_ratio_linear": float(lin),
+        "ratio_of_ratios": float(ratio),
+        "err": err,
+        "within_band": bool(lo <= ratio <= hi),
+        "level_notes": notes or None,
+        "basis": ("amplitude_ratio_fitted = c(rg_noise) rg_noise / (c(rg_ref) "
+                  "rg_ref) from the ladder's drift-corrected per-level fit "
+                  "(compression relative to the lowest level), "
+                  "amplitude_ratio_linear = rg_noise / rg_ref as the "
+                  "transduction bridges, ratio_of_ratios = fitted / linear "
+                  "with its 1-sigma error from the fit covariance of the two "
+                  "level scales"),
+        "verdict": ("measured gain bridge rg %.4g -> %.4g: x%.4g fitted "
+                    "against x%.4g linear, ratio %.4f%s: %s"
+                    % (rg_ref, rg_noise, fitted, lin, ratio,
+                       (" +/- %.4f" % err) if err is not None else "",
+                       "within %.2f-%.2f" % (lo, hi) if lo <= ratio <= hi
+                       else "OUTSIDE %.2f-%.2f -- the linear bridge in "
+                            "kappa*M0 is off by this factor (headline "
+                            "unchanged by design; see transduction."
+                            "rg_bridge_cross_check)" % (lo, hi)))})
+    return out
+
+
+def rg_bridge_cross_check(bridge, excl):
+    """transduction.rg_bridge_cross_check: the kappa*M0 the headline
+    would have with the MEASURED bridge -- stated, never applied."""
+    tr = excl.get("transduction") if excl.get("available") else None
+    if not tr or not bridge.get("available"):
+        return None
+    km0 = tr.get("kappa_M0_counts")
+    r = bridge["ratio_of_ratios"]
+    return {"rg_ref": bridge["rg_ref"], "rg_noise": bridge["rg_noise"],
+            "amplitude_ratio_linear": bridge["amplitude_ratio_linear"],
+            "amplitude_ratio_fitted": bridge["amplitude_ratio_fitted"],
+            "ratio_of_ratios": r, "err": bridge.get("err"),
+            "band": list(RG_BRIDGE_BAND),
+            "kappa_M0_counts_headline": km0,
+            "kappa_M0_counts_with_measured_bridge": (
+                float(km0 * r) if isinstance(km0, (int, float)) else None),
+            "transduction_rg_bridged": tr.get("rg_bridged"),
+            "applied_to_headline": False,
+            "note": ("the headline kappa*M0 and the exclusion keep the "
+                     "declared linear bridge rg_noise / rg_ref (with D_cal "
+                     "inflated by the ladder envelope when bridged); the "
+                     "dense ladder's measured bridge is a cross-check kept as "
+                     "data, and kappa_M0_counts_with_measured_bridge = "
+                     "headline x ratio_of_ratios is what it would give")}
+
+
+def dense_ladder_qa_row(bridge):
+    """QA 'RG ladder bridge': WARN when the measured ratio_of_ratios
+    leaves RG_BRIDGE_BAND, OK inside it, INFO when the dense ladder is
+    absent or skipped or the bridge could not be measured -- never
+    FAIL."""
+    dl = bridge.get("dense_ladder") or {}
+    lin_txt = ("the transduction bridges rg %s -> %s linearly (x%s)"
+               % (fmt(bridge.get("rg_ref"), 4), fmt(bridge.get("rg_noise"), 4),
+                  fmt(bridge.get("amplitude_ratio_linear")
+                      if bridge.get("available") else
+                      ((bridge["rg_noise"] / bridge["rg_ref"])
+                       if isinstance(bridge.get("rg_ref"), (int, float))
+                       and isinstance(bridge.get("rg_noise"), (int, float))
+                       and bridge["rg_ref"] else None), 4))
+               ).replace("&mdash;", "?")
+    if not dl.get("present"):
+        detail = ("no calibration.rg_ladder_dense block in this bundle "
+                  "(spin_noise_run.py before 0.8.2, or an Agilent session): "
+                  "%s, the bridge is not measured" % lin_txt)
+        if bridge.get("available"):
+            detail += (" -- the legacy ladder's repeated levels nevertheless "
+                       "give %s" % bridge["verdict"])
+        return {"level": "INFO", "check": "RG ladder bridge", "detail": detail}
+    if dl.get("skipped"):
+        return {"level": "INFO", "check": "RG ladder bridge",
+                "detail": "dense ladder skipped by the console script: %s; %s, "
+                          "the bridge is not measured" % (dl["why"], lin_txt)}
+    if not bridge.get("available"):
+        return {"level": "INFO", "check": "RG ladder bridge",
+                "detail": "dense ladder acquired (%s rungs) but the bridge "
+                          "could not be measured: %s; %s"
+                          % (dl.get("n_expnos"), bridge.get("why"), lin_txt)}
+    return {"level": "OK" if bridge["within_band"] else "WARN",
+            "check": "RG ladder bridge",
+            "detail": "%s (dense ladder: %s rungs, %s levels, %s visits, seed "
+                      "%s%s)" % (bridge["verdict"], dl.get("n_expnos"),
+                                 dl.get("n_levels"), dl.get("visits"),
+                                 dl.get("seed"),
+                                 ("; " + "; ".join(bridge["level_notes"]))
+                                 if bridge.get("level_notes") else "")}
+
+
+def dense_ladder_honesty_line(bridge, ladder):
+    """One honesty line when calibration.rg_ladder_dense is present
+    (acquired or skipped); None otherwise, so older bundles' honesty
+    lists are unchanged."""
+    dl = bridge.get("dense_ladder") or {}
+    if not dl.get("present"):
+        return None
+    if dl.get("skipped"):
+        return ("Dense receiver-gain ladder NOT acquired for this session "
+                "(%s): the reference-to-noise gain bridge in kappa*M0 is the "
+                "declared linear RG ratio, inflated into D_cal by the sparse "
+                "ladder's envelope." % dl["why"])
+    if not bridge.get("available"):
+        return ("Dense receiver-gain ladder acquired (%s rungs) but its gain "
+                "bridge could not be measured (%s); kappa*M0 keeps the "
+                "declared linear bridge." % (dl.get("n_expnos"),
+                                             bridge.get("why")))
+    drift = (ladder.get("drift") or {})
+    return ("Dense receiver-gain ladder: %s rungs over %s levels (%s visits, "
+            "seed %s) fitted as compression x drift -- drift %+.3f +/- %.3f "
+            "%%/min, compression envelope %.2f%% in amplitude; the measured "
+            "bridge rg %.4g -> %.4g is %.4f%s times the linear ratio (band "
+            "%.2f-%.2f). The headline kappa*M0 keeps the DECLARED linear "
+            "bridge -- the measurement enters as transduction."
+            "rg_bridge_cross_check only."
+            % (dl.get("n_expnos"), ladder.get("n_levels"), dl.get("visits"),
+               dl.get("seed"), drift.get("beta_pct_per_min", 0.0),
+               drift.get("beta_err_pct_per_min", 0.0),
+               100 * ladder.get("max_abs_fractional_deviation", 0.0),
+               bridge["rg_ref"], bridge["rg_noise"], bridge["ratio_of_ratios"],
+               (" +/- %.4f" % bridge["err"]) if bridge.get("err") is not None
+               else "", RG_BRIDGE_BAND[0], RG_BRIDGE_BAND[1]))
+
+
+# ============================================================================
+# Pulse calibration kept as data: the nutation block (v0.8.2)
+# ============================================================================
+# calibration.nutation (spin_noise_run.py 0.8.2+): quick 1Ds at the
+# CALIBRATED 90-degree power with P1 = multiplier x the declared P90,
+# acquired after the RG ladder so a sceptic can re-derive P90 and the
+# small-flip tip from the raw files instead of trusting the console's
+# pulsecal number and the +39.08 dB attenuation assumption.  Everything
+# here is a CROSS-CHECK: the headline kappa*M0 and the exclusion keep the
+# declared tip (reference_tip_deg), the nutation enters report.json as
+# science.nutation and transduction.tip_cross_check only, and its QA rows
+# are WARN/OK/INFO, never FAIL.
+
+
+def _longest_true_run(mask):
+    """Length of the longest run of consecutive True values."""
+    if mask is None or mask.size == 0 or not mask.any():
+        return 0
+    padded = np.concatenate(([False], mask, [False]))
+    d = np.diff(padded.astype(np.int8))
+    starts = np.flatnonzero(d == 1)
+    ends = np.flatnonzero(d == -1)
+    return int(np.max(ends - starts)) if starts.size else 0
+
+
+def nutation_saturation_check(x, fullscale_fraction):
+    """Receiver-saturation check of one full-power FID: the step's max
+    |sample| against the element type's full scale (raw_int_stats, the
+    same figure the ADC QA row uses) and the longest flat-top run --
+    consecutive samples pinned at the step's own maximum |value| in
+    either channel (a free-induction decay never holds several samples
+    at one extreme value; a saturated receiver does).  Clipped when the
+    full-scale fraction exceeds NUTATION_CLIP_FULLSCALE or a flat top of
+    NUTATION_FLAT_TOP_RUN or more samples sits above
+    NUTATION_FLAT_TOP_MIN_FRACTION of full scale (or, with no full scale
+    declared -- float data -- at any level)."""
+    re_, im_ = np.abs(x.real), np.abs(x.imag)
+    mx = float(max(re_.max() if re_.size else 0.0,
+                   im_.max() if im_.size else 0.0))
+    run = 0
+    if mx > 0:
+        tol = mx * 1e-9
+        run = max(_longest_true_run(re_ >= mx - tol),
+                  _longest_true_run(im_ >= mx - tol))
+    why = []
+    if fullscale_fraction is not None and \
+            fullscale_fraction > NUTATION_CLIP_FULLSCALE:
+        why.append("max |sample| at %.0f%% of full scale"
+                   % (100.0 * fullscale_fraction))
+    if run >= NUTATION_FLAT_TOP_RUN and (
+            fullscale_fraction is None
+            or fullscale_fraction > NUTATION_FLAT_TOP_MIN_FRACTION):
+        why.append("flat top of %d consecutive samples at the maximum "
+                   "|value|" % run)
+    return {"max_abs": mx, "fullscale_fraction": fullscale_fraction,
+            "flat_top_run": int(run), "clipped": bool(why),
+            "why": "; ".join(why) or None}
+
+
+def _spectral_line_amplitude(x, fs, g, f0_guess):
+    """The RG ladder's amplitude estimator on one FID: the magnitude
+    spectrum's peak within 300 Hz of the line guess minus the off-line
+    median (analyze_rg_ladder, unchanged there); with no guess, the
+    in-band argmax."""
+    start = g + 12
+    nfft = 2 ** int(math.floor(math.log(max(x.size - start, 256), 2)))
+    seg = x[start:start + nfft]
+    spec = np.abs(np.fft.fftshift(np.fft.fft(seg - np.mean(seg))))
+    fax = np.fft.fftshift(np.fft.fftfreq(nfft, d=1.0 / fs))
+    inband = np.abs(fax) < EDGE_FRAC * fs
+    if f0_guess is None:
+        f0_guess = float(fax[inband][np.argmax(spec[inband])]) \
+            if inband.any() else 0.0
+    near = np.abs(fax - f0_guess) < 300.0
+    if not near.any():
+        near = inband
+    off = inband & (np.abs(fax - f0_guess) > 400.0)
+    med = float(np.median(spec[off])) if off.any() else 0.0
+    return float(np.max(spec[near]) - med), float(f0_guess)
+
+
+def _nutation_amplitude_sigma(x, fs, g, decay_rate):
+    """Approximate 1-sigma error of analyze_reference_row's A0 estimator
+    for one step: the per-sample noise (robust sigma of the row's last
+    30%, each channel) through the median over the 8-14 ms window (median
+    efficiency 1.2533/sqrt(n)) and the back-extrapolation factor
+    exp(r x 0.011 s).  Near the 180-degree null the envelope median is
+    Rayleigh-biased by ~1.25 sigma; the fit reports chi2/dof against
+    these errors rather than pretending they are exact."""
+    tail = x[int(x.size * 0.7):]
+    if tail.size < 64:
+        return None
+    s = 0.5 * (robust_sigma(tail.real) + robust_sigma(tail.imag))
+    t = (np.arange(x.size) - g) / fs
+    n_m0 = int(np.sum((t > 0.008) & (t < 0.014)))
+    if s <= 0 or n_m0 < 1:
+        return None
+    r = decay_rate if isinstance(decay_rate, (int, float)) and \
+        math.isfinite(decay_rate) else 0.0
+    return float(1.2533 * s / math.sqrt(n_m0) * math.exp(max(r, 0.0) * 0.011))
+
+
+def fit_nutation_curve(p1_us, amps, sigmas, p90_start):
+    """Weighted least squares of A(P1) = A90 |sin(pi P1 / (2 P90))| with
+    P90 and A90 free.  For a given P90 the amplitude is linear, so A90
+    is solved in closed form and P90 found by a grid over 0.5-1.6 x the
+    declared value (the model is periodic in P1/P90 -- the grid pins the
+    branch) refined by golden section; errors from the Jacobian at the
+    optimum, scaled by sqrt(chi2/dof) when chi2/dof > 1.  Returns None
+    with fewer than 3 points."""
+    p = np.asarray(p1_us, dtype=np.float64)
+    a = np.asarray(amps, dtype=np.float64)
+    w = np.asarray([1.0 / (s * s) if s and s > 0 else 0.0 for s in sigmas],
+                   dtype=np.float64)
+    if p.size < 3:
+        return None
+    if not np.all(w > 0):
+        w = np.ones_like(a)           # no usable errors: unweighted
+
+    def shape(p90):
+        return np.abs(np.sin(math.pi * p / (2.0 * p90)))
+
+    def solve(p90):
+        s = shape(p90)
+        den = float(np.sum(w * s * s))
+        a90 = float(np.sum(w * a * s) / den) if den > 0 else 0.0
+        ssr = float(np.sum(w * (a - a90 * s) ** 2))
+        return a90, ssr
+
+    grid = p90_start * np.arange(0.5, 1.6 + 1e-9, 0.0025)
+    ssrs = np.array([solve(g)[1] for g in grid])
+    i = int(np.argmin(ssrs))
+    lo = grid[max(i - 1, 0)]
+    hi = grid[min(i + 1, grid.size - 1)]
+    phi = (math.sqrt(5.0) - 1.0) / 2.0
+    c = hi - phi * (hi - lo)
+    d = lo + phi * (hi - lo)
+    fc, fd = solve(c)[1], solve(d)[1]
+    for _ in range(80):
+        if fc < fd:
+            hi, d, fd = d, c, fc
+            c = hi - phi * (hi - lo)
+            fc = solve(c)[1]
+        else:
+            lo, c, fc = c, d, fd
+            d = lo + phi * (hi - lo)
+            fd = solve(d)[1]
+    p90 = 0.5 * (lo + hi)
+    a90, ssr = solve(p90)
+    n, dof = p.size, p.size - 2
+    chi2_dof = ssr / dof if dof > 0 else None
+    # Jacobian: d/dA90 = s, d/dP90 = A90 sign(sin th) cos th (-th / P90)
+    th = math.pi * p / (2.0 * p90)
+    s = np.abs(np.sin(th))
+    ds = np.sign(np.sin(th)) * np.cos(th) * (-th / p90)
+    J = np.column_stack([s, a90 * ds])
+    cov = None
+    try:
+        cov = np.linalg.inv(J.T @ (J * w[:, None]))
+        scale = max(1.0, chi2_dof) if chi2_dof else 1.0
+        cov = cov * scale
+    except np.linalg.LinAlgError:
+        cov = None
+    a90_err = float(math.sqrt(max(cov[0, 0], 0.0))) if cov is not None else None
+    p90_err = float(math.sqrt(max(cov[1, 1], 0.0))) if cov is not None else None
+    return {"p90_us": float(p90), "p90_err_us": p90_err,
+            "a90_counts": float(a90), "a90_err_counts": a90_err,
+            "ssr": float(ssr), "chi2_dof": (float(chi2_dof)
+                                            if chi2_dof is not None else None),
+            "n_points": int(n), "dof": int(dof),
+            "model": [float(v) for v in a90 * s],
+            "residuals": [float(v) for v in (a - a90 * s)],
+            "weights_used": bool(np.any(w != 1.0)),
+            "basis": ("weighted least squares of A(P1) = A90 |sin(pi P1 / "
+                      "(2 P90))|, P90 and A90 free, P90 started at the "
+                      "declared value (grid 0.5-1.6 x declared, golden-"
+                      "section refinement); 1-sigma errors from the "
+                      "Jacobian at the optimum, scaled by sqrt(chi2/dof) "
+                      "when chi2/dof > 1")}
+
+
+def analyze_nutation(bundle, meta, fs_default, refs=None, f0_guess=None):
+    """science.nutation: the pulse calibration re-derived from the
+    calibration.nutation steps (v0.8.2).  Per step the early time-domain
+    amplitude with analyze_reference_row's estimator (A0_counts, the same
+    group-delay handling as the references), the RG ladder's spectral
+    line amplitude beside it, and a saturation check; a fit of A(P1) =
+    A90 |sin(pi P1 / (2 P90))| over the unclipped steps gives p90_fit_us
+    against the declared P90; with the analysed references, the small-
+    flip cross-check predicts the reference A0 from A90 and the declared
+    tip (predicted = A90 x sin(tip) x RG_ref / RG_nut -- the RG bridge
+    linear in RG, as the transduction bridges) and states the tip the
+    references' own P1 would have at the FITTED P90.
+
+    available False with `why` when the block is absent (bundles before
+    0.8.2: 'no calibration.nutation block'), skipped by the operator
+    (`skipped` True and the script's reason), or on the Agilent path
+    ('not acquired by the Agilent driver') -- the report changes nothing
+    else in those cases."""
+    cal = meta.get("calibration") if isinstance(meta.get("calibration"),
+                                                dict) else {}
+    nut = cal.get("nutation") if isinstance(cal.get("nutation"), dict) \
+        else None
+    p90_decl = cal.get("p90_us")
+    p90_decl = float(p90_decl) if isinstance(p90_decl, (int, float)) and \
+        not isinstance(p90_decl, bool) and p90_decl > 0 else None
+    out = {"available": False, "source": "calibration.nutation",
+           "p90_declared_us": p90_decl}
+    if nut is None:
+        if bundle.vendor == "agilent":
+            out["why"] = "not acquired by the Agilent driver"
+        else:
+            out["why"] = ("no calibration.nutation block in meta.json "
+                          "(spin_noise_run.py before 0.8.2): the pulse "
+                          "calibration is a number, not data")
+        return out
+    out["present"] = True
+    if nut.get("skipped"):
+        out["skipped"] = True
+        out["why"] = ("nutation block skipped by the console script: %s"
+                      % (nut.get("why") or "no reason recorded"))
+        return out
+    expnos = [int(e) for e in (nut.get("expnos") or [])
+              if isinstance(e, (int, float)) and not isinstance(e, bool)]
+    p1s = [float(v) for v in (nut.get("p1_us") or [])
+           if isinstance(v, (int, float))]
+    mults = [float(v) for v in (nut.get("multipliers") or [])
+             if isinstance(v, (int, float))]
+    p90_assumed = nut.get("p90_us_assumed")
+    p90_assumed = float(p90_assumed) if isinstance(
+        p90_assumed, (int, float)) and p90_assumed > 0 else p90_decl
+    if not expnos or len(p1s) != len(expnos):
+        out["why"] = ("calibration.nutation lists %d expno(s) and %d P1 "
+                      "value(s): the step table is unusable"
+                      % (len(expnos), len(p1s)))
+        return out
+    if p90_assumed is None:
+        out["why"] = "no declared P90 (calibration.p90_us) to start the fit from"
+        return out
+    rg_nut = nut.get("rg")
+    rg_nut = float(rg_nut) if isinstance(rg_nut, (int, float)) and \
+        rg_nut > 0 else None
+    power_db = nut.get("power_db")
+    power_db = float(power_db) if isinstance(power_db, (int, float)) and \
+        not isinstance(power_db, bool) else None
+    exps = {e.get("expno"): e for e in meta.get("experiments", [])
+            if isinstance(e, dict)}
+    steps, unreadable, clipped = [], [], []
+    for i, expno in enumerate(expnos):
+        step = {"expno": expno, "p1_us": p1s[i],
+                "multiplier": (mults[i] if i < len(mults) else
+                               (p1s[i] / p90_assumed if p90_assumed else None)),
+                "role": (exps.get(expno) or {}).get("role")}
+        exp_meta = exps.get(expno) or {"expno": expno, "td1_rows": 1}
+        rows, acq = bundle.read_rows(expno, exp_meta)
+        if rows is None:
+            why = bundle.read_errors.get(int(expno), "raw data unreadable")
+            step.update({"readable": False, "why": why, "used_in_fit": False})
+            unreadable.append({"expno": expno, "why": why})
+            steps.append(step)
+            continue
+        fs = float(acq.get("SW_h", exp_meta.get("sw_hz", fs_default)))
+        g = group_delay_points(acq)
+        x = rows[0]
+        ref = analyze_reference_row(x, fs, g)
+        st = bundle.raw_int_stats(expno) or {}
+        sat = nutation_saturation_check(x, st.get("fullscale_fraction"))
+        spec_amp, f0_used = _spectral_line_amplitude(x, fs, g, f0_guess)
+        step.update({
+            "readable": True, "n_rows": int(rows.shape[0]),
+            "fs_hz": fs, "group_delay_points_used": g,
+            "rg_acqus": (float(acq["RG"]) if isinstance(acq.get("RG"),
+                                                        (int, float)) else None),
+            "A0_counts": ref.get("A0_counts"),
+            "early_decay_rate_per_s": ref.get("early_decay_rate_per_s"),
+            "line_center_hz": ref.get("line_center_hz"),
+            "fwhm_amp_hz": ref.get("fwhm_amp_hz"),
+            "spectral_amplitude_counts": spec_amp,
+            "spectral_amplitude_line_guess_hz": f0_used,
+            "A0_sigma_counts": _nutation_amplitude_sigma(
+                x, fs, g, ref.get("early_decay_rate_per_s")),
+            "max_abs": sat["max_abs"],
+            "fullscale_fraction": sat["fullscale_fraction"],
+            "flat_top_run": sat["flat_top_run"],
+            "clipped": sat["clipped"], "clipped_why": sat["why"]})
+        pvals = _jcamp_array(acq, "P") if acq.get("_vendor") != "agilent" \
+            else []
+        if len(pvals) > 1 and pvals[1] > 0:
+            step["p1_us_acqus"] = float(pvals[1])
+            if abs(pvals[1] / p1s[i] - 1.0) > 0.01:
+                step["p1_note"] = ("acqus P1 %.4g us differs from the "
+                                   "recorded %.4g us; the recorded value "
+                                   "is fitted" % (pvals[1], p1s[i]))
+        if rows.shape[0] > 1:
+            step["note"] = ("%d rows in the file; the first is analysed"
+                            % rows.shape[0])
+        if sat["clipped"]:
+            clipped.append(expno)
+        step["used_in_fit"] = not sat["clipped"] and \
+            isinstance(step.get("A0_counts"), float)
+        steps.append(step)
+    if rg_nut is None:
+        rgs = [s["rg_acqus"] for s in steps if s.get("rg_acqus")]
+        rg_nut = float(rgs[0]) if rgs else None
+    out.update({"p90_us_assumed": p90_assumed, "rg": rg_nut,
+                "power_db": power_db, "power_parname": nut.get("power_parname"),
+                "d1_s": nut.get("d1_s"), "td": nut.get("td"),
+                "n_steps_declared": len(expnos), "steps": steps,
+                "clipped": clipped, "unreadable": unreadable,
+                "amplitude_basis": (
+                    "A0_counts: analyze_reference_row's early time-domain "
+                    "amplitude (envelope median over 8-14 ms after the "
+                    "group delay, back-extrapolated with the 8-20 ms decay "
+                    "rate), the estimator the references' kappa*M0 uses; "
+                    "spectral_amplitude_counts: the RG ladder's magnitude-"
+                    "spectrum peak minus the off-line median, reported "
+                    "beside it (radiation damping broadens the full-power "
+                    "line, so it is not fitted)"),
+                "saturation_basis": (
+                    "clipped when max |sample| exceeds %.0f%% of the element "
+                    "type's full scale or %d or more consecutive samples sit "
+                    "at the step's maximum |value| above %.0f%% of full scale"
+                    % (100 * NUTATION_CLIP_FULLSCALE, NUTATION_FLAT_TOP_RUN,
+                       100 * NUTATION_FLAT_TOP_MIN_FRACTION))})
+    fit_steps = [s for s in steps if s.get("used_in_fit")]
+    if len(fit_steps) < 3:
+        out["why"] = ("%d unclipped readable step(s) (need 3): %s"
+                      % (len(fit_steps),
+                         "; ".join(["clipped expno %s" % c for c in clipped]
+                                   + ["unreadable expno %s" % u["expno"]
+                                      for u in unreadable]) or "none acquired"))
+        out["n_steps"] = len(fit_steps)
+        return out
+    fit = fit_nutation_curve([s["p1_us"] for s in fit_steps],
+                             [s["A0_counts"] for s in fit_steps],
+                             [s.get("A0_sigma_counts") for s in fit_steps],
+                             p90_assumed)
+    if fit is None:
+        out["why"] = "nutation fit failed"
+        out["n_steps"] = len(fit_steps)
+        return out
+    for s, m, r in zip(fit_steps, fit["model"], fit["residuals"]):
+        s["model_counts"] = m
+        s["residual_counts"] = r
+    ratio = fit["p90_us"] / p90_assumed
+    out.update({
+        "available": True,
+        "p90_fit_us": fit["p90_us"], "p90_fit_err_us": fit["p90_err_us"],
+        "ratio_fit_over_declared": float(ratio),
+        "A90_counts": fit["a90_counts"], "A90_err_counts": fit["a90_err_counts"],
+        "A90_note": "at the nutation receiver gain rg %s" % (
+            ("%.4g" % rg_nut) if rg_nut else "unrecorded"),
+        "chi2_dof": fit["chi2_dof"], "n_steps": fit["n_points"],
+        "fit_basis": fit["basis"],
+        "p90_verdict": (
+            "fitted P90 %.4g +/- %s us against the declared %.4g us (ratio "
+            "%.4f): %s"
+            % (fit["p90_us"],
+               ("%.2g" % fit["p90_err_us"]) if fit["p90_err_us"] else "?",
+               p90_assumed, ratio,
+               "within the %.0f%% band" % (100 * NUTATION_P90_WARN_FRAC)
+               if abs(ratio - 1.0) <= NUTATION_P90_WARN_FRAC else
+               "OUTSIDE the %.0f%% band -- the declared tip, and with it "
+               "kappa*M0, carries this bias (headline unchanged by design)"
+               % (100 * NUTATION_P90_WARN_FRAC)))})
+    # ---- small-flip cross-check against the references
+    out["small_flip_check"] = _nutation_small_flip_check(
+        out, refs or [], cal, rg_nut, power_db)
+    return out
+
+
+def _nutation_small_flip_check(nut, refs, cal, rg_nut, power_db):
+    """predicted reference A0 from the nutation A90 and the DECLARED tip
+    (the transduction's), measured reference A0, their ratio, and the
+    tip the references' own pulse record implies at the fitted P90."""
+    a90, p90_fit = nut["A90_counts"], nut["p90_fit_us"]
+    readable = [r for r in refs if r.get("readable") and r.get("A0_counts")]
+    gated = [r for r in readable if _line_quality_ok(r)]
+    used = gated or readable
+    base = {"predicted_A1_counts_at_ref_rg": None, "measured_A1_counts": None,
+            "ratio_measured_over_predicted": None, "per_reference": [],
+            "tip_from_nutation_deg": None, "tip_formula": None}
+    if not used:
+        base["note"] = "no readable reference with an A0: no cross-check"
+        return base
+    if not rg_nut:
+        base["note"] = ("nutation receiver gain unrecorded (meta rg and "
+                        "acqus RG): no gain bridge to the references")
+        return base
+    per, tips_nut, unresolved = [], [], []
+    for r in used:
+        tip, basis = reference_tip_deg(r, cal)
+        rg_ref = r.get("rg")
+        if tip is None or not (0.0 < tip < 90.0):
+            unresolved.append("expno %s: %s" % (r.get("expno"), basis))
+            continue
+        if not rg_ref:
+            unresolved.append("expno %s: receiver gain unrecorded"
+                              % r.get("expno"))
+            continue
+        bridge = float(rg_ref) / rg_nut
+        predicted = a90 * math.sin(math.radians(tip)) * bridge
+        entry = {"expno": r.get("expno"), "role": r.get("role"),
+                 "rg": float(rg_ref), "rg_bridge_amplitude": bridge,
+                 "tip_declared_deg": float(tip), "tip_declared_basis": basis,
+                 "predicted_A1_counts": float(predicted),
+                 "measured_A1_counts": float(r["A0_counts"]),
+                 "ratio_measured_over_predicted": float(r["A0_counts"]
+                                                        / predicted)
+                 if predicted > 0 else None}
+        p1_ref = r.get("pw_us") if r.get("data_format") == "agilent" \
+            else r.get("p1_us")
+        if isinstance(p1_ref, (int, float)) and p1_ref > 0 and p90_fit:
+            if r.get("data_format") == "agilent":
+                pw_db = r.get("tpwr_db")
+                if pw_db is not None and power_db is not None:
+                    atten = power_db - float(pw_db)
+                    formula = ("90 deg x pw %.4g us / P90_fit %.4g us x "
+                               "10^(-(nutation tpwr %.3g dB - reference tpwr "
+                               "%.3g dB)/20)" % (p1_ref, p90_fit, power_db,
+                                                 pw_db))
+                else:
+                    atten = SMALL_FLIP_EXTRA_DB
+                    formula = ("90 deg x pw %.4g us / P90_fit %.4g us x "
+                               "10^(-%.2f/20) (the protocol's small-flip "
+                               "attenuation ASSUMED: power levels not "
+                               "comparable)" % (p1_ref, p90_fit,
+                                                SMALL_FLIP_EXTRA_DB))
+            else:
+                pl1 = r.get("pl1_db")
+                if pl1 is not None and power_db is not None:
+                    atten = float(pl1) - power_db
+                    formula = ("90 deg x P1 %.4g us / P90_fit %.4g us x "
+                               "10^(-(reference %s - nutation power %.3g dB "
+                               "%s)/20)"
+                               % (p1_ref, p90_fit,
+                                  r.get("pl1_source") or ("PL1 %.3g dB" % pl1),
+                                  power_db, nut.get("power_parname") or ""))
+                else:
+                    atten = SMALL_FLIP_EXTRA_DB
+                    formula = ("90 deg x P1 %.4g us / P90_fit %.4g us x "
+                               "10^(-%.2f/20) (the protocol's small-flip "
+                               "attenuation ASSUMED: reference power or "
+                               "nutation power unrecorded)"
+                               % (p1_ref, p90_fit, SMALL_FLIP_EXTRA_DB))
+            tip_nut = 90.0 * p1_ref / p90_fit * 10.0 ** (-atten / 20.0)
+            entry["tip_from_nutation_deg"] = float(tip_nut)
+            entry["tip_formula"] = formula
+            tips_nut.append(tip_nut)
+            if base["tip_formula"] is None:
+                base["tip_formula"] = formula
+        per.append(entry)
+    base["per_reference"] = per
+    base["references_used"] = [e["expno"] for e in per]
+    base["reference_selection"] = (
+        "references passing the line-quality gate" if gated else
+        "all readable references (none passes the line-quality gate)")
+    if unresolved:
+        base["unresolved"] = unresolved
+    if not per:
+        base["note"] = "reference tip or gain unresolved: " + " --- ".join(
+            unresolved)
+        return base
+    pred = float(np.mean([e["predicted_A1_counts"] for e in per]))
+    meas = float(np.mean([e["measured_A1_counts"] for e in per]))
+    ratios = [e["ratio_measured_over_predicted"] for e in per
+              if e["ratio_measured_over_predicted"] is not None]
+    ratio = float(np.mean(ratios)) if ratios else None
+    base.update({
+        "predicted_A1_counts_at_ref_rg": pred, "measured_A1_counts": meas,
+        "ratio_measured_over_predicted": ratio,
+        "tip_declared_deg": float(np.mean([e["tip_declared_deg"]
+                                           for e in per])),
+        "tip_from_nutation_deg": (float(np.mean(tips_nut))
+                                  if tips_nut else None),
+        "band": list(NUTATION_SMALL_FLIP_BAND),
+        "formula": ("predicted A1 = A90_fit x sin(tip_declared) x RG_ref / "
+                    "RG_nut (the gain bridge linear in RG, as the "
+                    "transduction's rg bridge); measured A1 = the reference "
+                    "A0 back-extrapolation (mean over the references used); "
+                    "ratio = mean over references of measured / predicted")})
+    if ratio is not None:
+        lo, hi = NUTATION_SMALL_FLIP_BAND
+        base["note"] = (
+            "measured / predicted small-flip amplitude %.4f: %s"
+            % (ratio, "within %.1f-%.1f (the small-flip tip, the %.2f dB "
+                      "attenuation and the receiver gain bridge are "
+                      "consistent with the full-power amplitude)"
+               % (lo, hi, SMALL_FLIP_EXTRA_DB)
+               if lo <= ratio <= hi else
+               "OUTSIDE %.1f-%.1f -- the small-flip tip (attenuator "
+               "linearity, P90) or the RG bridge is off by that factor; "
+               "the headline kappa*M0 keeps the declared tip, so read it "
+               "with this factor in mind" % (lo, hi)))
+    return base
+
+
+def nutation_qa_rows(nut):
+    """The nutation block's QA rows: WARN 'nutation P90' when the fitted
+    P90 is more than NUTATION_P90_WARN_FRAC from the declared, WARN
+    'small-flip linearity' when measured/predicted leaves
+    NUTATION_SMALL_FLIP_BAND, OK rows otherwise, INFO when the block is
+    absent, skipped or unfittable -- never FAIL (a calibration cross-
+    check, not a data defect)."""
+    rows = []
+    if not nut.get("available"):
+        rows.append({"level": "INFO", "check": "nutation P90",
+                     "detail": "%s -- the small-flip tip and kappa*M0 rest "
+                               "on the declared P90 %s us and the protocol's "
+                               "%.2f dB attenuation, not on data"
+                               % (nut.get("why", "nutation block unavailable"),
+                                  fmt(nut.get("p90_declared_us"), 4)
+                                  .replace("&mdash;", "?"),
+                                  SMALL_FLIP_EXTRA_DB)})
+        return rows
+    ratio = nut["ratio_fit_over_declared"]
+    extra = ""
+    if nut.get("clipped"):
+        extra += " -- clipped step(s) excluded: expno %s" % nut["clipped"]
+    if nut.get("unreadable"):
+        extra += " -- unreadable step(s): expno %s" % [
+            u["expno"] for u in nut["unreadable"]]
+    rows.append({"level": ("WARN" if abs(ratio - 1.0) > NUTATION_P90_WARN_FRAC
+                           else "OK"),
+                 "check": "nutation P90",
+                 "detail": "%s; %d step(s) fitted, chi2/dof %s%s"
+                           % (nut["p90_verdict"], nut["n_steps"],
+                              fmt(nut.get("chi2_dof"), 3).replace("&mdash;",
+                                                                 "?"),
+                              extra)})
+    sfc = nut.get("small_flip_check") or {}
+    r = sfc.get("ratio_measured_over_predicted")
+    if r is None:
+        rows.append({"level": "INFO", "check": "small-flip linearity",
+                     "detail": "not cross-checked: %s"
+                               % (sfc.get("note") or "no reference")})
+    else:
+        lo, hi = NUTATION_SMALL_FLIP_BAND
+        rows.append({"level": "OK" if lo <= r <= hi else "WARN",
+                     "check": "small-flip linearity",
+                     "detail": "%s (references %s; tip from the fitted P90 "
+                               "%s deg against the declared %s deg)"
+                               % (sfc.get("note"), sfc.get("references_used"),
+                                  fmt(sfc.get("tip_from_nutation_deg"), 4),
+                                  fmt(sfc.get("tip_declared_deg"), 4))})
+    return rows
+
+
+def nutation_tip_cross_check(nut, excl):
+    """transduction.tip_cross_check (added to an available exclusion when
+    the nutation block is): what the references' tip and kappa*M0 would
+    be at the FITTED P90 -- stated, never applied; the headline keeps the
+    declared tip."""
+    tr = excl.get("transduction") if excl.get("available") else None
+    if not tr or not nut.get("available"):
+        return None
+    sfc = nut.get("small_flip_check") or {}
+    tips = [p["tip_deg"] for p in tr.get("references") or []
+            if isinstance(p.get("tip_deg"), (int, float))]
+    tip_decl = float(np.mean(tips)) if tips else sfc.get("tip_declared_deg")
+    tip_nut = sfc.get("tip_from_nutation_deg")
+    km0 = tr.get("kappa_M0_counts")
+    km0_nut = None
+    if tip_decl and tip_nut and km0 and 0.0 < tip_nut < 90.0:
+        km0_nut = float(km0 * math.sin(math.radians(tip_decl))
+                        / math.sin(math.radians(tip_nut)))
+    return {
+        "p90_declared_us": nut.get("p90_us_assumed"),
+        "p90_fit_us": nut["p90_fit_us"],
+        "p90_fit_err_us": nut.get("p90_fit_err_us"),
+        "ratio_fit_over_declared": nut["ratio_fit_over_declared"],
+        "tip_declared_deg": tip_decl,
+        "tip_from_nutation_deg": tip_nut,
+        "tip_formula": sfc.get("tip_formula"),
+        "small_flip_ratio_measured_over_predicted":
+            sfc.get("ratio_measured_over_predicted"),
+        "kappa_M0_counts_headline": km0,
+        "kappa_M0_counts_at_nutation_tip": km0_nut,
+        "applied_to_headline": False,
+        "note": ("the headline kappa*M0 and the exclusion keep the DECLARED "
+                 "tip (reference_tip_deg); the nutation block is a cross-"
+                 "check kept as data, and kappa_M0_counts_at_nutation_tip "
+                 "is what the same references give at the fitted P90")}
+
+
+def nutation_honesty_line(nut):
+    """One honesty line when calibration.nutation is present (analysed or
+    skipped); None for bundles without the block, whose honesty list is
+    unchanged."""
+    if nut.get("available"):
+        sfc = nut.get("small_flip_check") or {}
+        r = sfc.get("ratio_measured_over_predicted")
+        return ("Pulse calibration kept as data: %d nutation step(s) at the "
+                "calibrated power (expnos %s, rg %s) give P90 = %.4g +/- %s us "
+                "against the declared %.4g us (ratio %.4f)%s; small-flip "
+                "cross-check %s. The headline kappa*M0 and the exclusion keep "
+                "the DECLARED tip -- the nutation enters as transduction."
+                "tip_cross_check only."
+                % (nut["n_steps"],
+                   [s["expno"] for s in nut["steps"] if s.get("used_in_fit")],
+                   fmt(nut.get("rg"), 4).replace("&mdash;", "?"),
+                   nut["p90_fit_us"],
+                   ("%.2g" % nut["p90_fit_err_us"]) if nut.get("p90_fit_err_us")
+                   else "?", nut["p90_us_assumed"],
+                   nut["ratio_fit_over_declared"],
+                   (", clipped step(s) %s excluded" % nut["clipped"])
+                   if nut.get("clipped") else "",
+                   ("measured / predicted reference amplitude %.4f (tip %s deg "
+                    "from the fitted P90 against the declared %s deg)"
+                    % (r, fmt(sfc.get("tip_from_nutation_deg"), 4),
+                       fmt(sfc.get("tip_declared_deg"), 4)))
+                   if r is not None else
+                   "not possible (%s)" % (sfc.get("note") or "no reference")))
+    if nut.get("present"):
+        return ("Pulse calibration NOT kept as data for this session: %s. "
+                "The small-flip tip rests on the declared P90 and the "
+                "protocol's %.2f dB attenuation." % (nut.get("why", "?"),
+                                                     SMALL_FLIP_EXTRA_DB))
+    return None
 
 
 # ============================================================================
@@ -7028,6 +7913,108 @@ def make_exclusion_figure(excl, sidereal=None):
     return fig_to_b64(fig)
 
 
+def make_dense_ladder_figure(ladder, bridge):
+    """amplitude / (A RG) against RG, drift removed, every rung marked by
+    its visit, with the fitted per-level compression c(RG) and its errors
+    as the curve; the reference and noise gains of the bridge marked.
+    None unless the ladder carries the drift-compression fit."""
+    if not ladder.get("available") or ladder.get("model") != \
+            "drift_compression" or not ladder.get("levels"):
+        return None
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    C_DATA, C_FIT, C_ALT = "#3b6ea5", "#c44e52", "#55a868"
+    fig, ax = plt.subplots(figsize=(6.6, 3.9))
+    groups = {}
+    for r in ladder["rungs"]:
+        if r.get("drift_corrected_deviation") is None:
+            continue
+        groups.setdefault(r.get("visit"), []).append(
+            (r["rg"], 1.0 + r["drift_corrected_deviation"]))
+    style = {1: ("o", C_DATA, "visit 1"), 2: ("s", C_ALT, "visit 2")}
+    for v in sorted(groups, key=lambda k: (k is None, k if k is not None else 0)):
+        mk, col, lab = style.get(v, ("^", "0.45", "legacy rung (no visit)"))
+        xs, ys = zip(*groups[v])
+        ax.semilogx(xs, ys, mk, color=col, ms=5, mfc="none", mew=1.3, label=lab)
+    lv = ladder["levels"]
+    ax.errorbar([l["rg"] for l in lv], [l["compression"] for l in lv],
+                yerr=[l["compression_err"] for l in lv], fmt="-", color=C_FIT,
+                lw=1.3, capsize=2, label="fitted compression c(RG)")
+    ax.axhline(1.0, color="0.5", lw=0.7, ls=":")
+    if bridge and bridge.get("rg_ref") and bridge.get("rg_noise"):
+        ax.axvline(bridge["rg_ref"], color="0.3", lw=0.9, ls="--",
+                   label="reference gain %.4g" % bridge["rg_ref"])
+        ax.axvline(bridge["rg_noise"], color="0.3", lw=0.9, ls="-.",
+                   label="noise gain %.4g" % bridge["rg_noise"])
+    ax.set_xlabel("receiver gain (RG)")
+    ax.set_ylabel("amplitude / (A x RG), drift removed")
+    drift = ladder.get("drift") or {}
+    title = ("RG ladder, %d visits of %d levels: drift %+.2f %%/min removed"
+             % (ladder["n_visits"], ladder["n_levels"],
+                drift.get("beta_pct_per_min", 0.0)))
+    if bridge and bridge.get("available"):
+        title += "; bridge ratio %.4f" % bridge["ratio_of_ratios"]
+    ax.set_title(title, fontsize=9.5)
+    ax.legend(frameon=False, fontsize=8, ncol=2)
+    fig.tight_layout()
+    return fig_to_b64(fig)
+
+
+def make_nutation_figure(nut):
+    """Amplitude vs P1 with the fitted |sin| curve, the declared and the
+    fitted P90 marked, clipped / unreadable steps shown as crosses.
+    None when the block is not analysed."""
+    if not nut or not nut.get("available"):
+        return None
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    C_DATA, C_FIT, C_ALT = "#3b6ea5", "#c44e52", "#55a868"
+    used = [s for s in nut["steps"] if s.get("used_in_fit")]
+    left = [s for s in nut["steps"] if s.get("readable")
+            and not s.get("used_in_fit")]
+    fig, ax = plt.subplots(figsize=(6.4, 3.8))
+    ax.errorbar([s["p1_us"] for s in used], [s["A0_counts"] for s in used],
+                yerr=[s.get("A0_sigma_counts") or 0.0 for s in used],
+                fmt="o", color=C_DATA, ms=5, label="step A0 (fitted)")
+    # the y range follows the FITTED steps; a clipped step (a saturated
+    # receiver, amplitudes far off the curve) is drawn clamped at the top
+    # with its value written beside it, so the fit stays legible
+    top = 1.2 * max([nut["A90_counts"]] + [s["A0_counts"] for s in used])
+    if left:
+        for s in left:
+            y = min(s["A0_counts"], 0.96 * top)
+            ax.plot([s["p1_us"]], [y], "x", color="0.4", ms=9, mew=1.8,
+                    label=None)
+            ax.annotate("clipped, excluded (A0 %.3g)" % s["A0_counts"],
+                        (s["p1_us"], y), xytext=(4, -12),
+                        textcoords="offset points", fontsize=7, color="0.3")
+        ax.plot([], [], "x", color="0.4", ms=9, mew=1.8,
+                label="clipped (excluded)")
+    p_max = max(s["p1_us"] for s in nut["steps"] if s.get("p1_us"))
+    xx = np.linspace(0.0, 1.05 * p_max, 400)
+    ax.plot(xx, nut["A90_counts"]
+            * np.abs(np.sin(math.pi * xx / (2.0 * nut["p90_fit_us"]))),
+            "-", color=C_FIT, lw=1.4,
+            label="fit: P90 %.3g us, A90 %.3g" % (nut["p90_fit_us"],
+                                                  nut["A90_counts"]))
+    ax.axvline(nut["p90_us_assumed"], color=C_ALT, lw=1.0, ls="--",
+               label="declared P90 %.3g us" % nut["p90_us_assumed"])
+    ax.axvline(nut["p90_fit_us"], color=C_FIT, lw=1.0, ls=":",
+               label="fitted P90 %.3g us" % nut["p90_fit_us"])
+    ax.set_xlabel("pulse length P1 (us) at the calibrated 90-degree power")
+    ax.set_ylabel("early FID amplitude A0 (counts, rg %s)"
+                  % (("%.4g" % nut["rg"]) if nut.get("rg") else "?"))
+    ax.set_xlim(0.0, 1.05 * p_max)
+    ax.set_ylim(0.0, top)
+    ax.legend(frameon=False, fontsize=8)
+    ax.set_title("Nutation: pulse calibration kept as data (P90 ratio %.3f)"
+                 % nut["ratio_fit_over_declared"], fontsize=10)
+    fig.tight_layout()
+    return fig_to_b64(fig)
+
+
 def make_sidereal_figure(sm):
     """The sidereal-modulation card's figure (spec Sec. 9.5): (a) the
     wind template f(t) at the quoted offset over one sidereal day with
@@ -7405,6 +8392,7 @@ th,td { text-align:left; padding:.3rem .6rem; border-bottom:1px solid var(--bord
 th { color:var(--muted); font-weight:600; }
 .ok { color:var(--ok); font-weight:700; } .warn { color:var(--warn); font-weight:700; }
 .fail { color:var(--fail); font-weight:700; }
+.info { color:var(--muted); font-weight:700; }
 .fig { background:#ffffff; border:1px solid var(--border); border-radius:8px;
        padding:.6rem; margin:.8rem 0; text-align:center; }
 .fig img { max-width:100%; height:auto; }
@@ -7429,6 +8417,163 @@ def fmt(v, nd=3):
             return "%.*g" % (nd, v)
         return "%.*f" % (nd, v)
     return esc(v)
+
+
+def render_dense_ladder_html(ctx):
+    """'Dense receiver-gain ladder and the gain bridge' (v0.8.2 addendum),
+    after the RG ladder: the block's status, the measured bridge against
+    the linear one the transduction applies, and the per-visit figure."""
+    lad = ctx.get("ladder") or {}
+    br = lad.get("bridge_measured") or {}
+    dl = br.get("dense_ladder") or {}
+    parts = []
+    A = parts.append
+    A("<h2>Dense receiver-gain ladder and the gain bridge</h2>"
+      "<div class='card'>")
+    if not dl.get("present"):
+        A("<p class='small'>No dense ladder in this bundle (calibration."
+          "rg_ladder_dense absent: script before 0.8.2, or an Agilent "
+          "session). The transduction bridges the reference gain %s to the "
+          "noise gain %s linearly (&times;%s); the 0.8.2 dense ladder "
+          "(expnos 300+, two visits of every level at two per octave plus "
+          "the two gains exactly) measures that bridge.</p>"
+          % (fmt(br.get("rg_ref"), 4), fmt(br.get("rg_noise"), 4),
+             fmt((br["rg_noise"] / br["rg_ref"])
+                 if isinstance(br.get("rg_ref"), (int, float))
+                 and isinstance(br.get("rg_noise"), (int, float))
+                 and br["rg_ref"] else None, 4)))
+    elif dl.get("skipped"):
+        A("<p class='warn'>Dense ladder skipped by the console script: %s. "
+          "The gain bridge is not measured.</p>" % esc(dl["why"]))
+    else:
+        A("<p>Dense ladder acquired: <b>%s rungs</b> over %s levels, %s "
+          "visits per level, seed %s.</p>"
+          % (fmt(dl.get("n_expnos")), fmt(dl.get("n_levels")),
+             fmt(dl.get("visits")), fmt(dl.get("seed"))))
+    if br.get("available"):
+        A("<p class='%s'><b>Measured bridge</b> rg %.4g &rarr; %.4g: "
+          "&times;%.5g fitted against &times;%.5g linear, ratio of ratios "
+          "<b>%.4f</b>%s (band %.2f-%.2f).</p>"
+          % ("small" if br["within_band"] else "warn", br["rg_ref"],
+             br["rg_noise"], br["amplitude_ratio_fitted"],
+             br["amplitude_ratio_linear"], br["ratio_of_ratios"],
+             (" &plusmn; %.4f" % br["err"]) if br.get("err") is not None
+             else "", br["band"][0], br["band"][1]))
+        A("<table><tr><th>level</th><th>RG</th><th>expnos</th>"
+          "<th>compression c</th></tr>")
+        for name, lv in (("reference gain", br["level_ref"]),
+                         ("noise gain", br["level_noise"])):
+            A("<tr><td>%s</td><td>%.4g</td><td>%s</td><td>%.4f &plusmn; %s"
+              "</td></tr>" % (name, lv["rg"],
+                              esc(", ".join(str(e) for e in lv["expnos"] or [])),
+                              lv["compression"],
+                              fmt(lv.get("compression_err"), 4)))
+        A("</table>")
+        if br.get("level_notes"):
+            A("<p class='warn small'>%s</p>" % esc("; ".join(br["level_notes"])))
+        A("<p class='small'>%s. The headline kappa*M0 keeps the DECLARED "
+          "linear bridge; the measurement is transduction.rg_bridge_cross_"
+          "check in report.json.</p>" % esc(br.get("basis", "")))
+    elif dl.get("present") and not dl.get("skipped"):
+        A("<p class='warn small'>Bridge not measured: %s.</p>"
+          % esc(br.get("why", "?")))
+    A("</div>")
+    if "ladder_dense" in ctx.get("figs", {}):
+        A("<div class='fig'><img alt='ladder_dense' "
+          "src='data:image/png;base64,%s'></div>" % ctx["figs"]["ladder_dense"])
+    return "".join(parts)
+
+
+def render_nutation_html(ctx):
+    """The 'Pulse calibration kept as data' section (v0.8.2), after the
+    RG ladder: the step table, the P90 fit, the small-flip cross-check
+    and the figure; a one-line statement when the block is absent or
+    skipped."""
+    nut = ctx.get("nutation") or {}
+    parts = []
+    A = parts.append
+    A("<h2>Pulse calibration kept as data (nutation)</h2><div class='card'>")
+    if not nut.get("available"):
+        A("<p class='%s'>Not analysed: %s.</p>"
+          % ("small" if not nut.get("present") else "warn",
+             esc(nut.get("why", "nutation block unavailable"))))
+        A("<p class='small'>Every bundle before script 0.8.2 records the "
+          "90-degree pulse as a number only; the tip angle in kappa*M0 then "
+          "rests on the declared P90 and the protocol's %.2f dB small-flip "
+          "attenuation. The nutation block (expnos 80+, quick 1Ds at the "
+          "calibrated power with P1 = 0.25 ... 3 x P90) keeps that "
+          "calibration as data.</p></div>" % SMALL_FLIP_EXTRA_DB)
+        return "".join(parts)
+    A("<p>Fitted <b>P90 = %.4g &plusmn; %s &micro;s</b> against the declared "
+      "%.4g &micro;s (ratio <b>%.4f</b>), A90 = %.4g counts at rg %s, "
+      "&chi;&sup2;/dof %s over %d unclipped step(s)%s.</p>"
+      % (nut["p90_fit_us"],
+         fmt(nut.get("p90_fit_err_us"), 2), nut["p90_us_assumed"],
+         nut["ratio_fit_over_declared"], nut["A90_counts"],
+         fmt(nut.get("rg"), 4), fmt(nut.get("chi2_dof"), 3), nut["n_steps"],
+         (" (clipped and excluded: expno %s)" % esc(nut["clipped"]))
+         if nut.get("clipped") else ""))
+    A("<p class='%s small'>%s</p>"
+      % ("warn" if abs(nut["ratio_fit_over_declared"] - 1.0)
+         > NUTATION_P90_WARN_FRAC else "small", esc(nut["p90_verdict"])))
+    A("<table><tr><th>expno</th><th>P1/P90</th><th>P1 (&micro;s)</th>"
+      "<th>A0 (counts)</th><th>&sigma;</th><th>fit</th><th>residual</th>"
+      "<th>spectral amp</th><th>decay (1/s)</th><th>max |sample|</th>"
+      "<th>flat top</th><th>status</th></tr>")
+    for s in nut["steps"]:
+        if not s.get("readable"):
+            A("<tr><td>%d</td><td>%s</td><td>%s</td><td colspan='9' "
+              "class='warn'>unreadable: %s</td></tr>"
+              % (s["expno"], fmt(s.get("multiplier"), 3), fmt(s.get("p1_us"), 4),
+                 esc(s.get("why", "?"))))
+            continue
+        if s.get("clipped"):
+            status = "<span class='warn'>CLIPPED, excluded</span>"
+        elif s.get("used_in_fit"):
+            status = "fitted"
+        else:
+            status = "not fitted"
+        A("<tr><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
+          "<td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
+          "<td>%s</td></tr>"
+          % (s["expno"], fmt(s.get("multiplier"), 3), fmt(s.get("p1_us"), 4),
+             fmt(s.get("A0_counts"), 5), fmt(s.get("A0_sigma_counts"), 3),
+             fmt(s.get("model_counts"), 5), fmt(s.get("residual_counts"), 4),
+             fmt(s.get("spectral_amplitude_counts"), 5),
+             fmt(s.get("early_decay_rate_per_s"), 4),
+             ("%.3g (%.1f%% FS)" % (s["max_abs"],
+                                    100 * s["fullscale_fraction"]))
+             if s.get("fullscale_fraction") is not None
+             else fmt(s.get("max_abs"), 3),
+             fmt(s.get("flat_top_run")), status))
+    A("</table>")
+    sfc = nut.get("small_flip_check") or {}
+    r = sfc.get("ratio_measured_over_predicted")
+    if r is not None:
+        lo, hi = NUTATION_SMALL_FLIP_BAND
+        A("<p class='%s'><b>Small-flip cross-check:</b> predicted reference "
+          "amplitude %.5g counts at the reference rg, measured %.5g, "
+          "measured / predicted <b>%.4f</b> (band %.1f-%.1f; references %s). "
+          "Tip from the fitted P90: %s&deg; against the declared %s&deg;.</p>"
+          % ("small" if lo <= r <= hi else "warn",
+             sfc["predicted_A1_counts_at_ref_rg"], sfc["measured_A1_counts"],
+             r, lo, hi, esc(sfc.get("references_used")),
+             fmt(sfc.get("tip_from_nutation_deg"), 4),
+             fmt(sfc.get("tip_declared_deg"), 4)))
+        A("<p class='small'>%s. Tip formula: %s.</p>"
+          % (esc(sfc.get("formula", "")), esc(sfc.get("tip_formula") or "n/a")))
+    else:
+        A("<p class='small'>Small-flip cross-check not possible: %s.</p>"
+          % esc(sfc.get("note") or "no reference"))
+    A("<p class='small'>%s. %s. Fit: %s. The headline kappa*M0 and the "
+      "exclusion keep the DECLARED tip; this block is a cross-check kept as "
+      "data (transduction.tip_cross_check in report.json).</p></div>"
+      % (esc(nut.get("amplitude_basis", "")), esc(nut.get("saturation_basis", "")),
+         esc(nut.get("fit_basis", ""))))
+    if "nutation" in ctx.get("figs", {}):
+        A("<div class='fig'><img alt='nutation' "
+          "src='data:image/png;base64,%s'></div>" % ctx["figs"]["nutation"])
+    return "".join(parts)
 
 
 def render_html(ctx):
@@ -7862,6 +9007,12 @@ def render_html(ctx):
     if "ladder" in ctx["figs"]:
         A("<div class='fig'><img alt='ladder' "
           "src='data:image/png;base64,%s'></div>" % ctx["figs"]["ladder"])
+
+    # ---- dense receiver-gain ladder and the measured gain bridge (v0.8.2)
+    A(render_dense_ladder_html(ctx))
+
+    # ---- pulse calibration kept as data (nutation block, v0.8.2)
+    A(render_nutation_html(ctx))
 
     # ---- references
     A("<h2>References and floor calibration</h2><div class='card'>")
@@ -8740,6 +9891,11 @@ def main(argv=None):
     # ---- 4. RG ladder
     ladder = analyze_rg_ladder(bundle, meta, f0_guess, fs_default)
 
+    # ---- 4b. nutation block (v0.8.2): the pulse calibration kept as data,
+    # a cross-check beside the ladder -- kappa*M0 keeps the declared tip
+    nutation = analyze_nutation(bundle, meta, fs_default, refs=refs,
+                                f0_guess=(f0_guess if seed_refs else None))
+
     # ---- 3b. spin-noise tuning ladder (noise_tune blocks, never rows of
     # the headline block)
     tuning, tuning_warnings = analyze_tuning_ladder(
@@ -8974,6 +10130,34 @@ def main(argv=None):
     sidereal, sidereal_qa = sidereal_modulation_fit(meta, noise_res, excl,
                                                     bundle.vendor)
     qa.extend(sidereal_qa)
+    # v0.8.2 nutation block: transduction.tip_cross_check on an available
+    # exclusion (stated, never applied) and the WARN/OK/INFO rows
+    tip_cross_check = nutation_tip_cross_check(nutation, excl)
+    if tip_cross_check is not None:
+        excl["transduction"]["tip_cross_check"] = tip_cross_check
+    qa.extend(nutation_qa_rows(nutation))
+    # v0.8.2 dense ladder: the measured reference-to-noise gain bridge
+    # (rg_ladder.bridge_measured, transduction.rg_bridge_cross_check --
+    # stated, never applied) and its WARN/OK/INFO row
+    cal_bridge = meta.get("calibration") if isinstance(
+        meta.get("calibration"), dict) else {}
+    tr_bridge = excl.get("transduction") if excl.get("available") else None
+    rg_ref_bridge = None
+    if tr_bridge and tr_bridge.get("references"):
+        rg_ref_bridge = tr_bridge["references"][0].get("rg")
+    else:
+        for r in refs:
+            if r.get("readable") and r.get("rg"):
+                rg_ref_bridge = r["rg"]
+                break
+    bridge_measured = ladder_bridge_measured(
+        ladder, rg_ref_bridge, (noise_res or {}).get("rg"),
+        cal_bridge.get("rg_ladder_dense"))
+    ladder["bridge_measured"] = bridge_measured
+    bridge_cross_check = rg_bridge_cross_check(bridge_measured, excl)
+    if bridge_cross_check is not None:
+        excl["transduction"]["rg_bridge_cross_check"] = bridge_cross_check
+    qa.append(dense_ladder_qa_row(bridge_measured))
     if prior_reports:
         current = {"facility_slug": report["facility_slug"],
                    "bundle": report["bundle"],
@@ -9191,6 +10375,13 @@ def main(argv=None):
                        "Sidereal-modulation fit not run: %s."
                        % sidereal.get("skip_reason", "?"))
 
+    dense_line = dense_ladder_honesty_line(bridge_measured, ladder)
+    if dense_line:
+        honesty.append(dense_line)
+    nut_line = nutation_honesty_line(nutation)
+    if nut_line:
+        honesty.append(nut_line)
+
     figs = make_figures(noise_res, refs, ladder, detection)
     fig_excl = make_exclusion_figure(excl, sidereal)
     if fig_excl:
@@ -9198,6 +10389,12 @@ def main(argv=None):
     fig_sid = make_sidereal_figure(sidereal)
     if fig_sid:
         figs["sidereal"] = fig_sid
+    fig_dense = make_dense_ladder_figure(ladder, bridge_measured)
+    if fig_dense:
+        figs["ladder_dense"] = fig_dense
+    fig_nut = make_nutation_figure(nutation)
+    if fig_nut:
+        figs["nutation"] = fig_nut
     ctx = {"report_type": report["report_type"], "meta": meta,
            "bundle_path": bundle_path, "validation_msgs": val_msgs,
            "validation_ok": val_ok, "noise": noise_res, "refs": refs,
@@ -9214,7 +10411,8 @@ def main(argv=None):
            "axion_exclusion": excl,
            "sidereal_modulation": sidereal,
            "tuning_ladder": tuning, "meta_overrides": meta_overrides,
-           "rd_optimize": (meta.get("calibration") or {}).get("rd_optimize")}
+           "rd_optimize": (meta.get("calibration") or {}).get("rd_optimize"),
+           "nutation": nutation}
     html = render_html(ctx)
 
     report["science"] = strip_private({
@@ -9244,6 +10442,7 @@ def main(argv=None):
         "axion_exclusion": excl,
         "sidereal_modulation": sidereal,
         "rd_optimize": (meta.get("calibration") or {}).get("rd_optimize"),
+        "nutation": nutation,
         "qa_flags": qa, "honesty": honesty,
     })
     _write(out_dir, html, report)
