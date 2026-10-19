@@ -857,15 +857,18 @@ _ab = "\n".join(function_body("acquire_block")[0])
 check("timing: ocxo_expected_s takes fixed_s_per_row; every pseudo-2D block "
       "(references, noise, sweep, row probe) goes through acquire_block, "
       "which passes ONE d1 and the session's d11 as the fixed per-row term; "
-      "the 1D rungs pass 0; REF_ROW_FIXED_S (the 30m of v0.7.6) is gone",
+      "the 1D rungs pass 0, as do the nutation steps (v0.8.2: TD_NUTATION, "
+      "NUTATION_D1_S); REF_ROW_FIXED_S (the 30m of v0.7.6) is gone",
       "def ocxo_expected_s(td, swh, ns, rows, d1_s, d1_per_row, fixed_s_per_row):"
       in SRC
       and "return rows * (ns * (aq + d1_per_row * d1_s) + fixed_s_per_row)" in _oe
       and "ocxo_expected_s(td, SWH_HZ, 1, rows, d1_s, 1, d11_s)" in _ab
       and "REF_ROW_FIXED_S" not in SRC
       and "D1_NOISE_S, 2, 0.0" not in SRC
-      and SRC.count("ocxo_expected_s(TD_LADDER, SWH_HZ, 1, 1, D1_REF_S, 1, 0.0)") == 2
-      and len(re.findall(r"ocxo_expected_s\(", SRC)) == 4)
+      and SRC.count("ocxo_expected_s(TD_LADDER, SWH_HZ, 1, 1, D1_REF_S, 1, 0.0)") == 3
+      and re.search(r"ocxo_expected_s\(TD_NUTATION, SWH_HZ, 1, 1, "
+                    r"NUTATION_D1_S,\s*1, 0\.0\)", SRC) is not None
+      and len(re.findall(r"ocxo_expected_s\(", SRC)) == 6)
 check("harness: the references are expected as zgref2d, both pulse programs "
       "are checked in the fake TSHOME pp/user, and the recorded expectations "
       "are checked against the per-role timing model",
@@ -1145,6 +1148,66 @@ check("stub: models the refusing receiver unit -- flavors legacy-dru and "
       '"legacy-dru"' in STUB_SRC and '"legacy-dru-refused"' in STUB_SRC
       and "def HARNESS_MOCK_ACQ" in STUB_SRC and "DRUCONTR" in STUB_SRC
       and "DRU_LAN_BPS" in STUB_SRC and "setLength" in STUB_SRC)
+check("nutation (v0.8.2): section 8c runs only at the calibrated power -- "
+      "set_full_power never dialogs, run_nutation skips with the recorded "
+      "reason ('p90 power unknown' / 'nonutation flag'), rga runs on the "
+      "1.0 step with RG 1 as the fallback, role 'nutation' is clock-audited, "
+      "the packer adds the expnos, 80..95 reserved",
+      "def set_full_power(p90_db, db_parname):" in SRC
+      and "MSG(" not in "\n".join(function_body("set_full_power")[0])
+      and "ask_" not in "\n".join(function_body("run_nutation")[0])
+      and 'why = "p90 power unknown"' in SRC
+      and 'why = "nonutation flag"' in SRC
+      and '{"skipped": True, "why": why}' in SRC
+      and "EXP_NUTATION  = range(80, 96)" in SRC
+      and "NUTATION_MULT = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, "
+          "3.0]" in SRC
+      and "NUTATION_D1_S = 20.0" in SRC and "TD_NUTATION   = TD_LADDER" in SRC
+      and 'clock_block_begin(expno, "nutation", ocxo_s)' in SRC
+      and 'record_experiment(meta, expno, "nutation", t0, now_local(), 1)'
+          in SRC
+      and "+ nutation_expnos + [EXP_ROW_PROBE, EXP_REF_OPEN]" in SRC
+      and "rg = 1.0" in "\n".join(function_body("run_nutation")[0]))
+check("nutation (v0.8.2): the stub writes the physics FID for a full-power "
+      "zg 1D only (HARNESS_MOCK_ACQ) and models the failing rga "
+      "(HARNESS_MOCK_RGA, NameError-guarded in run_rga; flavor "
+      "legacy-rgafail); the harness runs that flavor and the nonutation "
+      "variant and fits the amplitudes back to the stub's P90_true",
+      "def HARNESS_MOCK_RGA" in STUB_SRC and "NUTATION_P90_TRUE_US" in STUB_SRC
+      and '"legacy-rgafail"' in STUB_SRC and "_mock_full_power_1d(" in STUB_SRC
+      and "HARNESS_MOCK_RGA()" in "\n".join(function_body("run_rga")[0])
+      and "except NameError:" in "\n".join(function_body("run_rga")[0])
+      and '"legacy-rgafail desktest"' in SH_SRC
+      and '"legacy desktest nonutation"' in SH_SRC
+      and "NUTATION_FIDS" in ENTRY_SRC and "NUTATION_P90_TRUE_US" in ENTRY_SRC)
+_dl = "\n".join(function_body("run_dense_ladder")[0])
+check("dense RG ladder (v0.8.2 addendum): section 8d after the four legacy "
+      "rungs (unchanged) and before the nutation block -- expnos 300..363 "
+      "reserved, two levels per octave from 1 to max_rg plus max_rg/4 and "
+      "max_rg as explicit levels, two visits (seeded permutation then its "
+      "reverse, seed = the session date, recorded), small-flip rungs exactly "
+      "like the legacy ones (role rg_ladder), entries appended with 'visit', "
+      "calibration.rg_ladder_dense or the 'sparseladder flag' skipped form, "
+      "packer all_expnos and passthrough",
+      "EXP_LADDER_DENSE = range(300, 364)" in SRC
+      and "DENSE_LADDER_PER_OCTAVE = 2" in SRC and "DENSE_LADDER_VISITS = 2" in SRC
+      and "def dense_ladder_levels(max_rg):" in SRC
+      and "def seeded_permutation(n, seed):" in SRC
+      and 'why = "sparseladder flag"' in _dl
+      and '{"expno": expno, "rg": level, "tip_deg": 1.0, "visit": visit}' in _dl
+      and 'clock_block_begin(expno, "rg_ladder", ocxo_s)' in _dl
+      and 'record_experiment(meta, expno, "rg_ladder", t0, now_local(), 1)' in _dl
+      and "set_small_flip(p90_us, p90_db, db_par)" in _dl
+      and "set_rg(level)" in _dl and "ask_" not in _dl and "MSG(" not in _dl
+      and '"levels": levels,' in _dl and '"seed": seed,' in _dl
+      and '"visits": DENSE_LADDER_VISITS,' in _dl
+      and "ladder_seed = to_int(dsname[10:18], None)" in SRC
+      and SRC.find("dense_expnos = run_dense_ladder(") < SRC.find(
+          "nutation_expnos = run_nutation(")
+      and "EXP_LADDER + dense_expnos + rdopt_expnos" in SRC
+      and '"rg_ladder_dense")' in PACKER_SRC
+      and '"legacy desktest sparseladder"' in SH_SRC
+      and "rg_ladder_dense" in ENTRY_SRC and "_lcg_permutation" in ENTRY_SRC)
 check("harness: runs both DRU flavors, expects expno 17 / role row_probe, "
       "checks calibration.row_probe, the row geometry per block and the "
       "data files' content",

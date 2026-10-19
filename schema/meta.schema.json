@@ -558,10 +558,15 @@
        "tip_deg": {
         "type": "number",
         "exclusiveMinimum": 0
+       },
+       "visit": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "OPTIONAL (spin_noise_run.py 0.8.2+, additive; the items object never forbade extra keys, so this documents a key the validator already tolerated). Visit number of a dense-ladder rung (1 = the seeded random pass, 2 = its reverse); absent on the four legacy rungs and on every earlier bundle. See calibration.rg_ladder_dense."
        }
       }
      },
-     "description": "Small-flip 1D acquisitions at increasing receiver gain, used offline to check receiver linearity."
+     "description": "Small-flip 1D acquisitions at increasing receiver gain, used offline to check receiver linearity. From 0.8.2 the dense ladder's rungs (expnos 300..363, two visits per level) are appended here in the same format with the optional visit key; the four legacy rungs stay first."
     },
     "topshim_ok": {
      "type": "boolean",
@@ -615,6 +620,122 @@
        "type": "array"
       }
      }
+    },
+    "nutation": {
+     "type": "object",
+     "description": "OPTIONAL (spin_noise_run.py 0.8.2+, additive, never required; no schema-version bump, by the same rule as rd_optimize and row_probe: an additive object under 'calibration', which carries no additionalProperties restriction, changes no validation outcome for any existing bundle). The pulse calibration kept as data. WHY: every earlier bundle records the 90-degree pulse only as the number calibration.p90_us, and every stored pulsed experiment is the ~1-degree small flip derived from it by attenuating the calibrated power by SMALL_FLIP_EXTRA_DB = 39.08 dB, so the tip angle behind kappa*M0 -- and behind every exclusion -- rested on an attenuation assumption that no reader could re-derive from the raw files. The block acquires a nutation curve after the RG ladder and before the row probe (attended): quick 1Ds (zg, 1 scan, TD = td, recycle delay d1_s) at the console's CALIBRATED 90-degree power -- the read-back parameter power_parname (PLdB1 / PL1), the same one set_small_flip attenuates -- with P1 = multiplier x p90_us_assumed; multipliers 0.25 .. 3.0 (the 180-degree null at 2.0 and the 270-degree peak at 3.0 locate P90 by symmetry, independent of amplitude calibration). The 1.0 step is acquired first; rga runs once on it and that receiver gain (rg) is kept for every step, never the small-flip ladder's. Expnos 80..95 are reserved (at most 16 steps); each is an experiments[] entry and a clock_audit block with role 'nutation'. TWO FORMS, told apart by the required boolean 'skipped': ACQUIRED = {expnos, p1_us, multipliers (parallel arrays, acquisition order), p90_us_assumed, power_db, power_parname, rg, d1_s, td, skipped: false}; SKIPPED = {skipped: true, why} -- 'p90 power unknown' (legacy console or blank dialog: the block never runs at an unknown power) or the operator's 'nonutation' flag. The minimal validator cannot make the acquired keys conditionally required, so only 'skipped' is required here; the per-key types apply whenever a key is present. The report derives science.nutation from the raw files (fitted P90 against the declared one, clipped steps, the small-flip cross-check); the exclusion headline keeps the declared tip. The Agilent/packer paths do not write this object until their drivers gain the block.",
+     "required": [
+      "skipped"
+     ],
+     "properties": {
+      "skipped": {
+       "type": "boolean",
+       "description": "False when the nutation curve was acquired; true when the block did not run (see why)."
+      },
+      "why": {
+       "type": "string",
+       "description": "Skipped form only: why the block did not run, e.g. 'p90 power unknown' or 'nonutation flag'."
+      },
+      "expnos": {
+       "type": "array",
+       "minItems": 1,
+       "items": {
+        "type": "integer",
+        "minimum": 1
+       },
+       "description": "Acquired form: the expno of each step, in acquisition order (80..95)."
+      },
+      "p1_us": {
+       "type": "array",
+       "minItems": 1,
+       "items": {
+        "type": "number",
+        "exclusiveMinimum": 0
+       },
+       "description": "Acquired form: the pulse length P1 of each step in microseconds, parallel to expnos."
+      },
+      "multipliers": {
+       "type": "array",
+       "minItems": 1,
+       "items": {
+        "type": "number",
+        "exclusiveMinimum": 0
+       },
+       "description": "Acquired form: P1 / p90_us_assumed of each step, parallel to expnos (default list 1.0 first, then 0.25, 0.5, 0.75, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0)."
+      },
+      "p90_us_assumed": {
+       "type": "number",
+       "exclusiveMinimum": 0,
+       "description": "Acquired form: the declared 90-degree pulse length the steps were scaled from (calibration.p90_us at the time of the block)."
+      },
+      "power_db": {
+       "type": "number",
+       "description": "Acquired form: the calibrated 90-degree power the block ran at, in the console's units for power_parname (dB on PLdB1 / PL1), as read back."
+      },
+      "power_parname": {
+       "type": "string",
+       "description": "Acquired form: the TopSpin power parameter that was written for the block ('PLdB 1' or 'PL 1')."
+      },
+      "rg": {
+       "type": "number",
+       "exclusiveMinimum": 0,
+       "description": "Acquired form: the receiver gain rga chose on the 1.0 x P90 step and kept for every step (1 when rga failed and the fallback was used)."
+      },
+      "d1_s": {
+       "type": "number",
+       "exclusiveMinimum": 0,
+       "description": "Acquired form: recycle delay D1 in seconds (20 s by default, >= 5 T1 of water at 11.7 T)."
+      },
+      "td": {
+       "type": "integer",
+       "minimum": 1,
+       "description": "Acquired form: points per step (TD, the ladder's 16384 by default)."
+      }
+     }
+    },
+    "rg_ladder_dense": {
+     "type": "object",
+     "description": "OPTIONAL (spin_noise_run.py 0.8.2+, additive, never required; no schema-version bump, same rule as nutation / row_probe / rd_optimize). The dense receiver-gain ladder. WHY: four rungs visited once cannot separate receiver compression from signal drift (the report's rg_ladder.model = degenerate_single_visit), and the bridge from the reference gain to the noise gain was an extrapolation between rungs that bracket it. The script keeps the four legacy rungs (expnos 10, 14, 15, 16) and then, unless the argv flag 'sparseladder' is given, acquires small-flip quick 1Ds at expnos 300..363: levels geometric from RG 1 to the ladder maximum at two per octave plus, always, the reference gain (max/4) and the noise gain (max) as levels of their own; every level visited twice -- visit 1 in a seeded random permutation, visit 2 in the reverse order -- so each level is seen once early and once late. The rungs themselves are appended to calibration.rg_ladder in the existing item format with the optional 'visit' key; the console quantises a requested RG and the acqus value is the record. TWO FORMS, told apart by the required boolean 'skipped': ACQUIRED = {expnos, levels (the requested levels, before quantisation), seed, visits, skipped: false}; SKIPPED = {skipped: true, why} ('sparseladder flag'). Only 'skipped' is required (the minimal validator has no conditionals); per-key types apply when present. The report derives per-level compression with drift separated, rg_ladder.bridge_measured at the two gains the transduction bridges, and transduction.rg_bridge_cross_check (applied_to_headline: false); the headline keeps the declared linear bridge.",
+     "required": [
+      "skipped"
+     ],
+     "properties": {
+      "skipped": {
+       "type": "boolean",
+       "description": "False when the dense ladder was acquired; true when it did not run (see why)."
+      },
+      "why": {
+       "type": "string",
+       "description": "Skipped form only: why the dense ladder did not run, e.g. 'sparseladder flag'."
+      },
+      "expnos": {
+       "type": "array",
+       "minItems": 1,
+       "items": {
+        "type": "integer",
+        "minimum": 1
+       },
+       "description": "Acquired form: the expno of every dense rung in acquisition order (300..363; both visits)."
+      },
+      "levels": {
+       "type": "array",
+       "minItems": 1,
+       "items": {
+        "type": "number",
+        "exclusiveMinimum": 0
+       },
+       "description": "Acquired form: the distinct requested RG levels (ascending), including the reference gain and the noise gain; the RG the console took is in each rg_ladder item."
+      },
+      "seed": {
+       "type": "integer",
+       "description": "Acquired form: seed of the visit-1 permutation (the session date as an integer), so the order is reproducible."
+      },
+      "visits": {
+       "type": "integer",
+       "minimum": 1,
+       "description": "Acquired form: visits per level (2 in 0.8.2: the permutation and its reverse)."
+      }
+     }
     }
    }
   },
@@ -655,9 +776,10 @@
        "sweep_signcal",
        "noise_sweep",
        "noise_tune",
-       "row_probe"
+       "row_probe",
+       "nutation"
       ],
-      "description": "Experiment role. rdopt_scan (small-flip 1Ds of the rd-optimize tuning scan), sweep_verify (field-step verification 1Ds), and noise_sweep (per-step pulse-free noise blocks of the field-stepped sweep) were added for the optional rdopt/sweep features; sweep_signcal (the carrier-displacement sign-convention calibration 1D) was added for the v0.6 carrier-follow sweep. noise_tune (v0.7.1) marks pulse-free noise blocks acquired at deliberately varied probe tuning/match settings -- the spin-noise tuning ladder -- each carrying the optional per-experiment tuning object; readers group them by tuning.setting_index and never co-add them with the headline noise block. Enum extensions only, all earlier bundles remain valid. row_probe (v0.7.7): the short zgnoise2d pseudo-2D at expno 17 the orchestrator acquires after the RG ladder to find the row length / data-transfer delay the console's receiver unit accepts (see calibration.row_probe); never co-added with the noise block."
+      "description": "Experiment role. rdopt_scan (small-flip 1Ds of the rd-optimize tuning scan), sweep_verify (field-step verification 1Ds), and noise_sweep (per-step pulse-free noise blocks of the field-stepped sweep) were added for the optional rdopt/sweep features; sweep_signcal (the carrier-displacement sign-convention calibration 1D) was added for the v0.6 carrier-follow sweep. noise_tune (v0.7.1) marks pulse-free noise blocks acquired at deliberately varied probe tuning/match settings -- the spin-noise tuning ladder -- each carrying the optional per-experiment tuning object; readers group them by tuning.setting_index and never co-add them with the headline noise block. Enum extensions only, all earlier bundles remain valid. row_probe (v0.7.7): the short zgnoise2d pseudo-2D at expno 17 the orchestrator acquires after the RG ladder to find the row length / data-transfer delay the console's receiver unit accepts (see calibration.row_probe); never co-added with the noise block. nutation (v0.8.2): the quick 1Ds of the pulse-calibration block at expnos 80..95, acquired at the console's calibrated 90-degree power with P1 = multiplier x P90 (see calibration.nutation); the only full-power experiments in the bundle, never co-added with anything. Enum extension only; earlier bundles remain valid."
      },
      "pulprog": {
       "type": "string",
@@ -756,9 +878,10 @@
          "sweep_signcal",
          "noise_sweep",
          "noise_tune",
-         "row_probe"
+         "row_probe",
+         "nutation"
         ],
-        "description": "Same role vocabulary as experiments[].role, including the optional rdopt/sweep feature roles (enum extension; earlier bundles remain valid). row_probe (v0.7.7): the short zgnoise2d pseudo-2D at expno 17 the orchestrator acquires after the RG ladder to find the row length / data-transfer delay the console's receiver unit accepts (see calibration.row_probe); never co-added with the noise block."
+        "description": "Same role vocabulary as experiments[].role, including the optional rdopt/sweep feature roles (enum extension; earlier bundles remain valid). row_probe (v0.7.7): the short zgnoise2d pseudo-2D at expno 17 the orchestrator acquires after the RG ladder to find the row length / data-transfer delay the console's receiver unit accepts (see calibration.row_probe); never co-added with the noise block. nutation (v0.8.2): the quick 1Ds of the pulse-calibration block at expnos 80..95, acquired at the console's calibrated 90-degree power with P1 = multiplier x P90 (see calibration.nutation); the only full-power experiments in the bundle, never co-added with anything. Enum extension only; earlier bundles remain valid."
        },
        "wall_start_ms": {
         "type": "integer",

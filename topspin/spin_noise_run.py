@@ -123,9 +123,24 @@ AUTOSTEP = False          # True (with SWEEP): TIER-2 programmatic field
                           # console follows docs/autostep_bench_checklist
                           # .md. Runtime: xpy spin_noise_run sweep autostep
 
+NUTATION_ON = 1           # 1 (default): acquire the nutation curve of
+                          # section 8c -- the 90-degree pulse calibration
+                          # kept as DATA (v0.8.2,
+                          # docs/design_nutation_calibration.md).  0 with the
+                          # argv flag 'nonutation'; meta.json records why
+                          # the block did not run.  Runtime:
+                          #     xpy spin_noise_run nonutation
+
+DENSE_LADDER_ON = 1       # 1 (default): after the four legacy RG rungs,
+                          # acquire the dense two-visit receiver-gain
+                          # ladder (section 8d; docs/design_nutation_
+                          # calibration.md, addendum).  0 with the argv
+                          # flag 'sparseladder'; meta records why.
+                          # Runtime:  xpy spin_noise_run sparseladder
+
 # Single source of truth for the script version.  KEEP IN SYNC with the
 # repository VERSION file (testing/static_check.py enforces the match).
-SCRIPT_VERSION  = "0.8.1"
+SCRIPT_VERSION  = "0.8.2"
 # NOTE: no module constant named PROGRAM_VERSION -- TopSpin's TopCmds
 # exports a FUNCTION of that name and `from TopCmds import *` (below)
 # overwrote the alias, so v0.7.3 bundles carry "<function PROGRAM_VERSION
@@ -160,6 +175,14 @@ EXP_REF_OPEN  = 11
 EXP_NOISE     = 12
 EXP_REF_CLOSE = 13
 EXP_ROW_PROBE = 17
+# v0.8.2: the nutation curve (section 8c) -- 80..95 reserved, at most 16
+# steps.  The present verify 1Ds live at 31..45, rdopt at 20..26, the
+# noise/sweep blocks at 50+, and the sweep's future layout uses 100+/200+,
+# so this range is free.
+EXP_NUTATION  = range(80, 96)
+# v0.8.2 addendum: the dense receiver-gain ladder -- 300..363 reserved (at
+# most 32 levels x 2 visits).
+EXP_LADDER_DENSE = range(300, 364)
 
 # Acquisition geometry.
 # TD per row is kept at a conservative 256k points: safe on every console
@@ -298,6 +321,36 @@ DIGMOD_DIGITAL_READBACKS = ("1", "digital")   # GETPAR: ordinal on 3.x/4.x
 DSPFIRM_SHARP_READBACKS  = ("0", "sharp", "sharp(standard)")
 SMALL_FLIP_EXTRA_DB = 39.08 # 20*log10(90): attenuate calibrated 90-deg
                             # power by this much -> ~1 degree tip at P1=P90
+
+# Nutation curve (v0.8.2, section 8c of main): the pulse calibration kept
+# as data.  Every earlier bundle records the 90-degree pulse only as the
+# number calibration.p90_us, and every stored pulsed experiment is the
+# ~1-degree small flip derived from it by the SMALL_FLIP_EXTRA_DB
+# attenuation -- so the tip angle behind kappa*M0, and every exclusion,
+# rested on an attenuation assumption nobody could re-derive from the raw
+# files.  The block acquires quick 1Ds exactly like the RG ladder rungs
+# (zg, TD_NUTATION points, 1 scan) but at the CALIBRATED 90-degree power,
+# with P1 = multiplier x P90: the 180-degree null at 2.0 and the
+# 270-degree peak at 3.0 locate P90 by symmetry, independent of amplitude
+# calibration.  The 1.0 step is acquired first and rga runs once on it;
+# that RG is kept for every step -- never the small-flip ladder's.
+NUTATION_MULT = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0]
+NUTATION_D1_S = 20.0        # recycle delay: >= 5 T1 of water at 11.7 T
+TD_NUTATION   = TD_LADDER   # points per step (the ladder's quick-1D size)
+
+# Dense receiver-gain ladder (v0.8.2 addendum, section 8d of main).  Four
+# rungs visited once cannot separate receiver compression from signal
+# drift (the report's rg_ladder.model = degenerate_single_visit), and the
+# bridge from the reference gain (max_rg/4) to the noise gain (max_rg) is
+# an extrapolation between rungs that bracket it.  So, after the legacy
+# rungs: small-flip quick 1Ds exactly like them at RG levels geometric
+# from 1 to max_rg at DENSE_LADDER_PER_OCTAVE levels per octave, plus the
+# reference gain and the noise gain as levels of their own, each level
+# visited DENSE_LADDER_VISITS times -- visit 1 in a seeded random
+# permutation, visit 2 in its reverse, so every level is seen once early
+# and once late.  Seed = the session date as an integer, recorded.
+DENSE_LADDER_PER_OCTAVE = 2
+DENSE_LADDER_VISITS = 2
 
 DURATION_CHOICES = ["30 min (default)", "60 min", "180 min",
                     "Overnight (10 h)"]
@@ -495,6 +548,10 @@ try:
             AUTOSTEP = True
         if _al in ("nonoqu", "--nonoqu", "--no-noqu"):
             USE_NOQU = False       # escape hatch: never prefix (v0.8.1)
+        if _al in ("nonutation", "--nonutation", "--no-nutation"):
+            NUTATION_ON = 0        # skip section 8c; meta records why
+        if _al in ("sparseladder", "--sparseladder", "--sparse-ladder"):
+            DENSE_LADDER_ON = 0    # skip section 8d; meta records why
 except CATCHABLE:
     pass
 
@@ -2470,6 +2527,22 @@ def set_small_flip(p90_us, p90_db, db_parname):
             "spin_noise_run: set small-flip power manually")
 
 
+def set_full_power(p90_db, db_parname):
+    """Channel-1 power := the CALIBRATED 90-degree power, i.e. the value
+    the operator confirmed for the read-back parameter db_parname (PLdB 1
+    on TopSpin 3/4, PL 1 on 2.x) -- the same parameter set_small_flip
+    attenuates.  Used by the nutation block (v0.8.2) only.  Returns 1 when
+    the power was written.  Never dialogs and never guesses: with the
+    power unknown (None -- a legacy console whose PLdB1/PL1 cannot be
+    read, or a blank dialog answer) nothing is written and the caller
+    SKIPS the block, because a full-power FID at an unknown power is
+    never acquired."""
+    if p90_db is None or db_parname is None:
+        return 0
+    putpar(db_parname, "%.2f" % p90_db)
+    return 1
+
+
 # A written RG reads back quantised to the console's gain ladder: Torino's
 # Avance Neo returned 22.6 for a written 25.25 (2026-09-21).  Ladders are
 # ~1 dB (x1.12) steps on Avance III/Neo and 3 dB (x1.41) on older
@@ -3048,6 +3121,23 @@ def run_rga():
     """Run receiver gain optimization; return resulting RG (float) or None.
     SIMULATE/DESKTEST return a fixed mock value (no hardware touched)."""
     if hw_skip():
+        # Test seam (v0.8.2), the sibling of HARNESS_MOCK_ACQ: the Jython
+        # harness (testing/jython_entry.py) injects HARNESS_MOCK_RGA to
+        # model an rga that FAILS on a chosen step (the nutation block's
+        # full-power 90-degree FID), in which case the mocked rga leaves
+        # RG alone and returns None -- what the caller must handle.  In
+        # production the NameError path is taken and nothing notices.
+        failed = 0
+        try:
+            failed = HARNESS_MOCK_RGA()
+        except NameError:
+            failed = 0
+        except CATCHABLE:
+            failed = 0
+        if failed:
+            print "spin_noise_run: %s -> mocked 'rga' FAILED (harness " \
+                  "seam)" % hw_mode_name()
+            return None
         print "spin_noise_run: %s -> mocked 'rga' (RG=101)" % hw_mode_name()
         # The real rga leaves its result IN the dataset; the mock does the
         # same so a desktest bundle's calibration.rg_ladder and
@@ -3653,6 +3743,252 @@ def acquire_quick_1d(meta, template, dsname, expno, role, o1_hz,
     clock_block_end(cb)                                # operator drives
     record_experiment(meta, expno, role, t0, now_local(), 1)
     return ds_path(cd)
+
+
+def dense_ladder_levels(max_rg):
+    """Ascending RG levels of the dense ladder: geometric from 1 to max_rg
+    at DENSE_LADDER_PER_OCTAVE levels per octave, plus -- always, and as
+    levels of their own -- the reference gain (max_rg/4, floor 1: section
+    9's moderate_rg) and the noise gain (max_rg); a geometric level within
+    1% of one of those two is dropped in its favour.  Rounded to 0.01 (the
+    console quantises a requested RG further; the acqus value is the
+    record).  Capped so DENSE_LADDER_VISITS visits fit EXP_LADDER_DENSE,
+    the explicit levels kept (never reached for any Bruker RG range)."""
+    if max_rg is None or max_rg < 1.0:
+        max_rg = 1.0
+    moderate = max_rg / 4.0
+    if moderate < 1.0:
+        moderate = 1.0
+    explicit = [round(moderate, 2), round(max_rg, 2)]
+    geometric = []
+    k = 0
+    while k < 200:
+        v = round(2.0 ** (float(k) / DENSE_LADDER_PER_OCTAVE), 2)
+        if v > max_rg * 1.0001:
+            break
+        keep = 1
+        for e in explicit:
+            if abs(v / e - 1.0) < 0.01:
+                keep = 0
+        if keep:
+            geometric.append(v)
+        k = k + 1
+    max_levels = len(EXP_LADDER_DENSE) // DENSE_LADDER_VISITS
+    while len(geometric) + 2 > max_levels and geometric:
+        geometric.pop()
+    levels = geometric + explicit
+    levels.sort()
+    out = []
+    for v in levels:
+        if not out or v != out[-1]:
+            out.append(v)
+    return out
+
+
+def seeded_permutation(n, seed):
+    """Fisher-Yates shuffle of range(n) driven by the 31-bit LCG this
+    script already uses (v = v*1103515245 + 12345 mod 2^31), seeded with
+    seed: deterministic on every Jython the consoles run (the stdlib
+    random's shuffle is not stable across versions), so a recorded seed
+    reproduces the order.  testing/jython_entry.py re-derives it."""
+    order = []
+    i = 0
+    while i < n:
+        order.append(i)
+        i = i + 1
+    v = long(seed) & 0x7fffffff
+    i = n - 1
+    while i > 0:
+        v = (v * 1103515245 + 12345) & 0x7fffffff
+        j = int((v >> 8) % (i + 1))
+        tmp = order[i]
+        order[i] = order[j]
+        order[j] = tmp
+        i = i - 1
+    return order
+
+
+def run_dense_ladder(meta, template, dsname, o1_hz, p90_us, p90_db, db_par,
+                     max_rg, seed):
+    """Section 8d (v0.8.2 addendum), ATTENDED -- right after the four
+    legacy RG rungs (which stay exactly as they are; max_rg is rung 16's
+    rga) and before the nutation block: the dense two-visit receiver-gain
+    ladder (docs/design_nutation_calibration.md, addendum).
+
+    Levels from dense_ladder_levels(max_rg); visit 1 in the seeded random
+    permutation seeded_permutation(len(levels), seed), visit 2 in its
+    reverse.  Each rung is a small-flip quick 1D exactly like a legacy
+    rung (zg, TD_LADDER, SWH_HZ, 1 scan, D1_REF_S, set_small_flip,
+    set_rg(level), clear_raw_data, clock block and experiments[] role
+    "rg_ladder"), appended to calibration.rg_ladder in the existing format
+    plus "visit": 1|2; once per session calibration.rg_ladder_dense =
+    {"expnos", "levels" (ascending), "seed", "visits", "skipped": false}.
+    With the argv flag 'sparseladder' the block is SKIPPED and meta says
+    so: {"skipped": true, "why": "sparseladder flag"}.
+
+    Returns the acquired expnos in acquisition order (empty when skipped)
+    for the bundle packer."""
+    if not DENSE_LADDER_ON:
+        why = "sparseladder flag"
+        say("dense RG ladder skipped: %s" % why)
+        meta["calibration"]["rg_ladder_dense"] = {"skipped": True,
+                                                  "why": why}
+        return []
+    levels = dense_ladder_levels(max_rg)
+    perm = seeded_permutation(len(levels), seed)
+    order = []
+    for k in perm:
+        order.append((levels[k], 1))
+    rev = perm[:]
+    rev.reverse()
+    for k in rev:
+        order.append((levels[k], 2))
+    say("dense RG ladder (%d levels x %d visits = %d quick 1Ds, RG 1 .. %g, "
+        "seed %d, ~%.0f min)"
+        % (len(levels), DENSE_LADDER_VISITS, len(order), max_rg, seed,
+           len(order) * (aq_row_s(TD_LADDER) + D1_REF_S + 1.5) / 60.0))
+    expnos = []
+    i = 0
+    while i < len(order):
+        level = order[i][0]
+        visit = order[i][1]
+        expno = EXP_LADDER_DENSE[i]
+        cd = open_expno(template, dsname, expno)
+        make_1d()                # inherited from the last rung; verifies
+        putpar("PULPROG", "zg")
+        set_common_acq(o1_hz, TD_LADDER, SWH_HZ, 1, D1_REF_S, D11_TRANSFER_S)
+        set_small_flip(p90_us, p90_db, db_par)
+        set_rg(level)
+        clear_raw_data(ds_path(cd))
+        t0 = now_local()
+        ocxo_s = ocxo_expected_s(TD_LADDER, SWH_HZ, 1, 1, D1_REF_S, 1, 0.0)
+        cb = clock_block_begin(expno, "rg_ladder", ocxo_s)
+        run_zg_and_wait(ds_path(cd), "dense RG ladder rung %d/%d (RG=%s, "
+                        "visit %d)" % (i + 1, len(order), level, visit),
+                        ocxo_s, 1, 1)          # attended stage
+        clock_block_end(cb)
+        record_experiment(meta, expno, "rg_ladder", t0, now_local(), 1)
+        meta["calibration"]["rg_ladder"].append(
+            {"expno": expno, "rg": level, "tip_deg": 1.0, "visit": visit})
+        expnos.append(expno)
+        i = i + 1
+    meta["calibration"]["rg_ladder_dense"] = {
+        "expnos": expnos,
+        "levels": levels,
+        "seed": seed,
+        "visits": DENSE_LADDER_VISITS,
+        "skipped": False,
+    }
+    return expnos
+
+
+def nutation_order(mults):
+    """Acquisition order of the nutation multipliers: 1.0 first (rga runs
+    on the 90-degree step and its RG serves every step), then the rest in
+    list order."""
+    out = []
+    for m in mults:
+        if m == 1.0:
+            out.append(m)
+    for m in mults:
+        if m != 1.0:
+            out.append(m)
+    return out
+
+
+def run_nutation(meta, template, dsname, o1_hz, p90_us, p90_db, db_par):
+    """Section 8c (v0.8.2), ATTENDED -- right after the RG ladder, before
+    the row probe, while the operator is at the console: the nutation
+    curve, i.e. the 90-degree pulse calibration kept as DATA (design: docs/design_nutation_calibration.md).
+
+    Each step is a quick 1D exactly like an RG-ladder rung (zg,
+    TD_NUTATION points, SWH_HZ, 1 scan, D11 as set) but at the CALIBRATED
+    90-degree power -- set_full_power writes p90_db into the read-back
+    parameter db_par, the one set_small_flip attenuates -- with
+    P1 = multiplier x p90_us, D1 = NUTATION_D1_S.  The 1.0 x P90 step is
+    acquired first; rga runs ONCE on it and that RG is kept for every
+    step and recorded (never the small-flip ladder's RG, which was set
+    for a ~1-degree FID: a full-power FID at it would clip).  When rga
+    fails the fallback is RG = 1 -- the safe gain for a full-power FID --
+    said on the status line and recorded as the block's rg.
+
+    SKIPPED, with the reason in meta (calibration.nutation = {"skipped":
+    true, "why": ...}), when the operator passed 'nonutation' or when the
+    90-degree power is unknown (p90_db None: legacy console, blank
+    dialog): the block never runs at an unknown power.
+
+    Returns the list of acquired expnos, in acquisition order (empty when
+    skipped), for the bundle packer."""
+    why = None
+    if not NUTATION_ON:
+        why = "nonutation flag"
+    elif p90_db is None or db_par is None:
+        why = "p90 power unknown"
+    if why is not None:
+        say("nutation curve skipped: %s" % why)
+        meta["calibration"]["nutation"] = {"skipped": True, "why": why}
+        return []
+    mults = nutation_order(NUTATION_MULT)
+    if len(mults) > len(EXP_NUTATION):
+        mults = mults[:len(EXP_NUTATION)]
+    say("nutation curve (%d quick 1Ds at the calibrated 90-degree power, "
+        "D1 = %.0f s, ~%.0f min)"
+        % (len(mults), NUTATION_D1_S,
+           len(mults) * (aq_row_s(TD_NUTATION) + NUTATION_D1_S) / 60.0))
+    expnos = []
+    p1s = []
+    done = []
+    rg = None
+    i = 0
+    while i < len(mults):
+        mult = mults[i]
+        expno = EXP_NUTATION[i]
+        p1_us = mult * p90_us
+        cd = open_expno(template, dsname, expno)
+        make_1d()                # inherited from the last rung; verifies
+        putpar("PULPROG", "zg")
+        set_common_acq(o1_hz, TD_NUTATION, SWH_HZ, 1, NUTATION_D1_S,
+                       D11_TRANSFER_S)
+        putpar("P 1", "%.2f" % p1_us)
+        set_full_power(p90_db, db_par)
+        if rg is None:
+            # the first step (1.0 x P90): rga once, kept for every step
+            rg = run_rga()
+            if rg is None:
+                rg = 1.0
+                say("WARNING: rga failed on the 90-degree step -- the "
+                    "nutation curve is acquired at RG = %g (recorded)" % rg)
+                set_rg(rg)
+        else:
+            set_rg(rg)
+        clear_raw_data(ds_path(cd))  # stale template copy must not pass
+        t0 = now_local()
+        ocxo_s = ocxo_expected_s(TD_NUTATION, SWH_HZ, 1, 1, NUTATION_D1_S,
+                                 1, 0.0)
+        cb = clock_block_begin(expno, "nutation", ocxo_s)
+        run_zg_and_wait(ds_path(cd), "nutation step %d/%d (P1 = %.2f us = "
+                        "%g x P90, RG=%s)" % (i + 1, len(mults), p1_us,
+                                              mult, rg),
+                        ocxo_s, 1, 1)          # attended setup stage
+        clock_block_end(cb)
+        record_experiment(meta, expno, "nutation", t0, now_local(), 1)
+        expnos.append(expno)
+        p1s.append(p1_us)
+        done.append(mult)
+        i = i + 1
+    meta["calibration"]["nutation"] = {
+        "expnos": expnos,
+        "p1_us": p1s,
+        "multipliers": done,
+        "p90_us_assumed": p90_us,
+        "power_db": p90_db,
+        "power_parname": db_par,
+        "rg": rg,
+        "d1_s": NUTATION_D1_S,
+        "td": TD_NUTATION,
+        "skipped": False,
+    }
+    return expnos
 
 
 def run_rdopt_scan(meta, template, dsname, o1_hz, p90_us, p90_db, db_par):
@@ -5265,9 +5601,11 @@ def main():
         "This will:\n"
         "  * ask you ~6 questions about your facility and sample\n"
         "  * tune/shim, calibrate the 1H 90-degree pulse\n"
-        "  * record an RG ladder, a short row probe, two small-flip\n"
-        "    references, and a long pulse-free noise block (default\n"
-        "    ~45 min total)\n"
+        "  * record an RG ladder (4 rungs, then a dense two-visit gain\n"
+        "    ladder, ~3 min), a 10-step nutation curve (the 90-degree\n"
+        "    pulse kept as data, ~4 min), a short row probe, two\n"
+        "    small-flip references, and a long pulse-free noise block\n"
+        "    (default ~55 min total)\n"
         "  * write meta.json and pack everything into one zip for upload\n\n"
         "Before continuing:\n"
         "  * a 5 mm tube of water is in the magnet\n"
@@ -5781,6 +6119,29 @@ def main():
     if max_rg is None:
         max_rg = 64.0
 
+    # ---------------------------------------------------------------- 8d
+    # Dense receiver-gain ladder (v0.8.2 addendum), attended: the four
+    # legacy rungs above stay as they are; then RG levels geometric from 1
+    # to max_rg (two per octave) plus the reference and noise gains, each
+    # visited twice (seeded permutation, then its reverse; seed = the
+    # session date, recorded).  Skipped (recorded) with 'sparseladder'.
+    ladder_seed = to_int(dsname[10:18], None)     # SPINNOISE_YYYYMMDD_HHMM
+    if ladder_seed is None:
+        ladder_seed = to_int(time.strftime("%Y%m%d", time.localtime()),
+                             20260101)
+    dense_expnos = run_dense_ladder(meta, template, dsname, o1_hz,
+                                    p90_us, p90_db, db_par, max_rg,
+                                    ladder_seed)
+
+    # ---------------------------------------------------------------- 8c
+    # Nutation curve (v0.8.2), attended: the 90-degree pulse calibration
+    # kept as data -- quick 1Ds at the CALIBRATED power with P1 = 0.25 ..
+    # 3.0 x P90, rga once on the 1.0 step.  Skipped (recorded) with
+    # 'nonutation' or when the power is unknown.  Its RG is its own:
+    # the small-flip ladder's gain is never reused for a full-power FID.
+    nutation_expnos = run_nutation(meta, template, dsname, o1_hz,
+                                   p90_us, p90_db, db_par)
+
     # ---------------------------------------------------------------- 8b
     # Row probe (v0.7.7), attended: which row length / transfer delay
     # this console's receiver unit accepts -- decided by the data content
@@ -5932,8 +6293,8 @@ def main():
     if not os.path.isdir(data_stage):
         os.makedirs(data_stage)
 
-    all_expnos = [EXP_SETUP] + EXP_LADDER + rdopt_expnos \
-        + [EXP_ROW_PROBE, EXP_REF_OPEN] + noise_expnos \
+    all_expnos = [EXP_SETUP] + EXP_LADDER + dense_expnos + rdopt_expnos \
+        + nutation_expnos + [EXP_ROW_PROBE, EXP_REF_OPEN] + noise_expnos \
         + sweep_verify_expnos + [EXP_REF_CLOSE]
     for expno in all_expnos:
         src = os.path.join(name_dir, str(expno))

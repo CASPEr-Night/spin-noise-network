@@ -52,6 +52,7 @@ __all__ = [
     "PUTPAR", "GETACQUDIM", "CURDATA", "RE", "WR", "RE_PATH", "EXIT",
     "SLEEP", "ZG",
     "HARNESS_WALL_MS", "HARNESS_ADVANCE_S", "HARNESS_MOCK_ACQ",
+    "HARNESS_MOCK_RGA",
 ]
 
 # Marker for the script: the API it imported is this stub, not TopSpin.
@@ -73,6 +74,11 @@ STRAY_DIALOGS = []     # console dialogs the API popped on its own (text as
                        # TopSpin 3.7.0 shows it); the harness fails on any
 DRU_REFUSALS = []      # (expno_dir, td, rows, d11_s) per pseudo-2D block the
                        # modelled receiver unit refused (legacy-dru flavors)
+NUTATION_FIDS = []     # (expno_dir, p1_us, pl_db, rg, tip_deg, amplitude) per
+                       # full-power physics FID written (v0.8.2; the harness
+                       # expects exactly the nutation block's ten)
+RGA_FAILURES = []      # expno dirs where the modelled rga failed
+                       # (legacy-rgafail: the nutation block's 90-degree step)
 
 # Console flavor the stub models (HARNESS_TS_FLAVOR).  Common to ALL
 # flavors, per Bruker's documentation and public TopSpin scripts: PARMODE
@@ -171,6 +177,15 @@ DRU_REFUSALS = []      # (expno_dir, td, rows, d11_s) per pseudo-2D block the
 #                   here, as the 3.x parameter editor spells it), never
 #                   reach "sharp", record dspfirm_form "sharp(standard)",
 #                   and raise no dialog.
+#   "legacy-rgafail": legacy-noacqu2 (TopSpin 3.x, GETACQUDIM present) on
+#                   which rga FAILS on the nutation block's full-power
+#                   90-degree step (v0.8.2; HARNESS_MOCK_RGA below) and
+#                   succeeds everywhere else (the RG ladder's rung 16 as
+#                   before).  The script must fall back to RG 1 for the
+#                   whole curve, say so on the status line (no dialog),
+#                   record rg 1 in calibration.nutation and on every
+#                   step's experiments[] entry, and never reuse the
+#                   ladder's small-flip gain for a full-power FID.
 #   In "legacy" and "legacy-2dtemplate", GETACQUDIM does not exist (old
 #   TopSpin), so the GETPAR("PARMODE") ordinal path is what gets
 #   exercised there.
@@ -257,6 +272,7 @@ def configure(current_dataset, template_params, dialog_answers,
     """Install the per-run fixture and reset all logs."""
     del LOG[:], UNSCRIPTED[:], BREACHES[:], ERRMSGS[:], MSGS[:]
     del PUTPAR_FAILURES[:], STRAY_DIALOGS[:], DRU_REFUSALS[:]
+    del NUTATION_FIDS[:], RGA_FAILURES[:]
     _F1_FRESH.clear()
     FLAVOR[0] = flavor
     _PARAMS.clear()
@@ -825,12 +841,175 @@ def _random_row_bytes(td, seed):
     return bb.array()
 
 
+# ---------------------------------------------------------------------------
+# The sample and the probe (v0.8.2): the nutation fixture
+# ---------------------------------------------------------------------------
+# The script's mocked zg writes pseudo-random samples for every 1D it
+# acquires -- fine for the ~1-degree small-flip rungs, whose content no
+# test reads.  The nutation block (section 8c of the script) acquires at
+# the CALIBRATED 90-degree power and the report fits P90 to those FIDs,
+# so for a full-power zg 1D -- PLdB 1 / PL 1 within
+# NUTATION_FULL_POWER_TOL_DB of the calibrated power the fixture's
+# template carries -- HARNESS_MOCK_ACQ writes a physics FID instead: one
+# line of amplitude A90 |sin(tip)|, tip = 90 deg x (P1 / P90_TRUE) x
+# 10^(-(PL - PL_cal) / 20), A90 = NUTATION_A90_PER_RG x RG, an
+# exponential decay shortened by radiation damping in proportion to the
+# transverse magnetization (rate 1/T2* + RD x |sin tip|), and a flat
+# noise floor so the 180-degree null is small, never zero.  P90_TRUE is
+# the STUB's: the fixture declares 8.5 us in the 90-degree dialog while
+# jython_entry sets the truth 3% higher, so a harness check can see the
+# script's declared P90 differ from what the FIDs say by a known amount.
+# A 1D below full power (the rungs, the rdopt / sweep quick 1Ds) and
+# every pseudo-2D keep the script's own pseudo-random mock, so every
+# earlier flavor is unchanged.
+
+NUTATION_P90_TRUE_US = [8.5]      # the probe's true 90-degree pulse at
+                                  # NUTATION_CAL_DB (jython_entry overrides)
+NUTATION_CAL_DB = [-11.79]        # the power P90_TRUE holds at: the
+                                  # template's PLdB 1 (what pulsecal left)
+NUTATION_FULL_POWER_TOL_DB = 3.0  # 'full power': within this of CAL_DB
+NUTATION_A90_PER_RG = 1.2e6       # 90-degree FID amplitude per unit RG,
+                                  # int32 counts (1.2e8 at the mocked rga's
+                                  # RG 101: far below 2^31, never clipped)
+NUTATION_NOISE_COUNTS = 2000      # flat noise floor, +/- counts
+NUTATION_T2STAR_S = 0.4
+NUTATION_RD_RATE_PER_S = 12.0     # radiation damping at full transverse M
+NUTATION_OFFSET_HZ = 120.0        # the line's offset from the carrier
+
+
+def _full_power_state(params):
+    """(tip_deg, pl_db, p1_us, full) for a parameter set -- the tip the
+    probe would deliver for its P 1 at its PLdB 1 / PL 1 -- or None when
+    P 1 or the power cannot be read."""
+    try:
+        p1 = float(params.get("P 1", u""))
+    except (TypeError, ValueError):
+        return None
+    pl = params.get("PLdB 1", u"")
+    if pl in (None, u""):
+        pl = params.get("PL 1", u"")
+    try:
+        pl = float(pl)
+    except (TypeError, ValueError):
+        return None
+    atten = 10.0 ** (-(pl - NUTATION_CAL_DB[0]) / 20.0)
+    tip = 90.0 * (p1 / NUTATION_P90_TRUE_US[0]) * atten
+    full = abs(pl - NUTATION_CAL_DB[0]) <= NUTATION_FULL_POWER_TOL_DB
+    return (tip, pl, p1, full)
+
+
+def _nutation_fid_bytes(td, amp, rate, swh, seed):
+    """td little-endian int32 (re, im interleaved: td/2 complex points at
+    dwell 1/swh) of one decaying line plus the noise floor, as a Java
+    byte[].  The first sample is the amplitude itself (phase 0)."""
+    import math
+    import java.util.Random
+    import java.nio.ByteBuffer
+    import java.nio.ByteOrder
+    rnd = java.util.Random(long(seed))
+    bb = java.nio.ByteBuffer.allocate(4 * td)
+    bb.order(java.nio.ByteOrder.LITTLE_ENDIAN)
+    ib = bb.asIntBuffer()
+    n = td // 2
+    dw = 1.0 / swh
+    w = 2.0 * math.pi * NUTATION_OFFSET_HZ
+    span = 2 * NUTATION_NOISE_COUNTS + 1
+    k = 0
+    while k < n:
+        t = k * dw
+        env = amp * math.exp(-rate * t)
+        re = int(round(env * math.cos(w * t))) \
+            + rnd.nextInt(span) - NUTATION_NOISE_COUNTS
+        im = int(round(env * math.sin(w * t))) \
+            + rnd.nextInt(span) - NUTATION_NOISE_COUNTS
+        ib.put(max(-2147483648, min(2147483647, re)))
+        ib.put(max(-2147483648, min(2147483647, im)))
+        k = k + 1
+    return bb.array()
+
+
+def _mock_full_power_1d(expno_dir, td, ocxo_s):
+    """The physics FID of a full-power zg 1D (see above).  Returns 1 when
+    written -- the step is then handled: file in place, clock advanced --
+    and 0 when the current dataset is not a full-power zg 1D (the script's
+    pseudo-random mock applies)."""
+    if _CUR[0] is None or td is None or td < 64:
+        return 0
+    params = _params_for(_dspath(_CUR[0]))
+    if _u(params.get("PULPROG", u"")).strip(u"<> ") != u"zg":
+        return 0
+    st = _full_power_state(params)
+    if st is None or not st[3]:
+        return 0
+    tip, pl, p1 = st[0], st[1], st[2]
+    import math
+    import java.io.FileOutputStream
+    try:
+        rg = float(params.get("RG", u"1"))
+    except (TypeError, ValueError):
+        rg = 1.0
+    try:
+        swh = float(params.get("SWH", u"6900"))
+    except (TypeError, ValueError):
+        swh = 6900.0
+    s = abs(math.sin(math.radians(tip)))
+    amp = NUTATION_A90_PER_RG * rg * s
+    rate = 1.0 / NUTATION_T2STAR_S + NUTATION_RD_RATE_PER_S * s
+    for fn in ("ser", "fid"):
+        p = os.path.join(_b(expno_dir), fn)
+        if os.path.isfile(p):
+            os.remove(p)
+    fos = java.io.FileOutputStream(os.path.join(_b(expno_dir), "fid"))
+    try:
+        fos.write(_nutation_fid_bytes(td, amp, rate, swh,
+                                      20261019 + int(round(100.0 * p1))))
+    finally:
+        fos.close()
+    if ocxo_s:
+        HARNESS_ADVANCE_S(ocxo_s)
+    NUTATION_FIDS.append((_u(expno_dir), p1, pl, rg, tip, amp))
+    LOG.append(("NUTATION-FID", u"%s P1 %.2f us PL %.2f dB RG %g tip %.1f "
+                u"deg amp %.0f" % (_u(expno_dir), p1, pl, rg, tip, amp)))
+    _say("FULL-POWER FID written (P1 %.2f us at %.2f dB, RG %g -> tip %.1f "
+         "deg, amplitude %.3g counts, P90_true %.3f us): %s"
+         % (p1, pl, rg, tip, amp, NUTATION_P90_TRUE_US[0], expno_dir))
+    return 1
+
+
+def HARNESS_MOCK_RGA():
+    """Model of the console's rga for the script's mocked run_rga (v0.8.2
+    seam, the sibling of HARNESS_MOCK_ACQ).  Logged on every call, with
+    the dataset it ran on (the harness counts where rga ran).  Returns 1
+    -- 'rga failed'; the script's mock then returns None and leaves RG
+    alone -- under legacy-rgafail on a full-power 1D (the nutation
+    block's 90-degree step), 0 otherwise (rga succeeds, RG 101)."""
+    dsdir = u""
+    full = 0
+    if _CUR[0] is not None:
+        dsdir = _u(_dspath(_CUR[0]))
+        st = _full_power_state(_params_for(_dspath(_CUR[0])))
+        if st is not None and st[3]:
+            full = 1
+    LOG.append(("RGA", dsdir))
+    if FLAVOR[0] == "legacy-rgafail" and full:
+        RGA_FAILURES.append(dsdir)
+        LOG.append(("RGA-FAILED", dsdir))
+        _say("RGA FAILED (%s) on a full-power 1D: %s" % (FLAVOR[0], dsdir))
+        return 1
+    return 0
+
+
 def HARNESS_MOCK_ACQ(expno_dir, td, rows, d11_s, ocxo_s):
     """Model of the console's receiver unit for a mocked zg.  Returns 0
     when the block is accepted (the script then writes its own mocked
     raw data and advances the clock), 1 when this function handled the
     step as a REFUSAL (file of the refused shape written, clock advanced
-    by one row plus the abort, refusal logged)."""
+    by one row plus the abort, refusal logged) -- or, since v0.8.2, as a
+    full-power 1D whose physics FID it wrote (every flavor; see the
+    nutation fixture above)."""
+    if (rows is None or rows <= 1) \
+            and _mock_full_power_1d(expno_dir, td, ocxo_s):
+        return 1
     if FLAVOR[0] not in ("legacy-dru", "legacy-dru-refused"):
         return 0
     if rows is None or rows <= 1:
