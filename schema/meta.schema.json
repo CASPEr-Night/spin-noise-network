@@ -904,6 +904,10 @@
          "type": "number"
         },
         "description": "OPTIONAL (v0.8; requested, not yet written by any writer -- documented so the contract is fixed before a console records it). One entry per row of the block, in row order: the start of row i in milliseconds after wall_start_ms, from the ser growth or the console audit trail. Gives the analysis per-row UTC times (rows_timed_basis = per_row); until present, rows are spread uniformly over the block's wall time, row i at wall_start_ms + (i + 1/2) (wall_end_ms - wall_start_ms) / N (block_spread). A writer that records it should give exactly N = td1_rows entries."
+       },
+       "zg_return_lag_s": {
+        "type": "number",
+        "description": "OPTIONAL (v0.8.3, noise blocks only, written only when known). Seconds between the end of the block's acquisition -- the acqus DATE the console writes when the last row is in -- and the moment zg returned to the script. Near zero normally; Torino's overnight blocks (TopSpin 4.4.0) returned 8.96 h and 56.9 h late. When it is large, wall_end_ms marks the return, not the acquisition: readers time the rows from the acqus stamps."
        }
       }
      },
@@ -918,6 +922,10 @@
      "description": "Short label of the tool that answered the time-sync probe (e.g. 'chrony', 'ntpd (ntpq)', 'w32time'); 'unknown' if none did."
     }
    }
+  },
+  "noise_plan": {
+   "type": "object",
+   "description": "OPTIONAL (v0.8.3, no schema-version bump: additive and never required). Written by spin_noise_run.py for the default noise phase (absent under the sweep, whose record is field_sweep): how the phase was sized and what it acquired. Keys: mode ('fixed' | 'weekend'), choice (the dialog label), split (1 under the 'splitnoise' flag), requested_s, weekend_end_local (Monday 07:00 by the console clock, weekend only), weekend_refused[] (reasons the weekend was refused before this choice), deadline_local (the planned end the deadline guard keeps to), row_s, bytes_per_point and bytes_per_point_basis (acqus DTYPA, or 8 assumed), row_bytes, block_max_bytes (splitnoise only), session_max_bytes (the bundle-size ceiling on raw noise, 9 GiB), disk_free_bytes and disk_free_basis, rows_by_time / rows_by_size / rows_by_disk (what each limit allows), rows_planned, capped_by (null | 'bundle_size' | 'disk_space'), disk_short (1 when a fixed duration did not fit the free disk; never shortened for it), blocks_planned, blocks[] {expno (12, then 400, 401, ...), rows_planned, rows, zg_return_lag_s (null when acqus had no DATE), shortened_to_deadline (optional)}, stopped_early (null, or why the deadline guard started no further block), late_returns (blocks whose zg returned more than 10 min after their last row). Every noise block of the phase is also an experiments[] entry with role 'noise' and the same sw_hz/td/rg: readers co-add them as one block."
   },
   "field_sweep": {
    "type": "object",

@@ -968,6 +968,7 @@ check("content: run_zg_and_wait decides on the FILE only (raw_data_file), "
       and "os.path.exists" not in _rz)
 _rp = "\n".join(function_body("run_row_probe")[0])
 _an = "\n".join(function_body("acquire_noise_block")[0])
+_rnp = "\n".join(function_body("run_noise_phase")[0])
 check("probe: run_row_probe walks ROW_PROBE_LADDER at EXP_ROW_PROBE with "
       "PP_NAME, decides by acquire_block's LAST row (last == 1), records "
       "attempts, keeps one clock block, WARNs (no dialog) when none passes "
@@ -987,7 +988,9 @@ check("probe: the row probe runs after the RG ladder and before the opening "
       and SRC.find("RG ladder (4 quick 1D acquisitions)")
       < SRC.find("td_row, d11_s = run_row_probe(")
       and SRC.count("set_common_acq(o1_hz, td_row, SWH_HZ, 1, D1_REF_S, d11_s)") == 2
-      and "set_common_acq(o1_hz, td_row, SWH_HZ, 1, D1_NOISE_S, d11_s)" in SRC
+      and "duration, td_row, d11_s, max_rg, ref_rows)" in SRC
+      and "td, d11 = td_row, d11_s" in _rnp
+      and "set_common_acq(o1_hz, td, SWH_HZ, 1, D1_NOISE_S, d11)" in _rnp
       and "set_common_acq(o1_step, td_row, SWH_HZ, 1, D1_NOISE_S, d11_s)" in SRC
       and "noise_secs, max_rg, bf1, AUTOSTEP, td_row, d11_s)" in SRC
       and "+ [EXP_ROW_PROBE, EXP_REF_OPEN] + noise_expnos" in SRC)
@@ -1017,7 +1020,9 @@ check("content: block durations are kept whatever the row -- noise rows from "
       and "aq_row_s(td) + D1_NOISE_S + d11_s + ROW_OVERHEAD_S"
       in "\n".join(function_body("noise_row_secs")[0])
       and "ref_rows = ref_rows_for(td_row, d11_s)" in SRC
-      and "n_rows = noise_rows_for(noise_secs, td_row, d11_s)" in SRC
+      and "rows_time = noise_rows_for(noise_secs, td, d11_s)"
+      in "\n".join(function_body("size_noise_phase")[0])
+      and "sz = size_noise_phase(noise_secs, td_row, d11_s, bpp, block_max," in _rnp
       and "n_rows = noise_rows_for(per_secs, td_row, d11_s)" in SRC)
 check("mock: mock_acquisition offers the HARNESS_MOCK_ACQ seam (NameError-"
       "guarded) and otherwise advances the clock and writes a raw-data file "
@@ -1305,6 +1310,91 @@ check("tests: testing/test_wind_sidereal.py exists (spec Sec. 7 (v)/(vi): "
       os.path.exists(os.path.join(REPO, "testing", "test_wind_sidereal.py"))
       and "test_wind_sidereal.py" in _HARN
       and "testing/test_wind_sidereal.py" in _CI)
+
+# 7. NOISE PHASE (v0.8.3): the weekend choice, the bundle-size and disk caps,
+# the opt-in split with its deadline guard, the zg-return lag.
+def _int_const(name, src=SRC):
+    m = re.search(r"^%s\s*=\s*(.+?)\s*(#.*)?$" % name, src, re.M)
+    if not m:
+        return None
+    try:
+        return int(eval(m.group(1), {"__builtins__": {}}))
+    except Exception:
+        return None
+
+
+_cw = "\n".join(function_body("choose_duration")[0])
+_snp = "\n".join(function_body("size_noise_phase")[0])
+_m_up = re.search(r"^MULTIPART_MAX_BYTES\s*=\s*(.+?)\s*(#.*)?$", UPLOADER_SRC, re.M)
+_up_max = int(eval(_m_up.group(1), {"__builtins__": {}})) if _m_up else None
+_blk = _int_const("NOISE_BLOCK_MAX_BYTES")
+_ses = _int_const("NOISE_SESSION_MAX_BYTES")
+_base = _int_const("EXP_NOISE_MORE_BASE")
+_nmax = _int_const("NOISE_BLOCKS_MAX")
+check("noise phase (v0.8.3): the duration dialog offers 'Weekend (until "
+      "Monday 07:00)' (DURATION_SECS None, resolved by choose_duration "
+      "against wall_clock_ms, refused with a MSG outside 1-72 h before "
+      "Monday 07:00 or under the sweep, the overnight after three "
+      "refusals); main calls choose_duration",
+      '"Weekend (until Monday 07:00)"' in SRC
+      and re.search(r"^DURATION_SECS\s*=\s*\[1800, 3600, 10800, 36000, "
+                    r"None\]", SRC, re.M) is not None
+      and "duration = choose_duration()" in SRC
+      and "weekend_end_epoch(now_s)" in _cw and "wall_clock_ms()" in _cw
+      and "left > WEEKEND_MAX_S" in _cw and "left < WEEKEND_MIN_S" in _cw
+      and "if SWEEP:" in _cw and "MSG(" in _cw
+      and "DURATION_OVERNIGHT" in _cw)
+check("noise phase (v0.8.3): size caps -- raw noise <= NOISE_SESSION_MAX_BYTES "
+      "(%r) with half of it under the uploader's MULTIPART_MAX_BYTES (%r): "
+      "pulse-free rows zip to ~44%%; the disk shortens only a weekend, a "
+      "fixed duration gets disk_short" % (_ses, _up_max),
+      _ses is not None and _up_max is not None and _ses * 0.5 < _up_max
+      and "if weekend:" in _snp and "disk_short = 1" in _snp
+      and 'capped_by = "bundle_size"' in _snp
+      and 'capped_by = "disk_space"' in _snp)
+check("noise phase (v0.8.3): splitnoise is OFF by default (SPLITNOISE = 0, "
+      "argv 'splitnoise'); blocks of NOISE_BLOCK_MAX_BYTES (%r) < 2 GiB at "
+      "EXP_NOISE_MORE_BASE (%r) .. +%r, clear of the dense ladder (300..363) "
+      "and the nutation block (80..95)" % (_blk, _base, _nmax),
+      re.search(r"^SPLITNOISE = 0\b", SRC, re.M) is not None
+      and '"splitnoise", "--splitnoise", "--split-noise"' in SRC
+      and _blk is not None and _blk < (1 << 31)
+      and _base is not None and _nmax is not None
+      and _base > 363 and _base + _nmax <= 500)
+check("noise phase (v0.8.3): run_noise_phase is UNATTENDED (no dialog), "
+      "rga once on block 1 and that RG for every block, the deadline guard "
+      "before every later block, the zg-return lag on each block and its "
+      "clock-audit entry, meta.noise_plan recorded",
+      not [d for d in ("CONFIRM(", "MSG(", "SELECT(", "INPUT_DIALOG(",
+                       "ask_select")
+           if d in _rnp]
+      and _rnp.count("run_rga()") == 1 and "set_rg(noise_rg)" in _rnp
+      and "if fit < NOISE_MIN_BLOCK_ROWS:" in _rnp
+      and 'plan["stopped_early"] = (' in _rnp
+      and "lag = zg_return_lag_s(ds_path(cd), t_ms)" in _rnp
+      and 'cb["zg_return_lag_s"] = lag' in _rnp
+      and 'meta["noise_plan"] = plan' in _rnp
+      and 'acquire_noise_block(meta, expno, "noise", what' in _rnp)
+check("noise phase (v0.8.3): schema documents noise_plan and "
+      "clock_audit.blocks[].zg_return_lag_s; the report emits "
+      "science.noise_plan only when meta has one; docs: PROTOCOL (weekend), "
+      "INSTALL (expnos 400-499), TROUBLESHOOTING (late zg, weekend refused); "
+      "the harness runs the weekend / latezg variants and "
+      "test_split_noise_report.py, which CI runs too",
+      "noise_plan" in schema.get("properties", {})
+      and "zg_return_lag_s" in schema["properties"]["clock_audit"][
+          "properties"]["blocks"]["items"]["properties"]
+      and "def noise_plan_section(meta)" in REPORT_SRC
+      and "if noise_plan is not None:" in REPORT_SRC
+      and "**weekend** (v0.8.3)" in open(os.path.join(
+          REPO, "PROTOCOL.md"), encoding="utf-8").read()
+      and "| 400–499 |" in _INST
+      and "TopSpin only reported it\ncomplete when you came in" in _TS
+      and "**The weekend choice says it \"cannot run now\".**" in _TS
+      and '"legacy desktest weekend"' in _HARN
+      and '"legacy desktest splitnoise latezg"' in _HARN
+      and "test_split_noise_report.py" in _HARN
+      and "testing/test_split_noise_report.py" in _CI)
 
 
 # --------------------------------------------------------------------------

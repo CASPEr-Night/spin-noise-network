@@ -556,6 +556,45 @@ can be lowered.
 yet.** Normal and by design: the bundle is written AFTER you answer
 the morning notes question. Answer it; the zip appears seconds later.
 
+**The noise block ended in the night, but TopSpin only reported it
+complete when you came in (TopSpin 4.4.0, Avance Neo 400, Torino).**
+Seen twice. On 2026-10-01 the last noise row was acquired at 01:57
+and zg returned at 10:55; on 2026-10-24 the last row was acquired at
+03:15 on a Saturday and zg returned at 11:09 on Monday, 56.9 h later.
+Both times TopSpin's own audit trail (`audita.txt` of expno 12) logs
+the acquisition "completed" at the late time, without the data hash it
+writes for every other block, and the closing reference started
+seconds after the return. The rows are complete. The report times them
+from the console's own acquisition stamps (acqus `DATE_START`/`DATE`)
+and says so in the QA row "wind-aware halo: row times". What the run
+loses is the magnet's time after the last row, and the closing
+reference describes the morning, not the end of the noise.
+*Cause: not known.* The two blocks are the only Torino datasets above
+2 GiB (float64 sers of 3.50 and 3.34 GiB; every block below 2 GiB
+completed within seconds), which points at the file size. They are
+also the only long unattended blocks, so an overnight screen lock,
+sleep setting or session timeout fits as well. *If it happens to you:*
+nothing to do for the data. Note what was on the screen when you came
+in -- a TopSpin message or error box, a locked screen -- and tell us.
+Since v0.8.3 every noise block records how long after its last row zg
+returned (`noise_plan.blocks[].zg_return_lag_s`, and a status-line
+WARNING above 10 min), so the bundle tells us too. *If the file size
+is the cause,* `xpy spin_noise_run splitnoise` acquires the noise phase
+as blocks of at most 1 GiB (expno 12, then 400, 401, ...), and the
+report co-adds them as one block. *If a lock or sleep is the cause,*
+the first block's zg is held in the same way, and the script then
+starts no further block after the phase's planned end (the deadline
+guard: a held zg never pushes acquisition into the working day) -- the
+run keeps the first block only. That is why `splitnoise` is not the
+default.
+
+**The weekend choice says it "cannot run now".** The weekend runs the
+noise until 06:30 on Monday by the console's clock. It is refused when
+Monday 07:00 is more than 72 h away (choose it between Friday and
+Sunday), less than an hour away, or with the field sweep (an attended
+daytime test). Choose another duration; after three refusals the
+script runs the overnight block.
+
 **The run crashed / TopSpin died / power failed mid-session.**
 The acquired expnos are safe on disk under the
 `SPINNOISE_<date>_<time>` dataset. Do not rerun into the same

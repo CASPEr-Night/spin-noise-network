@@ -5865,6 +5865,70 @@ def nutation_tip_cross_check(nut, excl):
                  "is what the same references give at the fitted P90")}
 
 
+ZG_LATE_WARN_S = 600.0   # the script's threshold (spin_noise_run.py)
+
+
+def noise_plan_section(meta):
+    """v0.8.3: science.noise_plan -- the script's meta.noise_plan as
+    recorded (mode fixed | weekend, the splitnoise flag, the caps that
+    shaped the phase, every block with its zg-return lag) plus a summary
+    line and rows_acquired -- and its QA rows: INFO 'noise phase' always;
+    WARN 'noise phase: stopped early' when the deadline guard skipped
+    blocks; WARN 'noise phase: zg returned late' per block whose recorded
+    lag exceeds ZG_LATE_WARN_S (Torino 2026-10-26: 56.9 h); WARN 'noise
+    phase: disk' when a fixed duration did not fit the free disk.  Returns
+    (None, []) for a bundle without noise_plan, so every report of an
+    earlier bundle is unchanged."""
+    plan = meta.get("noise_plan")
+    if not isinstance(plan, dict):
+        return None, []
+    blocks = [b for b in (plan.get("blocks") or []) if isinstance(b, dict)]
+    rows = sum(int(b.get("rows") or 0) for b in blocks)
+    summary = ("%s noise phase (%s): %d row(s) in %d block(s) at expno(s) "
+               "%s%s; planned %s row(s) in %s block(s)%s"
+               % (plan.get("mode") or "?", plan.get("choice") or "?", rows,
+                  len(blocks), ", ".join(str(b.get("expno")) for b in blocks),
+                  " (splitnoise)" if plan.get("split") else "",
+                  plan.get("rows_planned"), plan.get("blocks_planned"),
+                  ("; capped by %s" % plan["capped_by"])
+                  if plan.get("capped_by") else ""))
+    out = dict(plan)
+    out["summary"] = summary
+    out["rows_acquired"] = rows
+    qa = [{"level": "INFO", "check": "noise phase", "detail": summary}]
+    if plan.get("stopped_early"):
+        qa.append({"level": "WARN", "check": "noise phase: stopped early",
+                   "detail": "%s -- the deadline guard kept the phase inside "
+                             "its planned end; the blocks acquired are "
+                             "complete" % plan["stopped_early"]})
+    for b in blocks:
+        lag = b.get("zg_return_lag_s")
+        if _is_num(lag) and lag > ZG_LATE_WARN_S:
+            qa.append({"level": "WARN",
+                       "check": "noise phase: zg returned late",
+                       "detail": "expno %s: zg returned %.2f h after the "
+                                 "block's last row (acqus DATE, recorded by "
+                                 "the script) -- the rows are complete; the "
+                                 "clock audit and the wind-aware row times "
+                                 "use the console's acquisition stamps"
+                                 % (b.get("expno"), lag / 3600.0)})
+    if plan.get("disk_short"):
+        need = None
+        if _is_num(plan.get("rows_planned")) and _is_num(plan.get("row_bytes")):
+            need = 2.5 * plan["rows_planned"] * plan["row_bytes"] / 2.0 ** 30
+        free = plan.get("disk_free_bytes")
+        qa.append({"level": "WARN", "check": "noise phase: disk",
+                   "detail": "the console disk had %s free at the start of "
+                             "the noise phase, less than the ~%s the block, "
+                             "its copy in the bundle's staging tree and the "
+                             "zip need"
+                             % ("%.1f GiB" % (free / 2.0 ** 30)
+                                if _is_num(free) else "?",
+                                "%.1f GiB" % need if need is not None
+                                else "?")})
+    return out, qa
+
+
 def nutation_honesty_line(nut):
     """One honesty line when calibration.nutation is present (analysed or
     skipped); None for bundles without the block, whose honesty list is
@@ -8798,6 +8862,10 @@ def render_html(ctx):
         A("<p class='%s'><b>Noise block:</b> %s</p>"
           % ("small" if agg.get("consistent") else "warn",
              esc(agg["note"])))
+    nplan = ctx.get("noise_plan")
+    if nplan and nplan.get("summary"):
+        A("<p class='small'><b>Noise phase:</b> %s</p>"
+          % esc(nplan["summary"]))
     if ctx["noise"] and ctx["noise"].get("skipped_experiments"):
         A("<p class='warn'>noise experiments left out of the block: %s</p>"
           % esc("; ".join("expno %s -- %s" % (s["expno"], s["why"])
@@ -9576,6 +9644,20 @@ def main(argv=None):
                 % (len(noise_exps), len(noise_groups),
                    len(noise_groups[0]["exps"]),
                    noise_aggregation["headline_expnos"]))
+        elif len(noise_exps) > 1 and any(int(e.get("td1_rows") or 1) > 1
+                                         for e in noise_exps):
+            # v0.8.3 'splitnoise': consecutive pseudo-2D blocks of one
+            # phase (expno 12, 400, 401, ...) at one RG and geometry
+            noise_aggregation["consistent"] = True
+            noise_aggregation["note"] = (
+                "%d consecutive pseudo-2D noise blocks (expnos %s) with "
+                "identical sw_hz/td/rg aggregated as ONE noise block of %d "
+                "rows, in meta order; per-row records carry the source "
+                "expno, and each block is timed from its own clock-audit "
+                "entry"
+                % (len(noise_exps),
+                   ", ".join(str(e.get("expno")) for e in noise_exps),
+                   noise_aggregation["groups"][0]["rows"]))
         elif len(noise_exps) > 1:
             noise_aggregation["consistent"] = True
             noise_aggregation["note"] = (
@@ -10136,6 +10218,10 @@ def main(argv=None):
     if tip_cross_check is not None:
         excl["transduction"]["tip_cross_check"] = tip_cross_check
     qa.extend(nutation_qa_rows(nutation))
+    # v0.8.3 noise phase: science.noise_plan and its rows (None and none
+    # for a bundle written before the script recorded the plan)
+    noise_plan, noise_plan_qa = noise_plan_section(meta)
+    qa.extend(noise_plan_qa)
     # v0.8.2 dense ladder: the measured reference-to-noise gain bridge
     # (rg_ladder.bridge_measured, transduction.rg_bridge_cross_check --
     # stated, never applied) and its WARN/OK/INFO row
@@ -10407,6 +10493,7 @@ def main(argv=None):
            "mass_book": mass_book,
            "sign_status": sign_status, "raw_read": raw_read,
            "noise_aggregation": noise_aggregation,
+           "noise_plan": noise_plan,
            "reference_pair": ref_pair,
            "axion_exclusion": excl,
            "sidereal_modulation": sidereal,
@@ -10445,6 +10532,8 @@ def main(argv=None):
         "nutation": nutation,
         "qa_flags": qa, "honesty": honesty,
     })
+    if noise_plan is not None:            # v0.8.3 bundles only
+        report["science"]["noise_plan"] = strip_private(noise_plan)
     _write(out_dir, html, report)
     print("report written to %s" % out_dir)
     return 0
