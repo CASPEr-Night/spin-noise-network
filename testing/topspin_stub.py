@@ -52,7 +52,7 @@ __all__ = [
     "PUTPAR", "GETACQUDIM", "CURDATA", "RE", "WR", "RE_PATH", "EXIT",
     "SLEEP", "ZG",
     "HARNESS_WALL_MS", "HARNESS_ADVANCE_S", "HARNESS_MOCK_ACQ",
-    "HARNESS_MOCK_RGA",
+    "HARNESS_MOCK_RGA", "HARNESS_NOISE_LIMITS",
 ]
 
 # Marker for the script: the API it imported is this stub, not TopSpin.
@@ -272,7 +272,9 @@ def configure(current_dataset, template_params, dialog_answers,
     """Install the per-run fixture and reset all logs."""
     del LOG[:], UNSCRIPTED[:], BREACHES[:], ERRMSGS[:], MSGS[:]
     del PUTPAR_FAILURES[:], STRAY_DIALOGS[:], DRU_REFUSALS[:]
-    del NUTATION_FIDS[:], RGA_FAILURES[:]
+    del NUTATION_FIDS[:], RGA_FAILURES[:], LATE_ZG_HELD[:]
+    NOISE_LIMITS[0] = None
+    LATE_ZG[0] = None
     _F1_FRESH.clear()
     FLAVOR[0] = flavor
     _PARAMS.clear()
@@ -999,6 +1001,97 @@ def HARNESS_MOCK_RGA():
     return 0
 
 
+# ---------------------------------------------------------------------------
+# The noise phase (v0.8.3): size limits and a zg held after its last row
+# ---------------------------------------------------------------------------
+# HARNESS_NOISE_LIMITS is the script's seam for the noise phase's byte
+# limits: unconfigured it raises NameError -- exactly what the script sees
+# in production -- so every flavor runs on the production constants; the
+# weekend and late-zg variants configure megabyte limits (and optionally a
+# free-disk figure) so a weekend or a split phase writes a few MB.
+# LATE_ZG models Torino's held zg (TopSpin 4.4.0, 2026-10-01 and -26): the
+# block of the configured expno acquires normally, the console writes
+# acqus DATE when its last row is in, and zg returns LATE_ZG[1] seconds
+# later.  The script must record that lag, and under 'splitnoise' its
+# deadline guard must not start another block.
+
+NOISE_LIMITS = [None]         # None, or (block_bytes, session_bytes, disk)
+LATE_ZG = [None]              # None, or (expno, seconds held)
+LATE_ZG_HELD = []             # [(expno_dir, date_epoch_s, held_s)]
+
+
+def HARNESS_NOISE_LIMITS():
+    """(block_bytes, session_bytes, disk_free_or_None) when configured;
+    NameError otherwise (the script then uses its constants)."""
+    if NOISE_LIMITS[0] is None:
+        raise NameError("HARNESS_NOISE_LIMITS not configured")
+    return NOISE_LIMITS[0]
+
+
+def _write_random_rows(expno_dir, td, rows):
+    """rows x td little-endian int32 pseudo-random samples as the block's
+    ser (fid for one row) -- the shape the script's own mock leaves."""
+    import java.io.FileOutputStream
+    fn = "fid"
+    if rows > 1:
+        fn = "ser"
+    for name in ("ser", "fid"):
+        p = os.path.join(_b(expno_dir), name)
+        if os.path.isfile(p):
+            os.remove(p)
+    fos = java.io.FileOutputStream(os.path.join(_b(expno_dir), fn))
+    try:
+        r = 0
+        while r < rows:
+            fos.write(_random_row_bytes(td, 20261026 + r))
+            r = r + 1
+    finally:
+        fos.close()
+
+
+def _set_acqus_date(expno_dir, epoch_s):
+    """Write ##$DATE= epoch_s into the expno's acqus (replacing any), as
+    the console does when the acquisition's last row is in."""
+    p = os.path.join(_b(expno_dir), "acqus")
+    txt = ""
+    if os.path.isfile(p):
+        f = open(p, "r")
+        txt = f.read()
+        f.close()
+    lines = [ln for ln in txt.split("\n")
+             if ln and not ln.startswith("##$DATE=")
+             and not ln.startswith("##END=")]
+    lines.append("##$DATE= %d" % int(epoch_s))
+    lines.append("##END=")
+    f = open(p, "w")
+    f.write("\n".join(lines) + "\n")
+    f.close()
+
+
+def _mock_late_zg(expno_dir, td, rows, ocxo_s):
+    """The held zg of LATE_ZG (see above).  Returns 1 when it handled the
+    block (rows written, clock advanced by the acquisition, DATE stamped,
+    clock advanced by the hold), 0 when this is not the configured
+    expno."""
+    if LATE_ZG[0] is None or rows is None or rows <= 1:
+        return 0
+    expno, held_s = LATE_ZG[0]
+    if os.path.basename(_b(expno_dir).rstrip(os.sep)) != str(expno):
+        return 0
+    _write_random_rows(expno_dir, td, rows)
+    if ocxo_s:
+        HARNESS_ADVANCE_S(ocxo_s)
+    date_s = _VCLOCK_MS[0] / 1000.0
+    _set_acqus_date(expno_dir, date_s)
+    HARNESS_ADVANCE_S(held_s)
+    LATE_ZG_HELD.append((_u(expno_dir), date_s, held_s))
+    LOG.append(("LATE-ZG", u"%s held %.0f s after its last row"
+                % (_u(expno_dir), held_s)))
+    _say("ZG HELD %.0f s after the last row (Torino model): %s"
+         % (held_s, expno_dir))
+    return 1
+
+
 def HARNESS_MOCK_ACQ(expno_dir, td, rows, d11_s, ocxo_s):
     """Model of the console's receiver unit for a mocked zg.  Returns 0
     when the block is accepted (the script then writes its own mocked
@@ -1006,9 +1099,12 @@ def HARNESS_MOCK_ACQ(expno_dir, td, rows, d11_s, ocxo_s):
     step as a REFUSAL (file of the refused shape written, clock advanced
     by one row plus the abort, refusal logged) -- or, since v0.8.2, as a
     full-power 1D whose physics FID it wrote (every flavor; see the
-    nutation fixture above)."""
+    nutation fixture above) -- or, since v0.8.3, as the held zg of
+    LATE_ZG."""
     if (rows is None or rows <= 1) \
             and _mock_full_power_1d(expno_dir, td, ocxo_s):
+        return 1
+    if _mock_late_zg(expno_dir, td, rows, ocxo_s):
         return 1
     if FLAVOR[0] not in ("legacy-dru", "legacy-dru-refused"):
         return 0

@@ -336,11 +336,28 @@ covers ~10 GB), set the shared token, and hand facilities the endpoint + token p
   bridge the transduction constant assumes, as a cross-check (WARN "RG ladder bridge" beyond
   ±3%) while the headline keeps the declared linear bridge. The Agilent path is unchanged. Not
   yet run on hardware; the first live run is attended.
+- **v0.8.3 (unreleased) adds a weekend run and records late zg returns.** Until now the
+  longest noise block was the 10 h overnight, so a weekend booking gave one 9.6 h block and an
+  idle magnet (Torino, 23–26 October 2026). The duration dialog now offers "Weekend (until
+  Monday 07:00)": the noise runs until 06:30 on Monday by the console's clock, capped by the
+  upload limit (9 GiB of raw noise, a ~4 GiB bundle: ~26 h on an Avance Neo, ~52 h on an
+  int32 console) and, for the weekend only, by the free disk. Torino's two overnight blocks
+  were each logged complete by TopSpin hours after their last row (9 h, then 57 h); every
+  noise block now records that lag (`noise_plan`, a status-line WARNING, a report QA row).
+  The opt-in flag `splitnoise` acquires the noise phase as blocks of at most 1 GiB (expnos 12,
+  400, 401, ...), co-added by the report as one block, under a deadline guard that never
+  starts a block after the phase's planned end; it stays off by default until the cause of
+  the late returns is known (docs/TROUBLESHOOTING.md explains the trade-off). Tested in the
+  Jython harness (a virtual Friday-to-Monday weekend across a daylight-saving change, a zg
+  held 30 h, the split layout) and on a re-packed synthetic bundle whose science matches the
+  unsplit one; not yet run on hardware. Reports of earlier bundles are unchanged.
 - Sweep/lock state cannot be commanded portably — it is confirmed by the operator and
   recorded (a hard-won lesson: a field sweep left on smears the line by kHz).
 - Bundle size is a non-issue up to 5 GiB: the uploader switches to a chunked,
   resumable upload for anything over 50 MB (50 MiB parts, well inside every
   Cloudflare plan's per-request cap). The zip is always preserved locally either way.
+  The console script keeps a session's raw noise within 9 GiB so its bundle stays
+  under that limit (v0.8.3).
 
 ## Provenance
 

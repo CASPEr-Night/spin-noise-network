@@ -115,9 +115,18 @@ decorative; each one has burned somebody.
    your answer — it cannot verify this on all console generations, so the
    confirmation is on you.
 6. **Run duration** — default 30 min of noise acquisition (~45 min total
-   with setup and references); options for 60 min, 180 min, or overnight.
-   Longer runs average down the spectrum and make better axion-band records.
-   Overnight runs on an idle weekend magnet are gold.
+   with setup and references); options for 60 min, 180 min, overnight
+   (10 h), or **weekend** (v0.8.3): the noise runs until 06:30 on Monday by
+   the console's clock, the closing reference and the bundle follow, and
+   the magnet is free before 07:00. Choose the weekend between Friday and
+   Sunday (the script refuses it when Monday 07:00 is more than 72 h away).
+   It stops earlier when the bundle would pass the upload limit — about
+   26 h of noise on an Avance Neo, which stores 8 bytes per point, and
+   about 52 h on a console that stores 4 — or when the disk cannot hold the
+   data, its staging copy and the zip; the status line says which. Longer
+   runs average down the spectrum, and a run across the whole sidereal day
+   lets the report look for the daily modulation of a dark-matter signal.
+   Same command, nothing to attend.
 
 Optionally, you may leave a **contact email** so we can ask follow-up
 questions about your probe; a separate consent question controls whether it
