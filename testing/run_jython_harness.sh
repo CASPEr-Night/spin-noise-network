@@ -72,7 +72,14 @@ command -v python3 >/dev/null || { echo "ERROR: python3 not on PATH"; exit 2; }
 # acquires it otherwise), plus desktest with the optional rdopt + sweep
 # features
 # on under legacy AND the strict flavor (structure/dialog/meta coverage --
-# mock modes exercise the flow, not the physics).
+# mock modes exercise the flow, not the physics), plus the v0.8.3 noise
+# phase: the weekend choice from a virtual Friday 17:30 (Monday 07:00
+# across a daylight-saving change, the scaled bundle-size cap), with and
+# without the splitnoise flag (8 blocks at expnos 12, 400..406, one RG),
+# and Torino's held zg (latezg: expno 12 returns 30 h after its last row)
+# with and without splitnoise (the lag recorded; the deadline guard starts
+# no second block).  weekend/latezg are harness variants (the fixture),
+# splitnoise is the script's own argv flag -- see jython_entry.py.
 for RUN in "legacy simulate" "legacy desktest" "ts44 desktest" \
            "ts44-stale desktest" "ts44-strict desktest" \
            "ts44-f1echo desktest" "ts44-dimlie desktest" \
@@ -85,7 +92,11 @@ for RUN in "legacy simulate" "legacy desktest" "ts44 desktest" \
            "legacy desktest nonutation" \
            "legacy desktest sparseladder" \
            "legacy desktest rdopt sweep autostep" \
-           "ts44-strict desktest rdopt sweep autostep"; do
+           "ts44-strict desktest rdopt sweep autostep" \
+           "legacy desktest weekend" \
+           "ts44 desktest splitnoise weekend" \
+           "legacy desktest latezg" \
+           "legacy desktest splitnoise latezg"; do
     set -- $RUN
     FLAVOR="$1"; shift
     MODE="$1"; shift
@@ -289,12 +300,24 @@ echo ""
 echo "--- wind-aware halo + sidereal-modulation fit (test_wind_sidereal) ---"
 python3 "$TESTING/test_wind_sidereal.py" --out-dir "$CLOCKWORK/windsidereal"
 
+# Report: the v0.8.3 'splitnoise' layout -- one timed synthetic re-packed as
+# expnos 12/400/401 must give the unsplit bundle's science (one co-added
+# block, the same rows at the same times) plus science.noise_plan and its
+# QA rows; the unsplit bundle, like every bundle before v0.8.3, gets
+# neither.  See test_split_noise_report.py.
+echo ""
+echo "--- split noise phase (test_split_noise_report) ---"
+python3 "$TESTING/test_split_noise_report.py" --out-dir "$CLOCKWORK/splitnoise"
+
 echo ""
 echo "JYTHON HARNESS: ALL PASS (simulate + desktest x 14 console flavors"
 echo "                + nutation curve: physics FIDs fitted, rga fallback,"
 echo "                  nonutation skip"
 echo "                + dense two-visit RG ladder: levels, seeded order,"
 echo "                  sparseladder skip"
+echo "                + noise phase: weekend to Monday 07:00, bundle-size"
+echo "                  and disk caps, splitnoise blocks, held-zg lag,"
+echo "                  deadline guard"
 echo "                + selftest"
 echo "                + packer round-trip"
 echo "                + clock-offset recovery: realism, powered, null,"
@@ -302,4 +325,5 @@ echo "                  DE discrimination"
 echo "                + static"
 echo "                + report QA flags"
 echo "                + report Bruker references / clock audit"
-echo "                + wind-aware halo / sidereal-modulation fit)"
+echo "                + wind-aware halo / sidereal-modulation fit"
+echo "                + split noise phase in the report)"

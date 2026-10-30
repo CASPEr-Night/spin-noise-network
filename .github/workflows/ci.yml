@@ -52,6 +52,10 @@ jobs:
         # locally with --full.  Needs the numpy install of the previous step.
         run: python3 testing/test_wind_sidereal.py --out-dir "${{ runner.temp }}/windsidereal"
 
+      - name: Split noise phase (v0.8.3 splitnoise layout co-added as one block, science equal to the unsplit bundle, noise_plan QA rows; unchanged reports without noise_plan)
+        # Two 120-row reports, ~2 min.  Needs the numpy install above.
+        run: python3 testing/test_split_noise_report.py --out-dir "${{ runner.temp }}/splitnoise"
+
       - name: Construct and validate a synthetic v1.2 bundle (back-compat; what the TopSpin orchestrator writes)
         run: |
           BUNDLE=$(python3 testing/make_synthetic_bundle.py --schema-version 1.2 --out-dir "${{ runner.temp }}")

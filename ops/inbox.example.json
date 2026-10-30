@@ -1,0 +1,16 @@
+{
+  "_comment": "Copy to ~/.config/casper-night/inbox.json and fill in. The password lives in the macOS Keychain (service = keychain_service, account = imap_user), never in this file.",
+  "imap_host": "imap.gmail.com",
+  "imap_user": "you@example.org",
+  "keychain_service": "casper-night-imap",
+  "mailbox": "INBOX",
+  "lookback_days": 14,
+  "max_attachment_mb": 200,
+  "tickets_dir": "~/Documents/Work/Consulting/Anthropic/Anthropic_Working/CASPEr/tickets",
+  "state_file": "~/.config/casper-night/inbox_state.json",
+  "senders": [
+    {"email": "operator@example.fi", "name": "Operator name", "facility": "uni-oulu"},
+    {"email": "operator@example.it", "name": "Operator name", "facility": "uni-torino"},
+    {"email": "operator@example.edu", "name": "Operator name", "facility": "siu-carbondale"}
+  ]
+}

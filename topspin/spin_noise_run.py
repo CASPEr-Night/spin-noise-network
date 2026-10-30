@@ -138,9 +138,18 @@ DENSE_LADDER_ON = 1       # 1 (default): after the four legacy RG rungs,
                           # flag 'sparseladder'; meta records why.
                           # Runtime:  xpy spin_noise_run sparseladder
 
+SPLITNOISE = 0            # 1 (argv 'splitnoise', v0.8.3): acquire the
+                          # noise phase as consecutive blocks of at most
+                          # NOISE_BLOCK_MAX_BYTES each (expno 12, then
+                          # 400, 401, ...) under the deadline guard of
+                          # section 10.  OFF by default until the cause of
+                          # Torino's late zg returns is known (section 10
+                          # explains the trade-off).  Runtime:
+                          #     xpy spin_noise_run splitnoise
+
 # Single source of truth for the script version.  KEEP IN SYNC with the
 # repository VERSION file (testing/static_check.py enforces the match).
-SCRIPT_VERSION  = "0.8.2"
+SCRIPT_VERSION  = "0.8.3"
 # NOTE: no module constant named PROGRAM_VERSION -- TopSpin's TopCmds
 # exports a FUNCTION of that name and `from TopCmds import *` (below)
 # overwrote the alias, so v0.7.3 bundles carry "<function PROGRAM_VERSION
@@ -353,8 +362,69 @@ DENSE_LADDER_PER_OCTAVE = 2
 DENSE_LADDER_VISITS = 2
 
 DURATION_CHOICES = ["30 min (default)", "60 min", "180 min",
-                    "Overnight (10 h)"]
-DURATION_SECS    = [1800, 3600, 10800, 36000]
+                    "Overnight (10 h)", "Weekend (until Monday 07:00)"]
+DURATION_SECS    = [1800, 3600, 10800, 36000, None]
+DURATION_OVERNIGHT = 3        # the fallback when the weekend is refused
+DURATION_WEEKEND = 4          # None above: resolved against the clock
+
+# The noise phase (section 10, v0.8.3).
+#
+# Weekend.  Until v0.8.3 the longest block was the 10 h overnight, so a
+# weekend booking gave one 9.6 h block and an idle magnet (Torino,
+# 23-26 Oct 2026, after we had asked for a weekend run).  The weekend
+# choice runs the noise phase until WEEKEND_END_MARGIN_S before Monday
+# WEEKEND_END_HOUR:00 by the console clock, leaving the closing reference
+# (~3 min) and the bundle (~7 min for 9 GiB at Torino's rate) before the
+# first users of the week.  It is refused (and the dialog asked again)
+# when Monday 07:00 is more than WEEKEND_MAX_S or less than WEEKEND_MIN_S
+# away: the choice is meant for Friday to Sunday.
+WEEKEND_END_WEEKDAY = 0       # Monday (struct_time index 6: Monday = 0)
+WEEKEND_END_HOUR = 7
+WEEKEND_END_MARGIN_S = 1800.0
+WEEKEND_MAX_S = 72 * 3600.0
+WEEKEND_MIN_S = 3600.0
+WEEKEND_MIN_NOISE_S = 1800.0  # a late start still gets the default block
+#
+# Size.  The ingest server takes bundles up to 5 GiB, and pulse-free rows
+# zip to ~44% (Torino, float64: 3.59 GB of ser -> a 1.56 GB bundle; Oulu,
+# int32: 1.79 GB -> 0.80 GB), so the noise phase holds at most
+# NOISE_SESSION_MAX_BYTES of raw data: ~4 GiB of bundle.  On an Avance
+# Neo (float64, 2 MiB per row) that is 4608 rows, ~26 h; on an int32
+# console twice that.  Only a weekend run comes near it.  The console
+# disk holds the data, its copy in the bundle's staging tree and the zip,
+# ~DISK_NEED_FACTOR x the raw noise: a weekend run is shortened to what
+# fits (with DISK_MARGIN_BYTES to spare); a fixed duration is never
+# shortened, a shortfall there is a WARNING in noise_plan.
+NOISE_SESSION_MAX_BYTES = 9 * (1 << 30)
+DISK_NEED_FACTOR = 2.5
+DISK_MARGIN_BYTES = 2 * (1 << 30)
+#
+# Blocks (argv 'splitnoise' only).  Torino's two overnight noise blocks
+# (Avance Neo 400, TopSpin 4.4.0; float64 sers of 3.50 and 3.34 GiB) were
+# each logged complete by TopSpin hours after their last row -- 8.96 h on
+# 2026-10-01, 56.9 h on 2026-10-26, both in the late morning -- and were
+# the only blocks logged complete without TopSpin's data hash; every
+# block under 2 GiB completed within seconds, with it.  The cause is not
+# known: a ser beyond Java's 2 GiB array ceiling fits, and so does an
+# overnight screen lock or session timeout (size and block length go
+# together in that record).  Blocks of at most NOISE_BLOCK_MAX_BYTES --
+# expno 12, then EXP_NOISE_MORE_BASE, +1, ... at ONE RG and one row
+# geometry, which the report co-adds as one block -- fix the first cause.
+# Under the second they would cost data: the first block's zg would be
+# held until morning, and the deadline guard below then skips the rest.
+# A single block never loses rows under either cause, so it stays the
+# default, and every block records how long after its last row zg
+# returned (zg_return_lag_s) so the next bundle says which cause it is.
+# The deadline guard: a block k >= 2 starts only if at least
+# NOISE_MIN_BLOCK_ROWS rows fit before the phase's planned end (plus
+# NOISE_DEADLINE_SLACK_S for a fixed duration), and is shortened to fit
+# -- a zg held for hours never pushes later blocks into the working day.
+NOISE_BLOCK_MAX_BYTES = 1 << 30
+EXP_NOISE_MORE_BASE = 400     # 400..499 (the dense ladder ends at 363)
+NOISE_BLOCKS_MAX = 100
+NOISE_MIN_BLOCK_ROWS = 4
+NOISE_DEADLINE_SLACK_S = 600.0
+ZG_LATE_WARN_S = 600.0        # a lag above this is a WARNING
 
 # ----------------------------------------------------------------------------
 # Imports.  TopCmds provides the TopSpin API when running under xpy.
@@ -552,6 +622,8 @@ try:
             NUTATION_ON = 0        # skip section 8c; meta records why
         if _al in ("sparseladder", "--sparseladder", "--sparse-ladder"):
             DENSE_LADDER_ON = 0    # skip section 8d; meta records why
+        if _al in ("splitnoise", "--splitnoise", "--split-noise"):
+            SPLITNOISE = 1         # section 10 in blocks (v0.8.3)
 except CATCHABLE:
     pass
 
@@ -3459,6 +3531,457 @@ def acquire_noise_block(meta, expno, role, what, expno_dir, o1_hz,
     return rows
 
 
+# ----------------------------------------------------------------------------
+# The noise phase (section 10, v0.8.3): the duration choice, the size of
+# the phase, its blocks, the deadline guard and the zg-return lag.  The
+# constants and the evidence behind them are at DURATION_CHOICES.
+# ----------------------------------------------------------------------------
+
+def harness_noise_limits():
+    """(block_max_bytes, session_max_bytes, disk_free_bytes or None).
+    Test seam: the Jython harness injects HARNESS_NOISE_LIMITS to run a
+    weekend or a split phase on megabytes instead of gigabytes and to
+    model a full disk.  In production the NameError path returns the
+    constants and None (the free space is then measured)."""
+    try:
+        lim = HARNESS_NOISE_LIMITS()       # test seam (harness only)
+        disk = lim[2]
+        if disk is not None:
+            disk = int(disk)
+        return int(lim[0]), int(lim[1]), disk
+    except NameError:
+        pass
+    except CATCHABLE:
+        pass
+    return int(NOISE_BLOCK_MAX_BYTES), int(NOISE_SESSION_MAX_BYTES), None
+
+
+def disk_free_bytes(path):
+    """Usable bytes on the file system holding path, or None when they
+    cannot be measured: java.io.File.getUsableSpace under TopSpin (0, what
+    Java returns for a path it cannot inspect, is read as unknown), else
+    os.statvfs."""
+    n = None
+    try:
+        if IN_TOPSPIN:
+            import java.io.File
+            n = int(java.io.File(path).getUsableSpace())
+    except CATCHABLE:
+        n = None
+    if not n:
+        try:
+            st = os.statvfs(path)
+            n = int(st.f_bavail) * int(st.f_frsize)
+        except CATCHABLE:
+            n = None
+    if not n:
+        return None
+    return n
+
+
+def noise_bytes_per_point(expno_dir):
+    """Bytes per stored point of this console's pseudo-2D data, from the
+    DTYPA the console wrote into an acquired block's acqus (0: int32,
+    4 bytes -- TopSpin 3.x at Oulu; 2: float64, 8 bytes -- the Avance Neo
+    at Torino).  Unknown (no DTYPA: the mock modes) counts as 8, the
+    larger.  Returns (bytes, basis)."""
+    d = _acqus_scalar(expno_dir, "DTYPA", None)
+    if d is not None and int(d) == 0:
+        return 4, "acqus DTYPA 0 (int32)"
+    if d is not None and int(d) == 2:
+        return 8, "acqus DTYPA 2 (float64)"
+    return 8, "assumed float64 (no DTYPA in acqus)"
+
+
+def weekend_end_epoch(now_s):
+    """Epoch seconds of the first Monday WEEKEND_END_HOUR:00 by the local
+    (console) clock after now_s.  The days are stepped from local noon, so
+    a daylight-saving change in between (Europe: the last Sunday of
+    October) moves neither the date nor the hour, and mktime with isdst -1
+    takes the offset in force on the target date."""
+    lt = time.localtime(now_s)
+    noon = time.mktime((lt[0], lt[1], lt[2], 12, 0, 0, 0, 0, -1))
+    days = (WEEKEND_END_WEEKDAY - lt[6]) % 7
+    t = noon
+    k = 0
+    while k < 2:
+        d = time.localtime(noon + (days + 7 * k) * 86400.0)
+        t = time.mktime((d[0], d[1], d[2], WEEKEND_END_HOUR, 0, 0, 0, 0,
+                         -1))
+        if t > now_s:
+            return t
+        k = k + 1
+    return t
+
+
+def choose_duration():
+    """Section 3, ATTENDED: the noise-phase duration.  A fixed choice is
+    returned as it is; the weekend choice is resolved against the console
+    clock (weekend_end_epoch) and refused, with the reason in a message
+    and the dialog asked again, when Monday 07:00 is more than
+    WEEKEND_MAX_S or less than WEEKEND_MIN_S away or the field sweep is on
+    (an attended daytime test).  After three refusals the overnight block
+    runs.  Returns {index, label, mode 'fixed'|'weekend', secs (None for
+    the weekend), weekend_end_epoch, weekend_end_local, refused}."""
+    refused = []
+    while 1:
+        dsel = ask_select(
+            "spin-noise network 5/5: noise-block duration",
+            "How long should the pulse-free noise block run?\n"
+            "(Setup + references add ~15 min on top.  'Weekend' runs\n"
+            "until Monday 07:00 by this console's clock: choose it\n"
+            "between Friday and Sunday.)",
+            DURATION_CHOICES)
+        out = {"index": dsel, "label": DURATION_CHOICES[dsel],
+               "mode": "fixed", "secs": DURATION_SECS[dsel],
+               "weekend_end_epoch": None, "weekend_end_local": None,
+               "refused": refused}
+        if DURATION_SECS[dsel] is not None:
+            return out
+        now_s = wall_clock_ms() / 1000.0
+        end = weekend_end_epoch(now_s)
+        left = end - now_s
+        why = None
+        if SWEEP:
+            why = "the field sweep is an attended daytime test"
+        elif left > WEEKEND_MAX_S:
+            why = ("Monday %02d:00 is %.0f h away by this console's clock "
+                   "(the weekend choice is for Friday to Sunday)"
+                   % (WEEKEND_END_HOUR, left / 3600.0))
+        elif left < WEEKEND_MIN_S:
+            why = ("Monday %02d:00 is only %.0f min away"
+                   % (WEEKEND_END_HOUR, left / 60.0))
+        if why is None:
+            out["mode"] = "weekend"
+            out["weekend_end_epoch"] = end
+            out["weekend_end_local"] = time.strftime(
+                "%Y-%m-%dT%H:%M:%S", time.localtime(end))
+            say("weekend: the noise phase runs until %.0f min before %s "
+                "(console clock), or less if the disk or the bundle-size "
+                "ceiling says so" % (WEEKEND_END_MARGIN_S / 60.0,
+                                     out["weekend_end_local"]))
+            return out
+        refused.append(why)
+        if len(refused) >= 3:
+            say("weekend refused three times (%s): running the overnight "
+                "block instead" % why)
+            out["index"] = DURATION_OVERNIGHT
+            out["label"] = DURATION_CHOICES[DURATION_OVERNIGHT]
+            out["secs"] = DURATION_SECS[DURATION_OVERNIGHT]
+            return out
+        MSG("The weekend choice cannot run now: %s.\n\n"
+            "Please choose another duration." % why,
+            "spin-noise network: weekend")
+
+
+def plan_noise_blocks(total_rows, rows_per_block_max, max_blocks):
+    """Deal total_rows into the fewest blocks of at most
+    rows_per_block_max rows, balanced, longer blocks first (pure: the
+    harness checks it directly).  The caller keeps total_rows within
+    rows_per_block_max x max_blocks."""
+    total = int(total_rows)
+    if total < 1:
+        return []
+    per = int(rows_per_block_max)
+    if per < 1:
+        per = 1
+    n = (total + per - 1) // per
+    if n > max_blocks:
+        n = max_blocks
+    base = total // n
+    extra = total - base * n
+    out = []
+    k = 0
+    while k < n:
+        if k < extra:
+            out.append(base + 1)
+        else:
+            out.append(base)
+        k = k + 1
+    return out
+
+
+def noise_expno_for(k):
+    """Expno of the noise phase's block k (0-based): 12, then 400, 401..."""
+    if k == 0:
+        return EXP_NOISE
+    return EXP_NOISE_MORE_BASE + k - 1
+
+
+def size_noise_phase(noise_secs, td, d11_s, bytes_per_point, block_max,
+                     session_max, disk_free, weekend, split):
+    """The noise phase's rows and blocks (pure; the harness checks it with
+    the production constants).  Rows fill noise_secs at the row geometry
+    (noise_rows_for), capped by session_max bytes of raw data -- the
+    bundle-size ceiling -- and, for a weekend run only, by the free disk;
+    a fixed duration is never shortened for the disk (disk_short says it
+    will not fit).  With split the rows are dealt into blocks of at most
+    block_max bytes (plan_noise_blocks), else one block."""
+    row_bytes = int(td) * int(bytes_per_point)
+    rows_time = noise_rows_for(noise_secs, td, d11_s)
+    per = int(block_max // row_bytes)
+    if per < NOISE_MIN_BLOCK_ROWS:
+        per = NOISE_MIN_BLOCK_ROWS
+    rows_size = int(session_max // row_bytes)
+    if split and rows_size > per * NOISE_BLOCKS_MAX:
+        rows_size = per * NOISE_BLOCKS_MAX
+    if rows_size < NOISE_MIN_BLOCK_ROWS:
+        rows_size = NOISE_MIN_BLOCK_ROWS
+    rows_disk = None
+    if disk_free is not None:
+        rows_disk = int((disk_free - DISK_MARGIN_BYTES)
+                        / (DISK_NEED_FACTOR * row_bytes))
+        if rows_disk < NOISE_MIN_BLOCK_ROWS:
+            rows_disk = NOISE_MIN_BLOCK_ROWS
+    rows = rows_time
+    capped_by = None
+    if rows_size < rows:
+        rows = rows_size
+        capped_by = "bundle_size"
+    disk_short = 0
+    if rows_disk is not None and rows_disk < rows:
+        if weekend:
+            rows = rows_disk
+            capped_by = "disk_space"
+        else:
+            disk_short = 1
+    if split:
+        blocks = plan_noise_blocks(rows, per, NOISE_BLOCKS_MAX)
+    else:
+        blocks = [rows]
+        per = None
+    return {"row_bytes": row_bytes, "rows_by_time": rows_time,
+            "rows_by_size": rows_size, "rows_by_disk": rows_disk,
+            "rows": rows, "capped_by": capped_by, "disk_short": disk_short,
+            "rows_per_block_max": per, "blocks": blocks}
+
+
+def zg_return_lag_s(expno_dir, start_ms):
+    """Seconds between the end of a block's acquisition -- acqus DATE,
+    which the console writes when the last row is in -- and now, just
+    after zg returned (Torino, 2026-10-26: 204856 s).  None when acqus
+    carries no DATE, or one outside the block's own wall span (a
+    parameter file copied from another dataset: the mock modes)."""
+    d = _acqus_scalar(expno_dir, "DATE", None)
+    if d is None:
+        return None
+    now_s = wall_clock_ms() / 1000.0
+    if d < start_ms / 1000.0 - 60.0 or d > now_s + 60.0:
+        return None
+    lag = now_s - d
+    if lag < 0.0:
+        lag = 0.0
+    return round(lag, 1)
+
+
+def _last_clock_block(expno):
+    found = None
+    for b in CLOCK_BLOCKS:
+        if b.get("expno") == expno:
+            found = b
+    return found
+
+
+def run_noise_phase(meta, template, dsname, name_dir, o1_hz, duration,
+                    td_row, d11_s, max_rg, ref_rows):
+    """Section 10 without the sweep, UNATTENDED (never a dialog): size
+    the phase (size_noise_phase), record the plan in meta['noise_plan'],
+    acquire block 1 at expno 12 -- rga there, its RG kept for every later
+    block so the report co-adds them -- and, under 'splitnoise', blocks
+    2.. at EXP_NOISE_MORE_BASE.. under the deadline guard.  Every block:
+    zg, the content check and its one retry (acquire_noise_block), then
+    the zg-return lag.  Returns the noise expnos acquired."""
+    block_max, session_max, disk_free = harness_noise_limits()
+    disk_basis = "harness"
+    if disk_free is None:
+        disk_free = disk_free_bytes(name_dir)
+        disk_basis = "measured"
+        if disk_free is None:
+            disk_basis = "unknown"
+    bpp, bpp_basis = noise_bytes_per_point(
+        os.path.join(name_dir, str(EXP_REF_OPEN)))
+    weekend = duration["mode"] == "weekend"
+    t0_ms = wall_clock_ms()
+    if weekend:
+        noise_secs = (duration["weekend_end_epoch"] - WEEKEND_END_MARGIN_S
+                      - t0_ms / 1000.0)
+        if noise_secs < WEEKEND_MIN_NOISE_S:
+            noise_secs = WEEKEND_MIN_NOISE_S
+        deadline_ms = t0_ms + noise_secs * 1000.0
+    else:
+        noise_secs = float(duration["secs"])
+        deadline_ms = t0_ms + (noise_secs + NOISE_DEADLINE_SLACK_S) * 1000.0
+    sz = size_noise_phase(noise_secs, td_row, d11_s, bpp, block_max,
+                          session_max, disk_free, weekend, SPLITNOISE)
+    row_secs = noise_row_secs(td_row, d11_s)
+    plan = {
+        "mode": duration["mode"],
+        "choice": duration["label"],
+        "split": int(SPLITNOISE),
+        "requested_s": round(noise_secs, 1),
+        "weekend_end_local": duration.get("weekend_end_local"),
+        "weekend_refused": duration.get("refused") or [],
+        "deadline_local": time.strftime(
+            "%Y-%m-%dT%H:%M:%S", time.localtime(deadline_ms / 1000.0)),
+        "row_s": round(row_secs, 3),
+        "bytes_per_point": bpp,
+        "bytes_per_point_basis": bpp_basis,
+        "row_bytes": sz["row_bytes"],
+        "block_max_bytes": None,
+        "session_max_bytes": int(session_max),
+        "disk_free_bytes": disk_free,
+        "disk_free_basis": disk_basis,
+        "rows_by_time": sz["rows_by_time"],
+        "rows_by_size": sz["rows_by_size"],
+        "rows_by_disk": sz["rows_by_disk"],
+        "rows_planned": sz["rows"],
+        "capped_by": sz["capped_by"],
+        "disk_short": sz["disk_short"],
+        "blocks_planned": len(sz["blocks"]),
+        "blocks": [],
+        "stopped_early": None,
+        "late_returns": 0,
+    }
+    if SPLITNOISE:
+        plan["block_max_bytes"] = int(block_max)
+    meta["noise_plan"] = plan
+    gib = float(1 << 30)
+    if sz["capped_by"] == "bundle_size":
+        say("noise phase: the requested time holds %d rows; the bundle-size "
+            "ceiling (%.1f GiB of raw data) allows %d -- the phase stops "
+            "there (~%.1f h)" % (sz["rows_by_time"], session_max / gib,
+                                 sz["rows"], sz["rows"] * row_secs / 3600.0))
+    elif sz["capped_by"] == "disk_space":
+        say("noise phase: %.1f GiB free on this disk, and the data, its "
+            "copy in the bundle's staging tree and the zip need ~%.1fx the "
+            "raw noise -- the weekend phase is shortened to %d rows "
+            "(~%.1f h)" % (disk_free / gib, DISK_NEED_FACTOR, sz["rows"],
+                          sz["rows"] * row_secs / 3600.0))
+    if sz["disk_short"]:
+        say("WARNING: %.1f GiB free on this disk; the noise block, its "
+            "staging copy and the zip need ~%.1f GiB -- free space before "
+            "the run ends, or the bundle cannot be written"
+            % (disk_free / gib, (DISK_NEED_FACTOR * sz["rows"]
+                                  * sz["row_bytes"]) / gib))
+
+    nblk = len(sz["blocks"])
+    expnos = []
+    td, d11 = td_row, d11_s
+    noise_rg = None
+    k = 0
+    while k < nblk:
+        expno = noise_expno_for(k)
+        rows = sz["blocks"][k]
+        rec = {"expno": expno, "rows_planned": rows}
+        if k > 0:
+            # The deadline guard: a held zg never pushes a block into the
+            # working day.
+            left_s = (deadline_ms - wall_clock_ms()) / 1000.0
+            fit = int(left_s / noise_row_secs(td, d11))
+            if fit < NOISE_MIN_BLOCK_ROWS:
+                plan["stopped_early"] = (
+                    "block %d of %d not started: %.0f s left before the "
+                    "planned end of the noise phase (%s)"
+                    % (k + 1, nblk, max(left_s, 0.0), plan["deadline_local"]))
+                say("noise phase: %s -- going on to the closing reference"
+                    % plan["stopped_early"])
+                break
+            if fit < rows:
+                rows = fit
+                rec["shortened_to_deadline"] = 1
+        if nblk == 1:
+            what = "noise block (%d rows)" % rows
+            say("expno %d: NOISE block, %d rows x %.0f s (~%.0f min)"
+                % (expno, rows, noise_row_secs(td, d11),
+                   rows * noise_row_secs(td, d11) / 60.0))
+        else:
+            what = "noise block %d/%d (%d rows)" % (k + 1, nblk, rows)
+            say("expno %d: NOISE block %d/%d, %d rows x %.0f s (~%.0f min)"
+                % (expno, k + 1, nblk, rows, noise_row_secs(td, d11),
+                   rows * noise_row_secs(td, d11) / 60.0))
+        ensure_template_dim(template, dsname, 2)   # WR() copies 2D
+        cd = open_expno(template, dsname, expno)
+        putpar("PULPROG", PP_NAME)
+        make_2d(rows)
+        set_common_acq(o1_hz, td, SWH_HZ, 1, D1_NOISE_S, d11)
+        if noise_rg is None:
+            # RG for the noise phase: rga on this (pulse-free) experiment
+            # finds the maximum stable gain, then it stays FIXED for every
+            # block.  (zgnoise2d carries "acqt0=0" since v0.7.7 --
+            # Bruker's idiom for a pulse-free acquisition -- so rga no
+            # longer warns 'acqt0 not set in pulse program' as it did,
+            # harmlessly, at Oulu on v0.7.6, where it returned 203; see
+            # docs/TROUBLESHOOTING.md.)
+            noise_rg = run_rga()
+            if noise_rg is None:
+                noise_rg = max_rg
+            set_rg(noise_rg)
+            # NON-modal by design: a blocking dialog here stranded
+            # overnight sessions when the operator walked away after the
+            # last question (the ladder + references run ~15 min in
+            # between).  Auto-start after a short countdown instead.
+            tail = "no further dialogs until the run completes"
+            if f1_td_form_rejected():
+                tail = ("NOTE: this console needs '1 td' typed by hand; "
+                        "the closing reference AFTER this block will ask "
+                        "for it again (rows = %d). The noise data is safe "
+                        "on disk meanwhile" % ref_rows)
+            elif param_api_needs_operator():
+                tail = ("NOTE: your help was needed once at the start; "
+                        "later datasets are handled automatically -- no "
+                        "further step expected")
+            if nblk == 1:
+                say("NOISE BLOCK starting in 30 s: %d rows x %.0f s "
+                    "(~%.0f min), RG=%s -- %s"
+                    % (rows, row_secs, rows * row_secs / 60.0, noise_rg,
+                       tail))
+            else:
+                say("NOISE PHASE starting in 30 s: %d rows x %.0f s in %d "
+                    "blocks (~%.0f min, until about %s at the latest), "
+                    "RG=%s -- %s"
+                    % (sz["rows"], row_secs, nblk,
+                       sz["rows"] * row_secs / 60.0, plan["deadline_local"],
+                       noise_rg, tail))
+            try:
+                SLEEP(30)
+            except CATCHABLE:
+                pass
+        else:
+            set_rg(noise_rg)
+        # The time a retry re-sizes the block to: the whole phase for one
+        # uncapped block (as before v0.8.3), the block's own rows otherwise
+        # (a retry never outgrows a cap or a block).
+        if nblk == 1 and sz["capped_by"] is None:
+            block_secs = noise_secs
+        else:
+            block_secs = rows * noise_row_secs(td, d11)
+        t_ms = wall_clock_ms()
+        # zg, the data-content check of the first and last row, ONE retry
+        # with the next row setting if the last row came back empty, then
+        # a WARNING -- unattended: never a dialog from here on.
+        got = acquire_noise_block(meta, expno, "noise", what, ds_path(cd),
+                                  o1_hz, block_secs, td, d11, rows, noise_rg)
+        for r in ROW_PROBE["block_retries"]:
+            if r.get("expno") == expno:          # later blocks follow the
+                td = r["retry"]["td"]             # geometry of a retry
+                d11 = r["retry"]["d11"]
+        lag = zg_return_lag_s(ds_path(cd), t_ms)
+        cb = _last_clock_block(expno)
+        if cb is not None and lag is not None:
+            cb["zg_return_lag_s"] = lag
+        rec["rows"] = got
+        rec["zg_return_lag_s"] = lag
+        if lag is not None and lag > ZG_LATE_WARN_S:
+            plan["late_returns"] = plan["late_returns"] + 1
+            say("WARNING: %s: zg returned %.1f h after its last row (acqus "
+                "DATE) -- the rows are on disk, and the report times them "
+                "from the console's own stamps" % (what, lag / 3600.0))
+        plan["blocks"].append(rec)
+        expnos.append(expno)
+        k = k + 1
+    return expnos
+
+
 # ============================================================================
 # Optional features: rd-optimize (probe-tuning scan for maximum radiation
 # damping) and the field-stepped noise sweep ("lock sweep").
@@ -5702,13 +6225,9 @@ def main():
             vt_k = 298.0
 
     # ---------------------------------------------------------------- 3
-    # Duration.
-    dsel = ask_select(
-        "spin-noise network 5/5: noise-block duration",
-        "How long should the pulse-free noise block run?\n"
-        "(Setup + references add ~15 min on top.)",
-        DURATION_CHOICES)
-    noise_secs = DURATION_SECS[dsel]
+    # Duration (v0.8.3: or the weekend, resolved against the clock).
+    duration = choose_duration()
+    noise_secs = duration["secs"]      # None only for the weekend (no sweep)
 
     # ---------------------------------------------------------------- 4
     # CRITICAL housekeeping dialogs (recorded, never silent).
@@ -6183,9 +6702,12 @@ def main():
         "reference_open")
 
     # ---------------------------------------------------------------- 10
-    # Noise phase.  Default: one long pulse-free block (expno 12).
-    # With the 'sweep' flag: a ladder of field-stepped noise blocks --
-    # each step its own axion mass point (docs/design_rdopt_locksweep.md).
+    # Noise phase.  Default: one long pulse-free block (expno 12): a fixed
+    # duration, or the weekend (v0.8.3); with 'splitnoise', consecutive
+    # blocks at expno 12, 400, 401, ... under the deadline guard
+    # (run_noise_phase).  With the 'sweep' flag: a ladder of field-stepped
+    # noise blocks -- each step its own axion mass point
+    # (docs/design_rdopt_locksweep.md).
     sweep_verify_expnos = []
     swept = None
     if SWEEP:
@@ -6195,57 +6717,11 @@ def main():
     if swept is not None:
         sweep_verify_expnos, noise_expnos = swept
     else:
-        # Noise block: zgnoise2d, NO pulse, NS=1/row, RG = max stable,
-        # rows sized to the requested duration at the probed row geometry.
-        row_secs = noise_row_secs(td_row, d11_s)
-        n_rows = noise_rows_for(noise_secs, td_row, d11_s)
-        say("expno %d: NOISE block, %d rows x %.0f s (~%.0f min)"
-            % (EXP_NOISE, n_rows, row_secs, n_rows * row_secs / 60.0))
-        ensure_template_dim(template, dsname, 2)   # WR() copies 2D
-        cd = open_expno(template, dsname, EXP_NOISE)
-        putpar("PULPROG", PP_NAME)
-        make_2d(n_rows)
-        set_common_acq(o1_hz, td_row, SWH_HZ, 1, D1_NOISE_S, d11_s)
-        # RG for the noise block: rga on this (pulse-free) experiment finds
-        # the maximum stable gain, then it stays FIXED for the whole block.
-        # (zgnoise2d carries "acqt0=0" since v0.7.7 -- Bruker's idiom for a
-        # pulse-free acquisition -- so rga no longer warns 'acqt0 not set
-        # in pulse program' as it did, harmlessly, at Oulu on v0.7.6, where
-        # it returned 203; see docs/TROUBLESHOOTING.md.)
-        noise_rg = run_rga()
-        if noise_rg is None:
-            noise_rg = max_rg
-        set_rg(noise_rg)
-        # NON-modal by design: a blocking dialog here stranded overnight
-        # sessions when the operator walked away after the last question
-        # (the ladder + references run ~15 min in between).  Auto-start
-        # after a short countdown instead.
-        tail = "no further dialogs until the run completes"
-        if f1_td_form_rejected():
-            tail = ("NOTE: this console needs '1 td' typed by hand; the "
-                    "closing reference AFTER this block will ask for it "
-                    "again (rows = %d). The noise data is safe on disk "
-                    "meanwhile" % ref_rows)
-        elif param_api_needs_operator():
-            tail = ("NOTE: your help was needed once at the start; later "
-                    "datasets are handled automatically -- no further step "
-                    "expected")
-        say("NOISE BLOCK starting in 30 s: %d rows x %.0f s (~%.0f min), "
-            "RG=%s -- %s"
-            % (n_rows, row_secs, n_rows * row_secs / 60.0, noise_rg, tail))
-        try:
-            SLEEP(30)
-        except CATCHABLE:
-            pass
-        # zg, the data-content check of the first and last row, ONE retry
-        # with the next row setting if the last row came back empty, then
-        # a WARNING -- unattended: never a dialog from here on.
-        acquire_noise_block(meta, EXP_NOISE, "noise",
-                            "noise block (%d rows)" % n_rows, ds_path(cd),
-                            o1_hz, noise_secs, td_row, d11_s, n_rows,
-                            noise_rg)
-
-        noise_expnos = [EXP_NOISE]
+        # zgnoise2d, NO pulse, NS=1/row, RG = max stable, rows sized to the
+        # requested duration at the probed row geometry.
+        noise_expnos = run_noise_phase(
+            meta, template, dsname, os.path.dirname(ds_path(cd)), o1_hz,
+            duration, td_row, d11_s, max_rg, ref_rows)
 
     # ---------------------------------------------------------------- 11
     # Reference (close): identical to reference_open.

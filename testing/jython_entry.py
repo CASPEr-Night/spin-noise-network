@@ -96,6 +96,39 @@ NUTATION_MULTS = [1.0, 0.25, 0.5, 0.75, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0]
 DENSE_LEVELS = [1.0, 1.41, 2.0, 2.83, 4.0, 5.66, 8.0, 11.31, 16.0, 22.63,
                 25.25, 32.0, 45.25, 64.0, 90.51, 101.0]
 DENSE_EXPNOS = range(300, 300 + 2 * len(DENSE_LEVELS))
+# NOISE-PHASE FIXTURE (v0.8.3).  The mock acqus has no DTYPA, so the script
+# sizes rows at 8 bytes per point: 262144 x 8 = 2 MiB per row.
+#  * weekend: the duration dialog answers the weekend choice with the
+#    virtual clock on Friday 2026-10-30 17:30 local (the US daylight-saving
+#    change falls in that weekend on the harness's usual clock; Europe's
+#    was the weekend before), Monday 07:00 must come out as 2026-11-02;
+#    the bundle-size ceiling is scaled to 384 MiB -> 192 rows (> 1 h, so
+#    the clock audit stays conclusive), blocks to 48 MiB -> 24 rows: one
+#    192-row block by default, 8 x 24 rows under splitnoise (12, 400..406);
+#  * latezg: expno 12's zg is held LATE_ZG_HELD_S after its last row; the
+#    lag is recorded either way, and under splitnoise (16 MiB blocks: the
+#    60-min phase planned as 22 blocks of 7-8 rows) the deadline guard
+#    starts no second block.
+WEEKEND_CHOICE = 4
+WEEKEND_START = (2026, 10, 30, 17, 30)
+WEEKEND_END_LOCAL = "2026-11-02T07:00:00"
+WEEKEND_BLOCK_BYTES = 48 << 20
+WEEKEND_SESSION_BYTES = 384 << 20
+WEEKEND_ROWS = 192
+WEEKEND_SPLIT_BLOCKS = 8
+LATE_ZG_HELD_S = 30 * 3600.0
+LATE_BLOCK_BYTES = 16 << 20
+LATE_SPLIT_BLOCKS_PLANNED = 22
+
+
+def _local_epoch_s(y, mo, d, h, mi):
+    """Epoch seconds of a local wall time, by java.util.Calendar (lenient,
+    the JVM's default zone) -- independent of the script's time.mktime."""
+    import java.util.Calendar
+    cal = java.util.Calendar.getInstance()
+    cal.clear()
+    cal.set(y, mo - 1, d, h, mi, 0)
+    return cal.getTimeInMillis() / 1000.0
 
 
 def _lcg_permutation(n, seed):
@@ -394,21 +427,184 @@ CONFIRM_ANSWERS_F1 = {
 }
 
 
+def _noise_phase_checks(check, script_globals, _mo, _log, sweep_on,
+                        weekend_on, split_on, latezg_on):
+    """The v0.8.3 noise-phase checks (see the NOISE-PHASE FIXTURE
+    constants): the planning functions with the production constants,
+    then the session's noise_plan against experiments[] and the
+    variant run."""
+    # First the pure planning functions
+    # with the PRODUCTION constants -- the geometry of Torino's Avance Neo
+    # (262144 points x 8 bytes) and of an int32 console -- so the numbers
+    # the docs quote are pinned; then this session's own noise_plan.
+    _gib = 1 << 30
+    _pnb = script_globals.get("plan_noise_blocks")
+    _snp = script_globals.get("size_noise_phase")
+    _wee = script_globals.get("weekend_end_epoch")
+    _plan_bad = []
+    if not (callable(_pnb) and callable(_snp) and callable(_wee)):
+        _plan_bad.append("plan_noise_blocks / size_noise_phase / "
+                         "weekend_end_epoch missing")
+    else:
+        for _args, _want in (((1710, 512, 100), [428, 428, 427, 427]),
+                             ((192, 24, 100), [24] * 8),
+                             ((171, 8, 100), [8] * 17 + [7] * 5),
+                             ((0, 8, 100), [])):
+            _got = _pnb(*_args)
+            if _got != _want:
+                _plan_bad.append("plan_noise_blocks%r = %r, want %r"
+                                 % (_args, _got, _want))
+        _nbm = script_globals["NOISE_BLOCK_MAX_BYTES"]
+        _nsm = script_globals["NOISE_SESSION_MAX_BYTES"]
+        _we_s = 61.5 * 3600.0
+        for _tag, _args, _want in (
+                ("Neo overnight, split",
+                 (36000.0, 262144, 1.0, 8, _nbm, _nsm, 500 * _gib, 0, 1),
+                 (1710, None, 0, [428, 428, 427, 427])),
+                ("Neo overnight, default",
+                 (36000.0, 262144, 1.0, 8, _nbm, _nsm, 500 * _gib, 0, 0),
+                 (1710, None, 0, [1710])),
+                ("Neo weekend",
+                 (_we_s, 262144, 1.0, 8, _nbm, _nsm, 500 * _gib, 1, 0),
+                 (4608, "bundle_size", 0, [4608])),
+                ("int32 weekend",
+                 (_we_s, 262144, 1.0, 4, _nbm, _nsm, 500 * _gib, 1, 0),
+                 (9216, "bundle_size", 0, [9216])),
+                ("Neo weekend, 20 GiB free",
+                 (_we_s, 262144, 1.0, 8, _nbm, _nsm, 20 * _gib, 1, 0),
+                 (3686, "disk_space", 0, [3686])),
+                ("Neo overnight, 5 GiB free",
+                 (36000.0, 262144, 1.0, 8, _nbm, _nsm, 5 * _gib, 0, 0),
+                 (1710, None, 1, [1710]))):
+            _sz = _snp(*_args)
+            _got = (_sz.get("rows"), _sz.get("capped_by"),
+                    _sz.get("disk_short"), _sz.get("blocks"))
+            if _got != _want:
+                _plan_bad.append("size_noise_phase[%s] = %r, want %r"
+                                 % (_tag, _got, _want))
+        for _now, _end in (((2026, 10, 30, 17, 30), (2026, 11, 2, 7, 0)),
+                           ((2026, 10, 31, 23, 59), (2026, 11, 2, 7, 0)),
+                           ((2026, 11, 1, 1, 30), (2026, 11, 2, 7, 0)),
+                           ((2026, 11, 2, 6, 59), (2026, 11, 2, 7, 0)),
+                           ((2026, 11, 2, 7, 0), (2026, 11, 9, 7, 0)),
+                           ((2026, 10, 28, 12, 0), (2026, 11, 2, 7, 0)),
+                           ((2026, 10, 23, 17, 30), (2026, 10, 26, 7, 0))):
+            _got = _wee(_local_epoch_s(*_now))
+            if abs(_got - _local_epoch_s(*_end)) > 0.5:
+                _plan_bad.append("weekend_end_epoch(%r) = %s, want %r"
+                                 % (_now, time.strftime(
+                                     "%Y-%m-%d %H:%M", time.localtime(_got)),
+                                    _end))
+    check("noise phase planning: balanced blocks (1710 rows -> 4 x 427-428 "
+          "at 1 GiB on a Neo), the 9 GiB bundle-size cap (4608 Neo rows, "
+          "9216 int32 rows), the weekend disk cap, the fixed-duration disk "
+          "WARNING, Monday 07:00 across a daylight-saving change",
+          not _plan_bad, "; ".join(_plan_bad)[:900])
+    _np = _mo.get("noise_plan") if isinstance(_mo, dict) else None
+    _nexps = [e for e in (_mo.get("experiments") or [])
+              if e.get("role") == "noise"] if isinstance(_mo, dict) else []
+    if sweep_on:
+        check("noise_plan absent under the sweep (field_sweep records it)",
+              _np is None, repr(_np)[:200])
+    else:
+        _blocks = []
+        if isinstance(_np, dict) and isinstance(_np.get("blocks"), list):
+            _blocks = _np["blocks"]
+        check("noise_plan recorded: mode %s, split %d, every block with its "
+              "rows and zg_return_lag_s"
+              % (weekend_on and "weekend" or "fixed", int(split_on)),
+              isinstance(_np, dict)
+              and _np.get("mode") == (weekend_on and "weekend" or "fixed")
+              and _np.get("split") == int(split_on) and _blocks
+              and all(["zg_return_lag_s" in b and "rows" in b
+                       for b in _blocks]), repr(_np)[:500])
+        check("noise phase: every noise block at ONE rg / td / sw_hz (the "
+              "report co-adds them as one block)",
+              len(set([(e.get("rg"), e.get("td"), e.get("sw_hz"))
+                       for e in _nexps])) == 1, repr(_nexps)[:400])
+        check("noise phase: noise_plan.blocks == experiments[] (expno, rows)",
+              [(b.get("expno"), b.get("rows")) for b in _blocks]
+              == [(e.get("expno"), e.get("td1_rows")) for e in _nexps],
+              repr(([(b.get("expno"), b.get("rows")) for b in _blocks],
+                    [(e.get("expno"), e.get("td1_rows")) for e in _nexps])))
+        if weekend_on:
+            _req = (_np or {}).get("requested_s") or 0.0
+            check("weekend: Monday 07:00 resolved to %s from the virtual "
+                  "Friday 17:30; the phase capped by the (scaled) bundle-"
+                  "size ceiling at %d rows in %d block(s), not stopped"
+                  % (WEEKEND_END_LOCAL, WEEKEND_ROWS,
+                     split_on and WEEKEND_SPLIT_BLOCKS or 1),
+                  (_np or {}).get("weekend_end_local") == WEEKEND_END_LOCAL
+                  and (_np or {}).get("capped_by") == "bundle_size"
+                  and (_np or {}).get("rows_planned") == WEEKEND_ROWS
+                  and 55 * 3600.0 < _req < 65 * 3600.0
+                  and sum([b.get("rows") or 0 for b in _blocks])
+                  == WEEKEND_ROWS
+                  and len(_blocks) == (split_on and WEEKEND_SPLIT_BLOCKS or 1)
+                  and (_np or {}).get("stopped_early") is None,
+                  repr(_np)[:600])
+        if latezg_on:
+            _lag = _blocks and _blocks[0].get("zg_return_lag_s")
+            _cb12 = [b for b in ((_mo.get("clock_audit") or {}).get("blocks")
+                                 or []) if b.get("expno") == 12]
+            _lag_warned = [s for a, s in _log if a == "SHOW_STATUS"
+                           and u"zg returned" in s and u"WARNING" in s]
+            check("latezg: the held zg's lag (%.0f s) recorded on block 1 "
+                  "and on its clock-audit block, counted, and said as a "
+                  "WARNING" % LATE_ZG_HELD_S,
+                  isinstance(_lag, float)
+                  and abs(_lag - LATE_ZG_HELD_S) < 120.0
+                  and _cb12 and _cb12[-1].get("zg_return_lag_s") == _lag
+                  and (_np or {}).get("late_returns") == 1
+                  and len(_lag_warned) == 1,
+                  repr((_lag, _cb12 and _cb12[-1], _lag_warned))[:500])
+            if split_on:
+                check("latezg + splitnoise: the deadline guard started no "
+                      "second block of the %d planned and said why"
+                      % LATE_SPLIT_BLOCKS_PLANNED,
+                      (_np or {}).get("blocks_planned")
+                      == LATE_SPLIT_BLOCKS_PLANNED
+                      and len(_blocks) == 1
+                      and "not started" in ((_np or {}).get("stopped_early")
+                                            or ""),
+                      repr(_np)[:600])
+            else:
+                check("latezg: one block, nothing after it to guard "
+                      "(stopped_early None)",
+                      len(_blocks) == 1
+                      and (_np or {}).get("stopped_early") is None,
+                      repr(_np)[:400])
+        else:
+            check("no zg-return lag where acqus carries no DATE (the mock "
+                  "modes): every block None, late_returns 0",
+                  all([b.get("zg_return_lag_s") is None for b in _blocks])
+                  and (_np or {}).get("late_returns") == 0,
+                  repr(_blocks)[:300])
+
+
 def main():
     if len(sys.argv) < 2 or sys.argv[1] not in ("simulate", "desktest"):
         print "usage: jython jython_entry.py {simulate|desktest} " \
-              "[rdopt] [sweep] [autostep] [nonutation] [sparseladder]"
+              "[rdopt] [sweep] [autostep] [nonutation] [sparseladder] " \
+              "[splitnoise] [weekend] [latezg]"
         return 2
     mode = sys.argv[1]
-    features = []
+    features = []          # passed to the script's argv
+    variants = []          # harness-only: the fixture, not the script
     for a in sys.argv[2:]:
-        if a in ("rdopt", "sweep", "autostep", "nonutation", "sparseladder"):
+        if a in ("rdopt", "sweep", "autostep", "nonutation", "sparseladder",
+                 "splitnoise"):
             features.append(a)
+        elif a in ("weekend", "latezg"):
+            variants.append(a)
     rdopt_on = "rdopt" in features
     sweep_on = "sweep" in features
     autostep_on = "autostep" in features
     nutation_on = "nonutation" not in features
     dense_on = "sparseladder" not in features
+    split_on = "splitnoise" in features
+    weekend_on = "weekend" in variants
+    latezg_on = "latezg" in variants
 
     workdir = os.environ.get("HARNESS_WORKDIR")
     if not workdir:
@@ -422,8 +618,9 @@ def main():
             % (flavor, "|".join(FLAVORS))
         return 2
 
-    print "harness: mode=%s features=%s flavor=%s workdir=%s" \
-        % (mode, ",".join(features) or "none", flavor, workdir)
+    print "harness: mode=%s features=%s variants=%s flavor=%s workdir=%s" \
+        % (mode, ",".join(features) or "none", ",".join(variants) or "none",
+           flavor, workdir)
     datadir, tshome = build_world(workdir, flavor)
 
     template = [u"WATERTEST", u"1", u"1", datadir.decode("utf-8")]
@@ -436,10 +633,27 @@ def main():
     if flavor == "legacy-2dtemplate":
         template_params["PARMODE"] = u"1"       # a 2D dataset was open
         template_params["1 TD"] = u"256"        # ... with its F1 TD (acqu2)
+    select_answers = dict(SELECT_ANSWERS)
+    if weekend_on:
+        select_answers["spin-noise network 5/5: noise-block duration"] = \
+            WEEKEND_CHOICE
     topspin_stub.configure(template, template_params,
-                           DIALOG_ANSWERS, SELECT_ANSWERS,
+                           DIALOG_ANSWERS, select_answers,
                            confirm_answers, flavor=flavor)
     topspin_stub.NUTATION_P90_TRUE_US[0] = NUTATION_P90_TRUE_US
+    # v0.8.3 noise-phase variants (see the NOISE-PHASE FIXTURE constants):
+    # the weekend starts on a Friday evening by the virtual clock with
+    # megabyte limits; latezg holds expno 12's zg after its last row.
+    if weekend_on:
+        topspin_stub.NOISE_LIMITS[0] = (WEEKEND_BLOCK_BYTES,
+                                        WEEKEND_SESSION_BYTES, None)
+        topspin_stub._VCLOCK_MS[0] = long(_local_epoch_s(*WEEKEND_START)
+                                          * 1000)
+    if latezg_on:
+        topspin_stub.LATE_ZG[0] = (12, LATE_ZG_HELD_S)
+        if split_on:
+            topspin_stub.NOISE_LIMITS[0] = (LATE_BLOCK_BYTES,
+                                            9 * (1 << 30), None)
 
     # Register the stub as TopCmds (so `from TopCmds import *` succeeds
     # and IN_TOPSPIN=1 -> real java zip/digest paths) AND inject the API
@@ -603,8 +817,14 @@ def main():
             expected_roles += ["sweep_verify", "noise_sweep"]
         expected_roles += ["sweep_verify"]
     else:
-        expected_expnos += [12]
-        expected_roles += ["noise"]
+        # v0.8.3: one noise block (12) unless splitnoise deals the phase
+        # into blocks 12, 400, 401, ... (the weekend variant: 8; latezg:
+        # the guard stops after the first)
+        _noise_expnos = [12]
+        if split_on and weekend_on:
+            _noise_expnos = [12] + range(400, 400 + WEEKEND_SPLIT_BLOCKS - 1)
+        expected_expnos += _noise_expnos
+        expected_roles += ["noise"] * len(_noise_expnos)
     expected_expnos += [13]
     expected_roles += ["reference_close"]
 
@@ -1348,6 +1568,20 @@ def main():
             return max(2, int(_math.ceil(40.0 / (_aq(td) + 0.05 + d11))))
         return None
 
+    # v0.8.3 variants: the noise blocks' rows (the duration model for the
+    # plain phase; the scaled caps for the weekend; latezg + splitnoise
+    # acquires the first of 22 planned blocks, 8 rows)
+    _noise_rows_want = {}
+    if weekend_on and split_on:
+        for _e in [12] + range(400, 400 + WEEKEND_SPLIT_BLOCKS - 1):
+            _noise_rows_want[_e] = WEEKEND_ROWS // WEEKEND_SPLIT_BLOCKS
+    elif weekend_on:
+        _noise_rows_want[12] = WEEKEND_ROWS
+    elif latezg_on and split_on:
+        _noise_rows_want[12] = (_rows_model("noise", 262144, 1.0)
+                                + LATE_SPLIT_BLOCKS_PLANNED - 1) \
+            // LATE_SPLIT_BLOCKS_PLANNED
+
     check("row probe: calibration.row_probe present for expno 17 with the "
           "ladder as tried, attempts, blocks and the session geometry",
           _rp.get("expno") == 17 and _rp.get("ladder")
@@ -1435,6 +1669,8 @@ def main():
         if _role == "noise_sweep":
             _secs = max(300.0, 3600.0 / 3.0)          # per_secs of 3 steps
         _rm = _rows_model(_role, _g_td, _g_d11, _secs)
+        if _role == "noise" and _e in _noise_rows_want:
+            _rm = _noise_rows_want[_e]                # v0.8.3 variants
         if _rm is not None and _b.get("rows") != _rm:
             _probs.append("rows %r != duration model %r" % (_b.get("rows"), _rm))
         _acq_want = (flavor != "legacy-dru-refused")
@@ -1527,6 +1763,11 @@ def main():
           "for 1Ds, ser for pseudo-2Ds); first rows hold data; last rows hold "
           "data exactly where the block is recorded as acquired (%s)" % flavor,
           not _bad_files, "; ".join(_bad_files)[:600])
+
+    # ---- the noise phase (v0.8.3): module-level, since main() sits at
+    # the JVM's 64 KB method-size limit under Jython.
+    _noise_phase_checks(check, script_globals, _mo, _log, sweep_on,
+                        weekend_on, split_on, latezg_on)
 
     # ---- clock audit (schema 1.2).  Jython 2.7 ships json, so the
     # harness can parse what the script's hand-rolled writer emitted.
@@ -1627,6 +1868,11 @@ def main():
         _rb = _rp_by_expno.get(b.get("expno"))
         if _rb is not None and not _rb.get("acquired"):
             continue
+        # v0.8.3 latezg variant: a held zg's block carries its recorded
+        # lag; the acquisition is the wall time less the hold (the report
+        # reads the same thing from the acqus stamps).
+        if isinstance(b.get("zg_return_lag_s"), float):
+            wall_s = wall_s - b["zg_return_lag_s"]
         if exp is not None and exp > 10.0:
             if abs(wall_s - exp) > max(0.01 * exp, 0.25):
                 consistent = False
