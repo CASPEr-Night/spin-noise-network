@@ -428,7 +428,7 @@ CONFIRM_ANSWERS_F1 = {
 
 
 def _noise_phase_checks(check, script_globals, _mo, _log, sweep_on,
-                        weekend_on, split_on, latezg_on):
+                        weekend_on, split_on, latezg_on, ts32_on=0):
     """The v0.8.3 noise-phase checks (see the NOISE-PHASE FIXTURE
     constants): the planning functions with the production constants,
     then the session's noise_plan against experiments[] and the
@@ -549,11 +549,16 @@ def _noise_phase_checks(check, script_globals, _mo, _log, sweep_on,
                                  or []) if b.get("expno") == 12]
             _lag_warned = [s for a, s in _log if a == "SHOW_STATUS"
                            and u"zg returned" in s and u"WARNING" in s]
+            _basis = _blocks and _blocks[0].get("zg_return_lag_basis")
             check("latezg: the held zg's lag (%.0f s) recorded on block 1 "
                   "and on its clock-audit block, counted, and said as a "
-                  "WARNING" % LATE_ZG_HELD_S,
+                  "WARNING (basis %s)" % (LATE_ZG_HELD_S,
+                                          ts32_on and "wall_less_ocxo"
+                                          or "acqus_date"),
                   isinstance(_lag, float)
                   and abs(_lag - LATE_ZG_HELD_S) < 120.0
+                  and _basis == (ts32_on and "wall_less_ocxo"
+                                 or "acqus_date")
                   and _cb12 and _cb12[-1].get("zg_return_lag_s") == _lag
                   and (_np or {}).get("late_returns") == 1
                   and len(_lag_warned) == 1,
@@ -574,6 +579,23 @@ def _noise_phase_checks(check, script_globals, _mo, _log, sweep_on,
                       len(_blocks) == 1
                       and (_np or {}).get("stopped_early") is None,
                       repr(_np)[:400])
+        elif ts32_on:
+            # Oulu 400, 2026-11-12 (TopSpin 3.2): DATE about one row after
+            # the start, no DATE_START, zg NOT held -- script 0.8.3
+            # recorded the block's own length (1687 s) as a late return.
+            _lag = _blocks and _blocks[0].get("zg_return_lag_s")
+            _lag_warned = [s for a, s in _log if a == "SHOW_STATUS"
+                           and u"zg returned" in s and u"WARNING" in s]
+            check("ts32date: TopSpin 3.2 stamps (DATE at the start, no "
+                  "DATE_START) on a block that was not held: lag from the "
+                  "wall time less the OCXO duration, under 60 s, basis "
+                  "wall_less_ocxo, late_returns 0, no WARNING",
+                  isinstance(_lag, float) and 0.0 <= _lag < 60.0
+                  and _blocks[0].get("zg_return_lag_basis")
+                  == "wall_less_ocxo"
+                  and (_np or {}).get("late_returns") == 0
+                  and not _lag_warned,
+                  repr((_blocks and _blocks[0], _lag_warned))[:500])
         else:
             check("no zg-return lag where acqus carries no DATE (the mock "
                   "modes): every block None, late_returns 0",
@@ -595,7 +617,7 @@ def main():
         if a in ("rdopt", "sweep", "autostep", "nonutation", "sparseladder",
                  "splitnoise"):
             features.append(a)
-        elif a in ("weekend", "latezg"):
+        elif a in ("weekend", "latezg", "ts32date"):
             variants.append(a)
     rdopt_on = "rdopt" in features
     sweep_on = "sweep" in features
@@ -605,6 +627,7 @@ def main():
     split_on = "splitnoise" in features
     weekend_on = "weekend" in variants
     latezg_on = "latezg" in variants
+    ts32_on = "ts32date" in variants
 
     workdir = os.environ.get("HARNESS_WORKDIR")
     if not workdir:
@@ -649,8 +672,10 @@ def main():
                                         WEEKEND_SESSION_BYTES, None)
         topspin_stub._VCLOCK_MS[0] = long(_local_epoch_s(*WEEKEND_START)
                                           * 1000)
+    elif ts32_on:
+        topspin_stub.LATE_ZG[0] = (12, 0.0, 1)
     if latezg_on:
-        topspin_stub.LATE_ZG[0] = (12, LATE_ZG_HELD_S)
+        topspin_stub.LATE_ZG[0] = (12, LATE_ZG_HELD_S, ts32_on)
         if split_on:
             topspin_stub.NOISE_LIMITS[0] = (LATE_BLOCK_BYTES,
                                             9 * (1 << 30), None)
@@ -1767,7 +1792,7 @@ def main():
     # ---- the noise phase (v0.8.3): module-level, since main() sits at
     # the JVM's 64 KB method-size limit under Jython.
     _noise_phase_checks(check, script_globals, _mo, _log, sweep_on,
-                        weekend_on, split_on, latezg_on)
+                        weekend_on, split_on, latezg_on, ts32_on)
 
     # ---- clock audit (schema 1.2).  Jython 2.7 ships json, so the
     # harness can parse what the script's hand-rolled writer emitted.

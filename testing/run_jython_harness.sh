@@ -78,7 +78,9 @@ command -v python3 >/dev/null || { echo "ERROR: python3 not on PATH"; exit 2; }
 # without the splitnoise flag (8 blocks at expnos 12, 400..406, one RG),
 # and Torino's held zg (latezg: expno 12 returns 30 h after its last row)
 # with and without splitnoise (the lag recorded; the deadline guard starts
-# no second block).  weekend/latezg are harness variants (the fixture),
+# no second block), and TopSpin 3.2's acqus stamps (ts32date: DATE about
+# one row after the start, no DATE_START; Oulu 400, 2026-11-12) with and
+# without the held zg.  weekend/latezg/ts32date are harness variants (the fixture),
 # splitnoise is the script's own argv flag -- see jython_entry.py.
 for RUN in "legacy simulate" "legacy desktest" "ts44 desktest" \
            "ts44-stale desktest" "ts44-strict desktest" \
@@ -96,7 +98,9 @@ for RUN in "legacy simulate" "legacy desktest" "ts44 desktest" \
            "legacy desktest weekend" \
            "ts44 desktest splitnoise weekend" \
            "legacy desktest latezg" \
-           "legacy desktest splitnoise latezg"; do
+           "legacy desktest splitnoise latezg" \
+           "legacy desktest ts32date" \
+           "legacy desktest latezg ts32date"; do
     set -- $RUN
     FLAVOR="$1"; shift
     MODE="$1"; shift

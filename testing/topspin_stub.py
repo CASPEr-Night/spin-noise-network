@@ -1011,12 +1011,16 @@ def HARNESS_MOCK_RGA():
 # free-disk figure) so a weekend or a split phase writes a few MB.
 # LATE_ZG models Torino's held zg (TopSpin 4.4.0, 2026-10-01 and -26): the
 # block of the configured expno acquires normally, the console writes
-# acqus DATE when its last row is in, and zg returns LATE_ZG[1] seconds
-# later.  The script must record that lag, and under 'splitnoise' its
-# deadline guard must not start another block.
+# acqus DATE_START at the start and DATE when its last row is in, and zg
+# returns LATE_ZG[1] seconds later.  The script must record that lag, and
+# under 'splitnoise' its deadline guard must not start another block.
+# LATE_ZG[2] true models TopSpin 3.2's stamps instead (Oulu 400,
+# 2026-11-12): no DATE_START, and DATE written about one row after the
+# START (21 s into a 1708 s block there) -- a hold of 0 s is then an
+# ordinary block that script 0.8.3 misread as a late return.
 
 NOISE_LIMITS = [None]         # None, or (block_bytes, session_bytes, disk)
-LATE_ZG = [None]              # None, or (expno, seconds held)
+LATE_ZG = [None]              # None, or (expno, seconds held, ts32_stamps)
 LATE_ZG_HELD = []             # [(expno_dir, date_epoch_s, held_s)]
 
 
@@ -1049,9 +1053,9 @@ def _write_random_rows(expno_dir, td, rows):
         fos.close()
 
 
-def _set_acqus_date(expno_dir, epoch_s):
-    """Write ##$DATE= epoch_s into the expno's acqus (replacing any), as
-    the console does when the acquisition's last row is in."""
+def _set_acqus_date(expno_dir, epoch_s, start_s=None):
+    """Write ##$DATE= epoch_s (and ##$DATE_START= start_s when given) into
+    the expno's acqus, replacing any, as the console does."""
     p = os.path.join(_b(expno_dir), "acqus")
     txt = ""
     if os.path.isfile(p):
@@ -1060,7 +1064,10 @@ def _set_acqus_date(expno_dir, epoch_s):
         f.close()
     lines = [ln for ln in txt.split("\n")
              if ln and not ln.startswith("##$DATE=")
+             and not ln.startswith("##$DATE_START=")
              and not ln.startswith("##END=")]
+    if start_s is not None:
+        lines.append("##$DATE_START= %d" % int(start_s))
     lines.append("##$DATE= %d" % int(epoch_s))
     lines.append("##END=")
     f = open(p, "w")
@@ -1075,15 +1082,20 @@ def _mock_late_zg(expno_dir, td, rows, ocxo_s):
     expno."""
     if LATE_ZG[0] is None or rows is None or rows <= 1:
         return 0
-    expno, held_s = LATE_ZG[0]
+    expno, held_s, ts32 = LATE_ZG[0]
     if os.path.basename(_b(expno_dir).rstrip(os.sep)) != str(expno):
         return 0
     _write_random_rows(expno_dir, td, rows)
+    start_s = _VCLOCK_MS[0] / 1000.0
     if ocxo_s:
         HARNESS_ADVANCE_S(ocxo_s)
     date_s = _VCLOCK_MS[0] / 1000.0
-    _set_acqus_date(expno_dir, date_s)
-    HARNESS_ADVANCE_S(held_s)
+    if ts32:
+        _set_acqus_date(expno_dir, start_s + (ocxo_s or 0.0) / rows)
+    else:
+        _set_acqus_date(expno_dir, date_s, start_s)
+    if held_s > 0.0:              # HARNESS_ADVANCE_S adds 200 ms of block
+        HARNESS_ADVANCE_S(held_s)  # overhead: a 0 s hold is no second call
     LATE_ZG_HELD.append((_u(expno_dir), date_s, held_s))
     LOG.append(("LATE-ZG", u"%s held %.0f s after its last row"
                 % (_u(expno_dir), held_s)))

@@ -351,6 +351,18 @@ covers ~10 GB), set the shared token, and hand facilities the endpoint + token p
   Jython harness (a virtual Friday-to-Monday weekend across a daylight-saving change, a zg
   held 30 h, the split layout) and on a re-packed synthetic bundle whose science matches the
   unsplit one; not yet run on hardware. Reports of earlier bundles are unchanged.
+- **v0.8.4 (unreleased) stops a false "zg returned late" on TopSpin 3.2.** Script 0.8.3
+  measured the zg-return lag as the time since acqus `DATE`, which is the end of the
+  acquisition on TopSpin 3.7 and 4.x. TopSpin 3.2 stamps `DATE` about one row after `zg`
+  starts and writes no `DATE_START`, so the first 0.8.3 run on the Oulu 400 (12 November
+  2026) recorded a 1687 s "lag" and a late-return warning on a 28-minute block that had
+  finished on time (wall time 1708.4 s against 1705.5 s expected). Where acqus has no
+  `DATE_START` the script now takes the lag as the block's wall time less its expected
+  duration and records the basis (`noise_plan.blocks[].zg_return_lag_basis`); the report
+  re-derives the lag of a 0.8.3 bundle from such a console and says so (INFO "noise phase:
+  zg-return lag re-derived"). Only the lag and its warning were wrong: rows, row times and
+  the clock audit never used it. Reproduced in the Jython harness (TopSpin 3.2 stamps, with
+  and without a held zg) and on the Oulu bundle; other reports are unchanged.
 - Sweep/lock state cannot be commanded portably — it is confirmed by the operator and
   recorded (a hard-won lesson: a field sweep left on smears the line by kHz).
 - Bundle size is a non-issue up to 5 GiB: the uploader switches to a chunked,
