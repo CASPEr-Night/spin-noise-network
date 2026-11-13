@@ -5868,7 +5868,54 @@ def nutation_tip_cross_check(nut, excl):
 ZG_LATE_WARN_S = 600.0   # the script's threshold (spin_noise_run.py)
 
 
-def noise_plan_section(meta):
+def _ts32_lag_fix(meta, bundle, blocks):
+    """Ticket 20261113 (Oulu 400, TopSpin 3.2, script 0.8.3): a block
+    whose acqus carries DATE but no DATE_START has DATE stamped about one
+    row after zg STARTED, not at the end, so script 0.8.3's
+    zg_return_lag_s (now - DATE) is the block's own length (1687 s on a
+    1708 s block that returned on time).  Such a block's lag is re-derived
+    as its clock-audit wall time less its OCXO duration -- what script
+    0.8.4 records itself (basis 'wall_less_ocxo').  Returns (blocks, notes):
+    copies of the blocks, the re-derived ones carrying
+    zg_return_lag_s_recorded and zg_return_lag_basis; notes one string per
+    re-derived block.  A block that already says its basis (script
+    >= 0.8.4), or without the acqus stamps or the clock-audit figures, is
+    kept as recorded."""
+    cab = {}
+    for b in (meta.get("clock_audit") or {}).get("blocks") or []:
+        if isinstance(b, dict) and b.get("expno") is not None:
+            cab[b.get("expno")] = b          # the last attempt wins
+    out, notes = [], []
+    for b in blocks:
+        b = dict(b)
+        lag = b.get("zg_return_lag_s")
+        a = {}
+        if bundle is not None and _is_num(lag) \
+                and not b.get("zg_return_lag_basis"):
+            try:
+                a = bundle.acqus(int(b.get("expno")))
+            except Exception:
+                a = {}
+        if a.get("DATE") is not None and a.get("DATE_START") is None:
+            cb = cab.get(b.get("expno")) or {}
+            ws, we = cb.get("wall_start_ms"), cb.get("wall_end_ms")
+            ocxo = cb.get("ocxo_expected_s")
+            if _is_num(ws) and _is_num(we) and _is_num(ocxo):
+                new = round(max(0.0, (we - ws) / 1000.0 - ocxo), 1)
+                b["zg_return_lag_s_recorded"] = lag
+                b["zg_return_lag_s"] = new
+                b["zg_return_lag_basis"] = "wall_less_ocxo (report)"
+                notes.append(
+                    "expno %s: acqus has DATE but no DATE_START (TopSpin "
+                    "3.x stamps DATE at the start of zg), so the recorded "
+                    "lag %.1f s is the block's own length; re-derived as "
+                    "the wall time less the OCXO duration: %.1f s"
+                    % (b.get("expno"), lag, new))
+        out.append(b)
+    return out, notes
+
+
+def noise_plan_section(meta, bundle=None):
     """v0.8.3: science.noise_plan -- the script's meta.noise_plan as
     recorded (mode fixed | weekend, the splitnoise flag, the caps that
     shaped the phase, every block with its zg-return lag) plus a summary
@@ -5883,6 +5930,7 @@ def noise_plan_section(meta):
     if not isinstance(plan, dict):
         return None, []
     blocks = [b for b in (plan.get("blocks") or []) if isinstance(b, dict)]
+    blocks, lag_notes = _ts32_lag_fix(meta, bundle, blocks)
     rows = sum(int(b.get("rows") or 0) for b in blocks)
     summary = ("%s noise phase (%s): %d row(s) in %d block(s) at expno(s) "
                "%s%s; planned %s row(s) in %s block(s)%s"
@@ -5896,6 +5944,16 @@ def noise_plan_section(meta):
     out["summary"] = summary
     out["rows_acquired"] = rows
     qa = [{"level": "INFO", "check": "noise phase", "detail": summary}]
+    if lag_notes:
+        out["blocks"] = blocks
+        out["late_returns_recorded"] = plan.get("late_returns")
+        out["late_returns"] = len([
+            b for b in blocks if _is_num(b.get("zg_return_lag_s"))
+            and b["zg_return_lag_s"] > ZG_LATE_WARN_S])
+        for n in lag_notes:
+            qa.append({"level": "INFO",
+                       "check": "noise phase: zg-return lag re-derived",
+                       "detail": n})
     if plan.get("stopped_early"):
         qa.append({"level": "WARN", "check": "noise phase: stopped early",
                    "detail": "%s -- the deadline guard kept the phase inside "
@@ -5907,11 +5965,17 @@ def noise_plan_section(meta):
             qa.append({"level": "WARN",
                        "check": "noise phase: zg returned late",
                        "detail": "expno %s: zg returned %.2f h after the "
-                                 "block's last row (acqus DATE, recorded by "
-                                 "the script) -- the rows are complete; the "
-                                 "clock audit and the wind-aware row times "
-                                 "use the console's acquisition stamps"
-                                 % (b.get("expno"), lag / 3600.0)})
+                                 "block's last row (%s) -- the rows are "
+                                 "complete; the clock audit and the "
+                                 "wind-aware row times use the console's "
+                                 "acquisition stamps"
+                                 % (b.get("expno"), lag / 3600.0,
+                                    "acqus DATE, recorded by the script"
+                                    if not b.get("zg_return_lag_basis")
+                                    or b.get("zg_return_lag_basis")
+                                    == "acqus_date"
+                                    else "the block's wall time less its "
+                                    "OCXO duration")})
     if plan.get("disk_short"):
         need = None
         if _is_num(plan.get("rows_planned")) and _is_num(plan.get("row_bytes")):
@@ -10220,7 +10284,7 @@ def main(argv=None):
     qa.extend(nutation_qa_rows(nutation))
     # v0.8.3 noise phase: science.noise_plan and its rows (None and none
     # for a bundle written before the script recorded the plan)
-    noise_plan, noise_plan_qa = noise_plan_section(meta)
+    noise_plan, noise_plan_qa = noise_plan_section(meta, bundle)
     qa.extend(noise_plan_qa)
     # v0.8.2 dense ladder: the measured reference-to-noise gain bridge
     # (rg_ladder.bridge_measured, transduction.rg_bridge_cross_check --

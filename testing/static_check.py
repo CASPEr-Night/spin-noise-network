@@ -1371,7 +1371,7 @@ check("noise phase (v0.8.3): run_noise_phase is UNATTENDED (no dialog), "
       and _rnp.count("run_rga()") == 1 and "set_rg(noise_rg)" in _rnp
       and "if fit < NOISE_MIN_BLOCK_ROWS:" in _rnp
       and 'plan["stopped_early"] = (' in _rnp
-      and "lag = zg_return_lag_s(ds_path(cd), t_ms)" in _rnp
+      and "lag, lag_basis = zg_return_lag_s(ds_path(cd), t_ms, cb)" in _rnp
       and 'cb["zg_return_lag_s"] = lag' in _rnp
       and 'meta["noise_plan"] = plan' in _rnp
       and 'acquire_noise_block(meta, expno, "noise", what' in _rnp)
@@ -1384,7 +1384,7 @@ check("noise phase (v0.8.3): schema documents noise_plan and "
       "noise_plan" in schema.get("properties", {})
       and "zg_return_lag_s" in schema["properties"]["clock_audit"][
           "properties"]["blocks"]["items"]["properties"]
-      and "def noise_plan_section(meta)" in REPORT_SRC
+      and "def noise_plan_section(meta, bundle=None)" in REPORT_SRC
       and "if noise_plan is not None:" in REPORT_SRC
       and "**weekend** (v0.8.3)" in open(os.path.join(
           REPO, "PROTOCOL.md"), encoding="utf-8").read()
@@ -1395,6 +1395,33 @@ check("noise phase (v0.8.3): schema documents noise_plan and "
       and '"legacy desktest splitnoise latezg"' in _HARN
       and "test_split_noise_report.py" in _HARN
       and "testing/test_split_noise_report.py" in _CI)
+# Ticket 20261113 (Oulu 400, TopSpin 3.2): acqus DATE there is stamped about
+# one row after zg STARTS and there is no DATE_START, so "now - DATE" is the
+# block's own length (1687 s recorded, a false late-return WARNING).
+_zrl = "\n".join(function_body("zg_return_lag_s")[0])
+_np_props = schema.get("properties", {}).get("noise_plan", {})
+check("zg-return lag (ticket 20261113, TopSpin 3.2): now - acqus DATE only "
+      "where acqus has DATE_START (basis acqus_date), else the clock-audit "
+      "wall time less ocxo_expected_s (basis wall_less_ocxo), the basis "
+      "recorded on the block; the report re-derives a 0.8.3 bundle's lag "
+      "(_ts32_lag_fix) and keeps late_returns_recorded; schema, "
+      "TROUBLESHOOTING and the harness (ts32date, with and without latezg) "
+      "carry it",
+      '_acqus_scalar(expno_dir, "DATE_START", None) is not None' in _zrl
+      and 'basis = "acqus_date"' in _zrl
+      and 'basis = "wall_less_ocxo"' in _zrl
+      and 'cb.get("ocxo_expected_s")' in _zrl
+      and 'rec["zg_return_lag_basis"] = lag_basis' in _rnp
+      and "def _ts32_lag_fix(meta, bundle, blocks)" in REPORT_SRC
+      and 'out["late_returns_recorded"] = plan.get("late_returns")'
+      in REPORT_SRC
+      and "zg_return_lag_basis" in _np_props.get("description", "")
+      and "wall_less_ocxo" in _np_props.get("description", "")
+      and "blocks[].zg_return_lag_basis`" in _TS.replace("\n", " ")
+      and "stamps `DATE` about one row after zg starts" in _TS.replace(
+          "\n", " ")
+      and '"legacy desktest ts32date"' in _HARN
+      and '"legacy desktest latezg ts32date"' in _HARN)
 
 
 # --------------------------------------------------------------------------

@@ -588,6 +588,30 @@ guard: a held zg never pushes acquisition into the working day) -- the
 run keeps the first block only. That is why `splitnoise` is not the
 default.
 
+**The status line and the report say "zg returned late" after a run
+that finished on time (script 0.8.3 on TopSpin 3.2, Avance III 400,
+Oulu).** Seen on 2026-11-12: a 28-minute noise block ended with
+"WARNING: ... zg returned 0.5 h after its last row (acqus DATE)", and
+the report carried the WARN row "noise phase: zg returned late" with a
+recorded lag of 1687 s. Nothing was late. The block took 1708.4 s by
+the workstation clock against 1705.5 s expected from its timing, and
+the closing reference followed at once. *Cause:* script 0.8.3 measured
+the lag as "now less acqus `DATE`", which is right where the console
+writes `DATE` when the last row is in (TopSpin 3.7 and 4.x, whose
+acqus also carries `DATE_START`). TopSpin 3.2 writes no `DATE_START`
+and stamps `DATE` about one row after zg starts, so the "lag" was the
+block's own length. *Fix (v0.8.4):* where acqus has
+no `DATE_START`, the script takes the lag as the block's wall time
+less its expected duration and records which of the two it used
+(`noise_plan.blocks[].zg_return_lag_basis`: `acqus_date` or
+`wall_less_ocxo`). A zg that is really held on such a console is still
+caught: the wall time grows, the expected duration does not. The
+report re-derives the lag of a 0.8.3 bundle in the same way (INFO row
+"noise phase: zg-return lag re-derived"; Oulu's becomes 4.5 s and the
+WARN goes), and keeps the recorded count as `late_returns_recorded`.
+*If you see it on 0.8.3:* nothing to do; the data are unaffected, and
+on a block longer than 10 min the warning appears every time.
+
 **The weekend choice says it "cannot run now".** The weekend runs the
 noise until 06:30 on Monday by the console's clock. It is refused when
 Monday 07:00 is more than 72 h away (choose it between Friday and

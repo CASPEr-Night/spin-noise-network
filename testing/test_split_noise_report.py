@@ -26,7 +26,14 @@ guard did not start).  Asserts:
     and the QA has the INFO 'noise phase', the WARN 'noise phase: stopped
     early' and one WARN 'noise phase: zg returned late' (expno 400);
   * the unsplit bundle (no noise_plan, as every bundle before v0.8.3) gets
-    no science.noise_plan key and no 'noise phase' QA row.
+    no science.noise_plan key and no 'noise phase' QA row;
+  * ticket 20261113 (Oulu 400, TopSpin 3.2, script 0.8.3): the unsplit
+    bundle with expno 12's acqus carrying DATE one row after the start and
+    NO DATE_START, and a recorded lag equal to the block's own length (what
+    0.8.3 wrote) -- the report re-derives the lag from the clock audit
+    (wall time less OCXO duration: near zero), keeps the recorded value,
+    says so in an INFO row and raises no 'zg returned late' WARN; the same
+    bundle WITH DATE_START keeps the recorded lag and its WARN.
 
 Exit 0 iff all assertions hold.
 """
@@ -159,6 +166,49 @@ def split_bundle(src, dst):
     return dst
 
 
+def ts32_bundle(src, dst, with_date_start):
+    """src with expno 12's acqus stamped as TopSpin 3.2 does (DATE one row
+    after the start, no DATE_START) -- or, with_date_start, as 3.7/4.x do
+    (DATE_START at the start, DATE at that same early time) -- and a
+    one-block meta.noise_plan whose lag is what script 0.8.3 recorded:
+    now - DATE, i.e. the block's own wall span less one row."""
+    zin = zipfile.ZipFile(src)
+    meta = json.loads(zin.read("meta.json"))
+    nb = [b for b in meta["clock_audit"]["blocks"] if b.get("expno") == 12][0]
+    ws, we = nb["wall_start_ms"] / 1000.0, nb["wall_end_ms"] / 1000.0
+    noise = [e for e in meta["experiments"] if e["role"] == "noise"][0]
+    row_s = (we - ws) / float(noise["td1_rows"])
+    date = int(ws + row_s)
+    acqus = zin.read("data/12/acqus").decode("utf-8", "replace")
+    lines = [ln for ln in acqus.split("\n")
+             if ln and not ln.startswith("##$DATE")
+             and not ln.startswith("##END=")]
+    if with_date_start:
+        lines.append("##$DATE_START= %d" % int(ws))
+    lines += ["##$DATE= %d" % date, "##END="]
+    new_acqus = ("\n".join(lines) + "\n").encode()
+    lag = round(we - date, 1)
+    meta["noise_plan"] = {
+        "mode": "fixed", "choice": "30 min (default)", "split": 0,
+        "rows_planned": noise["td1_rows"], "blocks_planned": 1,
+        "blocks": [{"expno": 12, "rows_planned": noise["td1_rows"],
+                    "rows": noise["td1_rows"], "zg_return_lag_s": lag}],
+        "stopped_early": None, "late_returns": 1}
+    ck = meta["checksums"]
+    h = hashlib.sha256(new_acqus).hexdigest()
+    ck["data/12/acqus"] = (("sha256:" + h)
+                           if str(ck.get("data/12/acqus", "")).startswith(
+                               "sha256:") else h)
+    with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zout:
+        for name in zin.namelist():
+            if name in ("meta.json", "data/12/acqus"):
+                continue
+            zout.writestr(name, zin.read(name))
+        zout.writestr("data/12/acqus", new_acqus)
+        zout.writestr("meta.json", json.dumps(meta, indent=1) + "\n")
+    return dst, lag, (we - ws) - nb["ocxo_expected_s"]
+
+
 def report(bundle, out):
     p = subprocess.run([sys.executable, REPORT_PY, bundle, "--out", out],
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -255,6 +305,46 @@ def main(argv=None):
           "noise_plan" not in s1
           and not [q for q in (s1.get("qa_flags") or [])
                    if q["check"].startswith("noise phase")])
+
+    # ticket 20261113: TopSpin 3.2's acqus stamps under script 0.8.3
+    b32, lag32, expect32 = ts32_bundle(
+        base, os.path.join(work, "ts32_bundle.zip"), False)
+    r32 = report(b32, os.path.join(work, "report_ts32"))
+    b4x, lag4x, _e = ts32_bundle(
+        base, os.path.join(work, "ts4x_bundle.zip"), True)
+    r4x = report(b4x, os.path.join(work, "report_ts4x"))
+    if r32 is not None and r4x is not None:
+        p32 = get(r32, "science", "noise_plan") or {}
+        bk = (p32.get("blocks") or [{}])[0]
+        qa32 = r32["science"].get("qa_flags") or []
+        check("ts32: DATE without DATE_START -> the recorded lag %.0f s is "
+              "re-derived from the clock audit (%.1f s expected), kept as "
+              "zg_return_lag_s_recorded, late_returns 0 (recorded 1), an "
+              "INFO row and no 'zg returned late' WARN" % (lag32, expect32),
+              lag32 > 600.0
+              and abs((bk.get("zg_return_lag_s") or -1e9)
+                      - max(0.0, round(expect32, 1))) < 0.2
+              and bk.get("zg_return_lag_s_recorded") == lag32
+              and bk.get("zg_return_lag_basis") == "wall_less_ocxo (report)"
+              and p32.get("late_returns") == 0
+              and p32.get("late_returns_recorded") == 1
+              and [q for q in qa32 if q["check"]
+                   == "noise phase: zg-return lag re-derived"]
+              and not [q for q in qa32 if q["check"]
+                       == "noise phase: zg returned late"],
+              json.dumps([bk, [q for q in qa32
+                               if q["check"].startswith("noise phase")]])[:900])
+        p4x = get(r4x, "science", "noise_plan") or {}
+        qa4x = r4x["science"].get("qa_flags") or []
+        check("ts4x control: with DATE_START the recorded lag is kept as "
+              "recorded, with its WARN and no re-derivation",
+              (p4x.get("blocks") or [{}])[0].get("zg_return_lag_s") == lag4x
+              and "late_returns_recorded" not in p4x
+              and [q for q in qa4x if q["check"]
+                   == "noise phase: zg returned late"]
+              and not [q for q in qa4x if q["check"]
+                       == "noise phase: zg-return lag re-derived"],
+              json.dumps(p4x)[:600])
 
     print("")
     if FAILURES:

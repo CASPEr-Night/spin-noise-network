@@ -149,7 +149,7 @@ SPLITNOISE = 0            # 1 (argv 'splitnoise', v0.8.3): acquire the
 
 # Single source of truth for the script version.  KEEP IN SYNC with the
 # repository VERSION file (testing/static_check.py enforces the match).
-SCRIPT_VERSION  = "0.8.3"
+SCRIPT_VERSION  = "0.8.4"
 # NOTE: no module constant named PROGRAM_VERSION -- TopSpin's TopCmds
 # exports a FUNCTION of that name and `from TopCmds import *` (below)
 # overwrote the alias, so v0.7.3 bundles carry "<function PROGRAM_VERSION
@@ -3756,22 +3756,46 @@ def size_noise_phase(noise_secs, td, d11_s, bytes_per_point, block_max,
             "rows_per_block_max": per, "blocks": blocks}
 
 
-def zg_return_lag_s(expno_dir, start_ms):
-    """Seconds between the end of a block's acquisition -- acqus DATE,
-    which the console writes when the last row is in -- and now, just
-    after zg returned (Torino, 2026-10-26: 204856 s).  None when acqus
-    carries no DATE, or one outside the block's own wall span (a
-    parameter file copied from another dataset: the mock modes)."""
+def zg_return_lag_s(expno_dir, start_ms, clock_block=None):
+    """(lag_s, basis): seconds between the end of a block's acquisition
+    and now, just after zg returned (Torino, 2026-10-26: 204856 s).
+
+    basis 'acqus_date': acqus carries DATE_START (TopSpin 3.7 and 4.x),
+    so DATE is the end of the acquisition -- the console writes it when
+    the last row is in -- and the lag is now - DATE.
+
+    basis 'wall_less_ocxo': acqus has DATE but no DATE_START.  TopSpin
+    3.2 (Oulu 400, 2026-11-12) stamps DATE about one row after zg
+    STARTS, not at the end: script 0.8.3 read now - DATE as a 0.47 h
+    late return on a block whose wall time (1708.4 s) matched its OCXO
+    duration (1705.5 s) to 3 s.  There the lag is the block's wall time
+    less its OCXO duration, from its clock-audit block (the same
+    quantity the report checks every recorded lag against).
+
+    (None, None) when acqus carries no DATE (the mock modes), when DATE
+    lies outside the block's own wall span (a parameter file copied from
+    another dataset), or, without DATE_START, when the clock-audit block
+    has no OCXO duration."""
     d = _acqus_scalar(expno_dir, "DATE", None)
     if d is None:
-        return None
+        return None, None
     now_s = wall_clock_ms() / 1000.0
     if d < start_ms / 1000.0 - 60.0 or d > now_s + 60.0:
-        return None
-    lag = now_s - d
+        return None, None
+    if _acqus_scalar(expno_dir, "DATE_START", None) is not None:
+        lag = now_s - d
+        basis = "acqus_date"
+    else:
+        cb = clock_block or {}
+        ocxo = cb.get("ocxo_expected_s")
+        ws = cb.get("wall_start_ms")
+        if ocxo is None or ws is None:
+            return None, None
+        lag = now_s - ws / 1000.0 - ocxo
+        basis = "wall_less_ocxo"
     if lag < 0.0:
         lag = 0.0
-    return round(lag, 1)
+    return round(lag, 1), basis
 
 
 def _last_clock_block(expno):
@@ -3965,17 +3989,21 @@ def run_noise_phase(meta, template, dsname, name_dir, o1_hz, duration,
             if r.get("expno") == expno:          # later blocks follow the
                 td = r["retry"]["td"]             # geometry of a retry
                 d11 = r["retry"]["d11"]
-        lag = zg_return_lag_s(ds_path(cd), t_ms)
         cb = _last_clock_block(expno)
+        lag, lag_basis = zg_return_lag_s(ds_path(cd), t_ms, cb)
         if cb is not None and lag is not None:
             cb["zg_return_lag_s"] = lag
         rec["rows"] = got
         rec["zg_return_lag_s"] = lag
+        if lag_basis is not None:
+            rec["zg_return_lag_basis"] = lag_basis
         if lag is not None and lag > ZG_LATE_WARN_S:
             plan["late_returns"] = plan["late_returns"] + 1
-            say("WARNING: %s: zg returned %.1f h after its last row (acqus "
-                "DATE) -- the rows are on disk, and the report times them "
-                "from the console's own stamps" % (what, lag / 3600.0))
+            say("WARNING: %s: zg returned %.1f h after its last row (%s) "
+                "-- the rows are on disk" % (
+                    what, lag / 3600.0,
+                    lag_basis == "acqus_date" and "acqus DATE"
+                    or "wall time less the OCXO duration"))
         plan["blocks"].append(rec)
         expnos.append(expno)
         k = k + 1
