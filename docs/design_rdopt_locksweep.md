@@ -102,7 +102,11 @@ FIXED reference -- autolock would pull a manually stepped field
 straight back -- which is why the FALLBACK method (consoles without
 accessible shift mode) is unlocked FIELD-DAC stepping with no relock
 until the sweep ends: ~8 Hz per field unit at 1H standard bore
-(~4-6 Hz wide bore; the H0 DAC spans ~ +/-80 kHz at 1H). Either way
+(~4-6 Hz wide bore; the H0 DAC spans ~ +/-80 kHz at 1H). MEASURED
+since (Oulu 500, Avance III HD, 2026-11-18): -7.09 Hz per unit, i.e.
+raising the FIELD value lowers the line; the script's estimate is now
+that signed figure and one measured step re-calibrates it per console
+(`field_sweep.field_fallback`). Either way
 the MEASURED offsets are the record. The BSMS field SWEEP must stay
 off (standing protocol rule), and the field needs a few seconds to
 settle after each step (eddy currents).

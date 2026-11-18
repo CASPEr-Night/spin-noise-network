@@ -427,6 +427,63 @@ CONFIRM_ANSWERS_F1 = {
 }
 
 
+def _ticket_20261118_checks(check, script_globals):
+    """Oulu 500, 2026-11-18 (ticket 20261118_1438Z_uni-oulu_sweep): the
+    two faults of the first complete live sweep. Neither path runs in a
+    mock-mode session (no measured line exists there, so no step is ever
+    off target), hence these direct calls."""
+    g = script_globals
+    # (1) a dataset is never WR()-copied onto itself
+    check("no WR() of the current dataset onto itself during the run",
+          not topspin_stub.WR_IDENTICAL, str(topspin_stub.WR_IDENTICAL))
+    cd = topspin_stub.CURDATA()
+    n0 = len(topspin_stub.WR_IDENTICAL)
+    again = None
+    try:
+        again = g["open_expno"](cd, cd[0], cd[1])
+    except Exception:
+        again = None
+    check("open_expno() on the dataset that is already current re-uses "
+          "it in place (no WR, same dataset current afterwards)",
+          again is not None and len(topspin_stub.WR_IDENTICAL) == n0
+          and str(again[1]) == str(cd[1]), str(again))
+    topspin_stub.WR(cd, "y")           # control: the stub models the fault
+    check("control: the stub records a WR() of the current dataset onto "
+          "itself", len(topspin_stub.WR_IDENTICAL) == n0 + 1)
+    del topspin_stub.WR_IDENTICAL[n0:]
+    # (2) FIELD-fallback units: signed estimate, calibration from a step
+    units = g["sweep_field_units"]
+    calib = g["sweep_field_calibrate"]
+    est = g["SWEEP_FU_HZ_EST"]
+    check("FIELD fallback: the estimate is signed (raising FIELD lowers "
+          "the line) and -1500 Hz is offered as +211 units (whole)",
+          est < 0 and units(-1500.0, est) == 211.0,
+          "%r %r" % (est, units(-1500.0, est)))
+    # Oulu's four displaced steps as the 0.8.4 dialog had them (+8.0)
+    oulu = [(-1500.0, 1332.944), (-750.0, 666.599),
+            (750.0, -665.212), (1500.0, -1331.566)]
+    got = [calib(t, m, 8.0) for t, m in oulu]
+    check("FIELD fallback: each of Oulu's four steps (-188, -94, +94, "
+          "+188 units as the 0.8.4 dialog printed them) calibrates +8.0 "
+          "to -7.09 Hz per unit within 0.3%",
+          [units(t, 8.0) for t, m in oulu] == [-188.0, -94.0, 94.0, 188.0]
+          and
+          None not in got
+          and not [x for x in got if abs(x + 7.09) > 0.02], str(got))
+    fu = got[0]
+    check("FIELD fallback: with the measured figure the same target is "
+          "offered at +212 units, and a step that lands on target "
+          "returns the same figure within 0.3%",
+          fu is not None and units(-1500.0, fu) == 212.0
+          and abs(calib(-1500.0, -1500.0, fu) / fu - 1.0) < 0.003,
+          str(fu))
+    check("FIELD fallback: no calibration from the baseline step, a "
+          "missing measurement, or a figure outside 2-30 Hz per unit",
+          calib(0.0, 0.3, est) is None and calib(750.0, None, est) is None
+          and calib(-1500.0, 20.0, est) is None
+          and calib(-1500.0, 9000.0, est) is None)
+
+
 def _noise_phase_checks(check, script_globals, _mo, _log, sweep_on,
                         weekend_on, split_on, latezg_on, ts32_on=0):
     """The v0.8.3 noise-phase checks (see the NOISE-PHASE FIXTURE
@@ -1793,6 +1850,7 @@ def main():
     # the JVM's 64 KB method-size limit under Jython.
     _noise_phase_checks(check, script_globals, _mo, _log, sweep_on,
                         weekend_on, split_on, latezg_on, ts32_on)
+    _ticket_20261118_checks(check, script_globals)
 
     # ---- clock audit (schema 1.2).  Jython 2.7 ships json, so the
     # harness can parse what the script's hand-rolled writer emitted.

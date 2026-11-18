@@ -275,8 +275,12 @@ documented in `docs/design_rdopt_locksweep.md`:
   field to the new setpoint — then lock OFF for the acquisition as
   always. Jumps larger than one safe re-lock are walked in hops (the
   dialog quotes them; lock-shift path only). (Fallback for consoles
-  without accessible shift mode: step the FIELD value unlocked —
-  ~8 Hz/unit at ¹H standard bore, scaled for other nuclei — and don't
+  without accessible shift mode: step the FIELD value unlocked, by
+  the number of units the dialog quotes relative to the baseline value
+  — about −7.1 Hz/unit at ¹H standard bore, measured on one console
+  (raising the FIELD value lowers the line), scaled for other nuclei;
+  if the first step lands off target, the off-target dialog offers to
+  repeat it with the figure measured on your console — and don't
   re-lock mid-sweep — at a fixed reference autolock would pull the
   field straight back.) The estimator's sign convention is resolved at
   the baseline by an automatic carrier-displacement 1D (one extra

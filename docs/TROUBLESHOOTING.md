@@ -640,6 +640,40 @@ One is a desktest/rehearsal bundle. Check which is which:
 Upload the `live` one. The uploader refuses test bundles anyway
 ("run_mode is 'desktest' -- a plumbing test"), so a mixup is caught.
 
+**A TopSpin error window "wrpa: source and target identical, nothing
+copied" during a `sweep` (script 0.8.1 to 0.8.4).** Press Close; the
+run continues and no data are affected. Evidence (Oulu 500, TopSpin
+3.7.0, 18 November 2026): the window appeared at four of five sweep
+steps, each time the script measured an off-target step a second time
+after its 10 s settle pause. Cause: the script created the step's
+dataset by copying into it while that dataset was already the current
+one. Fixed in v0.8.5: a dataset that is already current is
+re-used in place.
+
+**"spin-noise sweep: off target" at every displaced step, the line
+about as far from the baseline as asked but on the wrong side (FIELD
+fallback).** Evidence (same session): the 0.8.4 dialog asked for
+"about -188 units" for a -1500 Hz step; the operator set the FIELD
+Difference to -188.0 and the line was measured +1333 Hz from the
+baseline, and the three other displaced steps gave the same ratio
+(-7.09 Hz per unit, agreeing to 0.2%). Cause: the script assumed
++8.0 Hz per FIELD unit from the manuals; on that console raising the
+FIELD value lowers the line, by 7.09 Hz per unit. With script 0.8.4,
+reverse the sign of the quoted units and multiply by 1.13 (-1500 Hz is
++212 units, -750 Hz is +106, +750 Hz is -106, +1500 Hz is -212).
+Version 0.8.5 quotes the measured, signed figure, and when a step
+still lands off target the dialog shows the Hz per unit your console
+just demonstrated and a button that repeats the step with it
+(`field_sweep.field_fallback` records the figure and its basis). The
+baseline step and the bundle are fine either way: skipped steps record
+no noise block, and the measured positions are what the record keeps.
+
+**The Step +/- and Reset buttons of the BSMS "Shift [ppm]" panel are
+grey (lock-shift path of the `sweep`).** Seen on the Oulu 500 (BSMS
+Control Suite, TopSpin 3.7.0, 13 and 18 November 2026, photo on file):
+neither the shift nor its difference could be changed. The cause is
+not established. Use the FIELD fallback the same dialog describes.
+
 ---
 
 ## 3. Packing (JEOL / Magritek / Agilent / Nanalysis)
