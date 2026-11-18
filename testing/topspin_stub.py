@@ -65,6 +65,7 @@ WAIT_TILL_DONE = 0            # sentinel; value irrelevant, only the name
 # Harness state (inspected by jython_entry.py after the run)
 # ---------------------------------------------------------------------------
 LOG = []          # every API call, in order: (api, summary_string)
+WR_IDENTICAL = [] # WR() calls whose target was the current dataset
 UNSCRIPTED = []   # dialogs that had no fixture answer (harness: FAIL)
 BREACHES = []     # hardware-guard breaches: XCMD/ZG reached (harness: FAIL)
 ERRMSGS = []      # every ERRMSG (a crash dialog in a clean run: FAIL)
@@ -739,6 +740,16 @@ def WR(dataset=None, override="y"):
         raise RuntimeError("WR with no current dataset")
     src = _dspath(_CUR[0])
     dst = _dspath(dataset)
+    if os.path.abspath(src) == os.path.abspath(dst):
+        # TopSpin 3.7.0 (Oulu 500, 2026-11-18) answers a WR of the current
+        # dataset onto itself with an error window, "wrpa: source and
+        # target identical, nothing copied", and copies nothing. It is a
+        # window, not an exception: the stub records it and the harness
+        # fails any run that produced one.
+        LOG.append(("WR_IDENTICAL", _u(dst)))
+        WR_IDENTICAL.append(_u(dst))
+        _say("WR -> %s: source and target identical, nothing copied" % dst)
+        return
     LOG.append(("WR", _u(dst)))
     _say("WR -> %s" % dst)
     _copy_tree(src, dst)

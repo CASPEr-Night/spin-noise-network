@@ -1424,6 +1424,27 @@ check("zg-return lag (ticket 20261113, TopSpin 3.2): now - acqus DATE only "
       and '"legacy desktest latezg ts32date"' in _HARN)
 
 
+# Ticket 20261118 (Oulu 500, first complete live sweep): no WR() of a
+# dataset onto itself, and a signed, re-calibrated FIELD fallback.
+_oe = SRC[SRC.index("def open_expno("):SRC.index("def open_expno(") + 3000]
+check("ticket 20261118: open_expno never WR()s the current dataset onto "
+      "itself; the FIELD fallback's Hz per unit is signed, quoted in whole "
+      "units from the baseline value and re-calibrated from a measured "
+      "step; the stub models the wrpa window; TROUBLESHOOTING carries both",
+      "if dataset_is_current(name, expno):" in _oe
+      and _oe.index("if dataset_is_current(name, expno):")
+      < _oe.index('WR(target, "y")')
+      and "SWEEP_FU_HZ_EST = -7.1" in SRC
+      and "def sweep_field_calibrate(target_hz, measured_hz, fu_hz):" in SRC
+      and "fu_new = sweep_field_calibrate(target, measured, fu)" in SRC
+      and 'sweep["field_fallback"]["hz_per_unit"] = fu' in SRC
+      and "target / fu_est" not in SRC
+      and 'LOG.append(("WR_IDENTICAL", _u(dst)))' in STUB_SRC
+      and "def _ticket_20261118_checks(check, script_globals):" in ENTRY_SRC
+      and "source and target identical" in _TS
+      and "-7.09 Hz per unit" in _TS.replace("\n", " "))
+
+
 # --------------------------------------------------------------------------
 print("")
 if FAILURES:

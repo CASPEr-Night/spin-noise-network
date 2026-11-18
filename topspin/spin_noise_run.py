@@ -149,7 +149,7 @@ SPLITNOISE = 0            # 1 (argv 'splitnoise', v0.8.3): acquire the
 
 # Single source of truth for the script version.  KEEP IN SYNC with the
 # repository VERSION file (testing/static_check.py enforces the match).
-SCRIPT_VERSION  = "0.8.4"
+SCRIPT_VERSION  = "0.8.5"
 # NOTE: no module constant named PROGRAM_VERSION -- TopSpin's TopCmds
 # exports a FUNCTION of that name and `from TopCmds import *` (below)
 # overwrote the alias, so v0.7.3 bundles carry "<function PROGRAM_VERSION
@@ -1626,6 +1626,21 @@ def ds_path(curd):
     return os.path.join(to_text(curd[3]), to_text(curd[0]), to_text(curd[1]))
 
 
+def dataset_is_current(name, expno):
+    """1 when <name>/<expno>/1 is the dataset TopSpin has current."""
+    try:
+        cd = CURDATA()
+    except CATCHABLE:
+        cd = None
+    try:
+        if cd is not None and str(cd[0]) == str(name) \
+                and str(cd[1]) == str(expno) and str(cd[2]) == "1":
+            return 1
+    except CATCHABLE:
+        pass
+    return 0
+
+
 def open_expno(template_curd, name, expno):
     """Create/open dataset <name>/<expno> and make it current.
 
@@ -1638,11 +1653,26 @@ def open_expno(template_curd, name, expno):
     target[0] = name
     target[1] = str(expno)
     target[2] = "1"
-    say("creating dataset %s expno %s" % (name, expno))
     made = 0
-    try:
-        WR(target, "y")   # silent overwrite if it already exists
+    # Never WR() a dataset onto itself. A step that is measured twice
+    # (the settle-and-measure-again of an off-target sweep step, a retry
+    # of the same expno) arrives here with the target already current,
+    # and TopSpin answers that WR with an error window, "wrpa: source and
+    # target identical, nothing copied", which waits for its Close button
+    # (Oulu 500, TopSpin 3.7.0, 2026-11-18: at four of five sweep steps).
+    # The dataset is then simply re-used in place: every caller writes
+    # its own acquisition parameters after this call and zg overwrites
+    # the data.
+    if dataset_is_current(name, expno):
+        say("dataset %s expno %s is already current -- re-used in place"
+            % (name, expno))
         made = 1
+    else:
+        say("creating dataset %s expno %s" % (name, expno))
+    try:
+        if not made:
+            WR(target, "y")   # silent overwrite if it already exists
+            made = 1
     except CATCHABLE:
         print "spin_noise_run: WR() to %s failed" % str(target)
         try:
@@ -4050,8 +4080,19 @@ SWEEP_SPAN_PPM_MAX = 25.0     # half-span cap, ppm of B0: conservative
                               # baseline is trusted to ~tens of ppm)
 SWEEP_HOP_MAX_HZ = 4000.0     # max field change per RE-LOCK (autolock
                               # capture ~8 kHz at 1H; stay at half)
-SWEEP_FU_HZ_EST = 8.0         # ~Hz per BSMS field unit at 1H, std bore
-                              # (scaled by gamma ratio for X nuclei)
+SWEEP_FU_HZ_EST = -7.1        # Hz per BSMS FIELD unit at 1H, std bore
+                              # (scaled by gamma ratio for X nuclei),
+                              # SIGNED: raising the FIELD value LOWERS
+                              # the line. Measured on one console (Oulu
+                              # 500, Avance III HD, 2026-11-18: -7.09,
+                              # four steps agreeing to 0.2%); until
+                              # v0.8.4 this was +8.0 from the manuals,
+                              # which sent every FIELD step the wrong
+                              # way. Other consoles may differ: the
+                              # off-target dialog re-calibrates it from
+                              # the operator's first measured step.
+SWEEP_FU_HZ_MIN = 2.0         # a calibrated |Hz per unit| outside this
+SWEEP_FU_HZ_MAX = 30.0        # band is not believed (not a FIELD step)
 SWEEP_SIGNCAL_HZ = 500.0      # carrier displacement for the sign-
                               # convention calibration 1D
 EXP_SWEEP_SIGNCAL = 29        # sign-calibration 1D (rdopt tops out 28)
@@ -5314,6 +5355,34 @@ def autostep_restore(st, sweep):
         pass
 
 
+def sweep_field_units(target_hz, fu_hz):
+    """FIELD units, relative to the baseline FIELD value, that put the
+    line target_hz from its baseline at fu_hz Hz per unit (signed).
+    A whole number: it is what the dialog prints and the operator
+    types, and the calibration divides by the same number."""
+    if not fu_hz:
+        return 0.0
+    return float(round(float(target_hz) / float(fu_hz)))
+
+
+def sweep_field_calibrate(target_hz, measured_hz, fu_hz):
+    """Hz per FIELD unit (signed) from one measured step: the operator
+    dialled sweep_field_units(target_hz, fu_hz) units from baseline and
+    the line was measured measured_hz from baseline. None when the step
+    carries no information (no target, no measurement) or the result is
+    outside SWEEP_FU_HZ_MIN..MAX (then it was not a FIELD step)."""
+    try:
+        units = sweep_field_units(target_hz, fu_hz)
+        if measured_hz is None or abs(units) < 1.0:
+            return None
+        fu_new = float(measured_hz) / units
+    except CATCHABLE:
+        return None
+    if abs(fu_new) < SWEEP_FU_HZ_MIN or abs(fu_new) > SWEEP_FU_HZ_MAX:
+        return None
+    return fu_new
+
+
 def sweep_verify_1d(meta, template, dsname, expno, o1_hz,
                     p90_us, p90_db, db_par, role="sweep_verify"):
     """Verification 1D for one field step: acquire and measure the
@@ -5386,8 +5455,10 @@ def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
     (the standing leak-hygiene rule; a facility that prefers to stay
     locked may, and the lock state is recorded as always). FALLBACK for
     consoles without accessible shift mode: unlocked FIELD-DAC steps
-    (~8 Hz per unit at 1H std bore, no re-locking mid-sweep -- at a
-    FIXED reference autolock would pull the field straight back). The
+    (SWEEP_FU_HZ_EST Hz per unit at 1H std bore, SIGNED and measured on
+    one console; the off-target dialog re-calibrates it from the first
+    measured step; no re-locking mid-sweep -- at a FIXED reference
+    autolock would pull the field straight back). The
     MEASURED offsets -- never the targets -- are the record, whichever
     knob moved the line. The pulse-pair estimator's sign convention is
     a receiver property: it is resolved against the operator's shift
@@ -5424,6 +5495,8 @@ def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
     # finding, 2026-09-03). Same scaling for the field-unit estimate.
     hop_hz = SWEEP_HOP_MAX_HZ * gam / 42.5774806
     fu_est = SWEEP_FU_HZ_EST * gam / 42.5774806
+    fu = fu_est               # Hz per FIELD unit in use (signed)
+    fu_basis = "estimate (Oulu 500, 2026-11-18)"
     span_cap = SWEEP_SPAN_PPM_MAX * bf1_mhz
     f = ask_fields(
         "spin-noise sweep: plan",
@@ -5493,6 +5566,10 @@ def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
              "field_restored": None, "ended_early": False,
              "sign_convention_flip": None,
              "sign_convention_basis": None,
+             "field_fallback": {"hz_per_unit_estimate": fu_est,
+                                "hz_per_unit": fu,
+                                "basis": "estimate",
+                                "calibrated_at_step": None},
              "note": ("v0.6 carrier-follow sweep: per-step O1 = baseline "
                       "O1 + target (recorded as carrier_o1_hz), so each "
                       "verification measures the line's LOCAL offset in "
@@ -5608,9 +5685,10 @@ def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
                     "1 ppm = %.0f Hz at the observed nucleus, exact), "
                     "then\nturn the LOCK OFF again.\n%s\n"
                     "FALLBACK (no accessible shift mode): with the lock\n"
-                    "OFF, change the FIELD value by about %+.0f units\n"
-                    "(~%.1f Hz/unit at this nucleus, std bore) and do "
-                    "NOT\nre-lock -- not now, not between steps.\n\n"
+                    "OFF, set the FIELD value to %+.0f units from its\n"
+                    "BASELINE value (the Difference box; %+.2f Hz per\n"
+                    "unit at this nucleus, %s) and do NOT\nre-lock -- "
+                    "not now, not between steps.\n\n"
                     "Give the field a few seconds to settle, then "
                     "continue.\n"
                     "(The receiver window follows this step "
@@ -5618,7 +5696,8 @@ def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
                     "and the MEASURED\nposition is what enters the "
                     "record.)"
                     % (k + 1, nsteps, target, target / bf1_mhz, bf1_mhz,
-                       hop_text, target / fu_est, fu_est),
+                       hop_text, sweep_field_units(target, fu), fu,
+                       fu_basis),
                     ["Field is set -- measure it",
                      "End the sweep here (keep everything acquired so "
                      "far)"],
@@ -5706,13 +5785,49 @@ def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
                 devtxt = "%+.0f Hz (physical)" % (sflip * local_dev)
             else:
                 devtxt = "%.0f Hz (sign unresolved)" % abs(local_dev)
+            # FIELD-fallback calibration (v0.8.5). The Hz-per-unit figure
+            # is a property of the console's H0 coil, sign included, and
+            # the estimate can be wrong on a console nobody has measured:
+            # Oulu's 500 answered -188 units with +1333 Hz where the
+            # dialog had promised -1500 (2026-11-18), and all four
+            # displaced steps were skipped. One measured step fixes it:
+            # the operator says the step was made in FIELD units and the
+            # following dialogs use the measured figure.
+            fu_new = None
+            if sflip and not auto_used:
+                fu_new = sweep_field_calibrate(target, measured, fu)
+            caltxt = ""
+            offbtn = ["Accept as measured", "Retry the shift",
+                      "Skip this step"]
+            if fu_new is not None:
+                caltxt = ("\n\nIf you set this step in FIELD units (%+.0f "
+                          "from baseline):\nthe line moved %+.0f Hz, which "
+                          "is %+.2f Hz per unit on this\nconsole, not "
+                          "%+.2f. The last button repeats the step with\n"
+                          "the measured figure (FIELD %+.0f units from "
+                          "baseline)."
+                          % (sweep_field_units(target, fu), measured,
+                             fu_new, fu,
+                             sweep_field_units(target, fu_new)))
+                offbtn.append("FIELD units: use the measured figure "
+                              "and repeat")
             sel = ask_select(
                 "spin-noise sweep: off target",
                 "The line sits %s away from where this step should\n"
                 "have put it (step %d/%d, attempt %d, tolerance "
-                "%.0f Hz)." % (devtxt, k + 1, nsteps, attempt, tol),
-                ["Accept as measured", "Retry the shift",
-                 "Skip this step"], 0)
+                "%.0f Hz).%s" % (devtxt, k + 1, nsteps, attempt, tol,
+                                caltxt),
+                offbtn, 0)
+            if sel == 3 and fu_new is not None:
+                say("sweep: FIELD fallback calibrated on step %d: %+.2f "
+                    "Hz per unit (was %+.2f)" % (k + 1, fu_new, fu))
+                fu = fu_new
+                fu_basis = "measured on this console, step %d" % (k + 1)
+                sweep["field_fallback"]["hz_per_unit"] = fu
+                sweep["field_fallback"]["basis"] = "measured_step"
+                sweep["field_fallback"]["calibrated_at_step"] = k
+                settled = 0
+                continue
             if sel == 0:
                 if measured is None:
                     measured_note = ("accepted with unsigned deviation "
@@ -5750,6 +5865,10 @@ def run_field_sweep(meta, template, dsname, o1_hz, p90_us, p90_db,
                 "actuation_basis": basis,
                 "verify_expno": EXP_SWEEP_VERIFY_BASE + 1 + k,
                 "noise_expno": None, "rows": 0, "skipped": skipped}
+        if not auto_used:
+            # what the dialog offered on the FIELD fallback for this step
+            # (whether the operator used it is not known to the script)
+            step["field_units_offered"] = sweep_field_units(target, fu)
         if lock_state is not None:
             step["lock_state_during_noise"] = lock_state
         if measured_note:

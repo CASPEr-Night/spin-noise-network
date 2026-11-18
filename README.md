@@ -351,7 +351,21 @@ covers ~10 GB), set the shared token, and hand facilities the endpoint + token p
   Jython harness (a virtual Friday-to-Monday weekend across a daylight-saving change, a zg
   held 30 h, the split layout) and on a re-packed synthetic bundle whose science matches the
   unsplit one; not yet run on hardware. Reports of earlier bundles are unchanged.
-- **v0.8.4 (unreleased) stops a false "zg returned late" on TopSpin 3.2.** Script 0.8.3
+- **v0.8.5 fixes two faults of the first complete live `sweep` (Oulu 500, 18 November
+  2026).** On the FIELD fallback every displaced step landed on the wrong side of the
+  baseline: the dialog assumed +8.0 Hz per FIELD unit from the manuals, and the console
+  moved the line by −7.09 Hz per unit (four steps agreeing to 0.2%), so the operator's
+  −188 units for a −1500 Hz step put the line at +1333 Hz and all four displaced steps were
+  skipped. The estimate is now that measured, signed figure, the dialog quotes whole units
+  relative to the baseline FIELD value, and when a step is off target the dialog shows the
+  Hz per unit the console just demonstrated and offers to repeat the step with it
+  (`field_sweep.field_fallback`, `steps[].field_units_offered`). Separately, each second
+  measurement of an off-target step raised a TopSpin error window ("wrpa: source and target
+  identical, nothing copied") because the script copied a dataset onto itself; a dataset
+  that is already current is now re-used in place. Both paths only run on a live console,
+  so the harness checks them by direct calls; the corrected script has not yet run on a
+  console.
+- **v0.8.4 stops a false "zg returned late" on TopSpin 3.2.** Script 0.8.3
   measured the zg-return lag as the time since acqus `DATE`, which is the end of the
   acquisition on TopSpin 3.7 and 4.x. TopSpin 3.2 stamps `DATE` about one row after `zg`
   starts and writes no `DATE_START`, so the first 0.8.3 run on the Oulu 400 (12 November
