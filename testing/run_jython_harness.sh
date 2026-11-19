@@ -97,6 +97,8 @@ for RUN in "legacy simulate" "legacy desktest" "ts44 desktest" \
            "ts44-strict desktest rdopt sweep autostep" \
            "legacy desktest weekend" \
            "ts44 desktest splitnoise weekend" \
+           "ts44 desktest weekend autosplit" \
+           "legacy desktest singlenoise weekend autosplit" \
            "legacy desktest latezg" \
            "legacy desktest splitnoise latezg" \
            "legacy desktest ts32date" \

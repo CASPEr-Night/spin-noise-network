@@ -138,18 +138,23 @@ DENSE_LADDER_ON = 1       # 1 (default): after the four legacy RG rungs,
                           # flag 'sparseladder'; meta records why.
                           # Runtime:  xpy spin_noise_run sparseladder
 
-SPLITNOISE = 0            # 1 (argv 'splitnoise', v0.8.3): acquire the
-                          # noise phase as consecutive blocks of at most
-                          # NOISE_BLOCK_MAX_BYTES each (expno 12, then
-                          # 400, 401, ...) under the deadline guard of
-                          # section 10.  OFF by default until the cause of
-                          # Torino's late zg returns is known (section 10
-                          # explains the trade-off).  Runtime:
+SPLITNOISE = 0            # 1 (argv 'splitnoise', v0.8.3): ALWAYS acquire
+                          # the noise phase as consecutive blocks of at
+                          # most NOISE_BLOCK_MAX_BYTES each (expno 12,
+                          # then 400, 401, ...) under the deadline guard
+                          # of section 10.  Runtime:
                           #     xpy spin_noise_run splitnoise
+SINGLENOISE = 0           # 1 (argv 'singlenoise', v0.8.6): NEVER split,
+                          # one noise file whatever its size (the
+                          # behaviour before v0.8.6).  Runtime:
+                          #     xpy spin_noise_run singlenoise
+                          # With neither word (the default since v0.8.6)
+                          # the phase is split only when one file would
+                          # exceed NOISE_SINGLE_MAX_BYTES: section 10.
 
 # Single source of truth for the script version.  KEEP IN SYNC with the
 # repository VERSION file (testing/static_check.py enforces the match).
-SCRIPT_VERSION  = "0.8.5"
+SCRIPT_VERSION  = "0.8.6"
 # NOTE: no module constant named PROGRAM_VERSION -- TopSpin's TopCmds
 # exports a FUNCTION of that name and `from TopCmds import *` (below)
 # overwrote the alias, so v0.7.3 bundles carry "<function PROGRAM_VERSION
@@ -399,26 +404,40 @@ NOISE_SESSION_MAX_BYTES = 9 * (1 << 30)
 DISK_NEED_FACTOR = 2.5
 DISK_MARGIN_BYTES = 2 * (1 << 30)
 #
-# Blocks (argv 'splitnoise' only).  Torino's two overnight noise blocks
-# (Avance Neo 400, TopSpin 4.4.0; float64 sers of 3.50 and 3.34 GiB) were
-# each logged complete by TopSpin hours after their last row -- 8.96 h on
-# 2026-10-01, 56.9 h on 2026-10-26, both in the late morning -- and were
-# the only blocks logged complete without TopSpin's data hash; every
-# block under 2 GiB completed within seconds, with it.  The cause is not
-# known: a ser beyond Java's 2 GiB array ceiling fits, and so does an
-# overnight screen lock or session timeout (size and block length go
-# together in that record).  Blocks of at most NOISE_BLOCK_MAX_BYTES --
+# Blocks.  Torino's two overnight noise blocks (Avance Neo 400, TopSpin
+# 4.4.0; float64 sers of 3.50 and 3.34 GiB) were each logged complete by
+# TopSpin hours after their last row -- 8.96 h on 2026-10-01, 56.9 h on
+# 2026-10-26 -- and were the only blocks logged complete without
+# TopSpin's data hash; every block under 2 GiB completed within seconds,
+# with it.  The cause was on the screen on 26 October: a TopSpin message,
+# "Reading off file limits: /root/.topspin-BladeEpu/local_acqu/
+# SPINNOISE_20261023_1729/12/ser", on which zg waited until the operator
+# closed it (her report of 2026-11-19).  A ser beyond a size limit inside
+# TopSpin holds zg; the rows are complete, the closing reference is late.
+# Where exactly the limit lies is not measured: 3.3 GiB fails on TopSpin
+# 4.4.0, 1.67 GiB passes on 3.7.0 (Oulu 500, ten hours of int32 rows),
+# 0.2 GiB passes on 4.4.0; 2 GiB is the natural value.
+#
+# So no noise file is written above NOISE_SINGLE_MAX_BYTES, 1 GiB: well
+# below any value the limit can have, and the same size as a block.  A
+# phase that fits stays ONE file at expno 12 (every session up to three
+# hours on an int32 console, up to about 2 h 50 min on an Avance Neo).
+# A larger one -- ten hours anywhere (int32: 1.67 GiB, two blocks of 855
+# rows; Neo: 3.3 GiB, four blocks), 180 min on a Neo (513 rows, two
+# blocks), any weekend -- is dealt into blocks of at most
+# NOISE_BLOCK_MAX_BYTES --
 # expno 12, then EXP_NOISE_MORE_BASE, +1, ... at ONE RG and one row
-# geometry, which the report co-adds as one block -- fix the first cause.
-# Under the second they would cost data: the first block's zg would be
-# held until morning, and the deadline guard below then skips the rest.
-# A single block never loses rows under either cause, so it stays the
-# default, and every block records how long after its last row zg
-# returned (zg_return_lag_s) so the next bundle says which cause it is.
+# geometry, which the report co-adds as one block.  argv 'splitnoise'
+# splits always, 'singlenoise' never (noise_split_decision).  Every block
+# records how long after its last row zg returned (zg_return_lag_s).
 # The deadline guard: a block k >= 2 starts only if at least
 # NOISE_MIN_BLOCK_ROWS rows fit before the phase's planned end (plus
 # NOISE_DEADLINE_SLACK_S for a fixed duration), and is shortened to fit
 # -- a zg held for hours never pushes later blocks into the working day.
+# The split layout has passed the harness since v0.8.3 and has not yet
+# run on a console (2026-11-19).
+NOISE_SINGLE_MAX_BYTES = 1 << 30         # 1 GiB (John, 2026-11-19: "just
+                                         # split at 1 GiB"), = one block
 NOISE_BLOCK_MAX_BYTES = 1 << 30
 EXP_NOISE_MORE_BASE = 400     # 400..499 (the dense ladder ends at 363)
 NOISE_BLOCKS_MAX = 100
@@ -624,6 +643,8 @@ try:
             DENSE_LADDER_ON = 0    # skip section 8d; meta records why
         if _al in ("splitnoise", "--splitnoise", "--split-noise"):
             SPLITNOISE = 1         # section 10 in blocks (v0.8.3)
+        if _al in ("singlenoise", "--singlenoise", "--single-noise"):
+            SINGLENOISE = 1        # section 10 in one file (v0.8.6)
 except CATCHABLE:
     pass
 
@@ -887,6 +908,68 @@ def slugify(text):
     while s.endswith("-"):
         s = s[:-1]
     return s[:40]
+
+
+UNWRITABLE_TEXT = (
+    "This computer cannot write to the data directory\n  %s\n"
+    "(%s did not work, and a test file could not be created there).\n\n"
+    "This is a problem of the disk or of the operating system -- a full\n"
+    "disk, or a file system that Linux has switched to read-only after a\n"
+    "disk error -- not of TopSpin's parameters: nothing typed into\n"
+    "TopSpin will fix it.\n\n"
+    "Please stop here and tell the person who looks after this computer.\n"
+    "What is already on the disk can still be read and copied.\n"
+    "(docs/TROUBLESHOOTING.md: \"Read-only file system\")")
+
+
+def dir_writable(path):
+    """1 when a small file can be created, written and removed in path,
+    0 when it cannot, None when path is not a directory (nothing to
+    say).  4 KiB are written, so a full disk fails here too."""
+    try:
+        if not path or not os.path.isdir(path):
+            return None
+    except CATCHABLE:
+        return None
+    probe = os.path.join(path, ".spin_noise_write_test")
+    ok = 0
+    try:
+        fh = open(probe, "wb")
+        try:
+            fh.write("\0" * 4096)
+        finally:
+            fh.close()
+        ok = 1
+    except CATCHABLE:
+        ok = 0
+    try:
+        if os.path.isfile(probe):
+            os.remove(probe)
+    except CATCHABLE:
+        pass
+    return ok
+
+
+def stop_if_unwritable(what, path=None):
+    """Abort with UNWRITABLE_TEXT when the current dataset's directory
+    (or path) cannot be written.  Called where a failed write would
+    otherwise send the operator to type a parameter into TopSpin: on the
+    Oulu 400 (TopSpin 3.2, 2026-11-18) the kernel remounted /opt
+    read-only as the overnight noise block started, TopSpin answered the
+    F1 TD write with "Cannot open file: Read-only file system", and the
+    script's "type 1 td" dialog sat behind that window, unreachable, on
+    a disk no parameter could have been written to.  Silent whenever the
+    directory is writable or cannot be determined."""
+    try:
+        if path is None:
+            path = ds_path(CURDATA())
+    except CATCHABLE:
+        path = None
+    if path is None:
+        return
+    if dir_writable(path) == 0:
+        say("ERROR: the data directory %s cannot be written" % path)
+        abort(UNWRITABLE_TEXT % (path, what))
 
 
 def abort(msg):
@@ -1680,6 +1763,13 @@ def open_expno(template_curd, name, expno):
         except CATCHABLE:
             pass
     if not made:
+        # a data root that cannot be written explains it (v0.8.6)
+        try:
+            stop_if_unwritable("creating dataset %s/%s" % (name, expno),
+                               os.path.dirname(os.path.dirname(
+                                   ds_path(target))))
+        except CATCHABLE:
+            pass
         # Last resort: ask the operator to create it interactively.
         MSG("Could not create dataset\n  NAME  = %s\n  EXPNO = %s\n\n"
             "Please create it now yourself:\n"
@@ -2009,6 +2099,7 @@ def parmode_operator_dialog(ndim, reason=None):
     attempts = 0
     while 1:
         attempts = attempts + 1
+        stop_if_unwritable("switching the dataset to %s" % label)
         ans = CONFIRM("spin_noise_run: make dataset %s" % label,
                       reason + "\n\n"
                       "Please type 'parmode' in TopSpin (or use the eda "
@@ -2157,6 +2248,7 @@ def set_f1_td(rows):
     attempts = 0
     while 1:
         attempts = attempts + 1
+        stop_if_unwritable("setting the number of rows (F1 TD)")
         ans = CONFIRM("spin_noise_run: set F1 TD (number of rows)",
                       "The script could not set the number of rows (F1 TD)\n"
                       "of this experiment to %d.\n\nIn TopSpin, type  1 td  "
@@ -3526,9 +3618,13 @@ def acquire_noise_block(meta, expno, role, what, expno_dir, o1_hz,
     recomputed to keep the block's duration), then a WARNING -- never a
     dialog.  The caller has set PULPROG / F1 TD / TD / D11 / RG for the
     first attempt.  Returns the row count of the recorded acquisition."""
+    stop_if_unwritable("starting the %s" % what, expno_dir)
     t0, cb, first, last = acquire_block(expno, role, what, expno_dir, td,
                                         rows, D1_NOISE_S, d11_s, 0)
     if last != 1:
+        # no rows AND a disk that no longer takes writes: say so plainly
+        # instead of retrying into a dialog (Oulu 400, 2026-11-18)
+        stop_if_unwritable("writing the %s" % what, expno_dir)
         nxt = next_ladder_setting(td, d11_s)
         if nxt is not None:
             first_try = {"td": td, "d11": d11_s, "rows": rows,
@@ -3566,6 +3662,36 @@ def acquire_noise_block(meta, expno, role, what, expno_dir, o1_hz,
 # the phase, its blocks, the deadline guard and the zg-return lag.  The
 # constants and the evidence behind them are at DURATION_CHOICES.
 # ----------------------------------------------------------------------------
+
+def noise_single_max_bytes():
+    """NOISE_SINGLE_MAX_BYTES, or the harness's megabyte figure when the
+    test seam carries a fourth value (the auto-split variant)."""
+    try:
+        lim = HARNESS_NOISE_LIMITS()       # test seam (harness only)
+        if len(lim) > 3 and lim[3] is not None:
+            return int(lim[3])
+    except NameError:
+        pass
+    except CATCHABLE:
+        pass
+    return int(NOISE_SINGLE_MAX_BYTES)
+
+
+def noise_split_decision(single_bytes, single_max, force_split,
+                         force_single):
+    """(split, basis) for the noise phase (pure).  single_bytes is what
+    ONE file would hold.  'splitnoise' always splits, 'singlenoise' never
+    does (and wins when both are given: it is the escape hatch);
+    otherwise the phase is split exactly when one file would exceed
+    single_max."""
+    if force_single:
+        return 0, "argv_singlenoise"
+    if force_split:
+        return 1, "argv_splitnoise"
+    if int(single_bytes) > int(single_max):
+        return 1, "auto_file_above_limit"
+    return 0, "auto_file_within_limit"
+
 
 def harness_noise_limits():
     """(block_max_bytes, session_max_bytes, disk_free_bytes or None).
@@ -3841,8 +3967,10 @@ def run_noise_phase(meta, template, dsname, name_dir, o1_hz, duration,
     """Section 10 without the sweep, UNATTENDED (never a dialog): size
     the phase (size_noise_phase), record the plan in meta['noise_plan'],
     acquire block 1 at expno 12 -- rga there, its RG kept for every later
-    block so the report co-adds them -- and, under 'splitnoise', blocks
-    2.. at EXP_NOISE_MORE_BASE.. under the deadline guard.  Every block:
+    block so the report co-adds them -- and, when the phase is split
+    (noise_split_decision: one file would exceed NOISE_SINGLE_MAX_BYTES,
+    or argv 'splitnoise'), blocks 2.. at EXP_NOISE_MORE_BASE.. under the
+    deadline guard.  Every block:
     zg, the content check and its one retry (acquire_noise_block), then
     the zg-return lag.  Returns the noise expnos acquired."""
     block_max, session_max, disk_free = harness_noise_limits()
@@ -3866,12 +3994,22 @@ def run_noise_phase(meta, template, dsname, name_dir, o1_hz, duration,
         noise_secs = float(duration["secs"])
         deadline_ms = t0_ms + (noise_secs + NOISE_DEADLINE_SLACK_S) * 1000.0
     sz = size_noise_phase(noise_secs, td_row, d11_s, bpp, block_max,
-                          session_max, disk_free, weekend, SPLITNOISE)
+                          session_max, disk_free, weekend, 0)
+    single_max = noise_single_max_bytes()
+    single_bytes = sz["rows"] * sz["row_bytes"]
+    split_now, split_basis = noise_split_decision(
+        single_bytes, single_max, SPLITNOISE, SINGLENOISE)
+    if split_now:
+        sz = size_noise_phase(noise_secs, td_row, d11_s, bpp, block_max,
+                              session_max, disk_free, weekend, 1)
     row_secs = noise_row_secs(td_row, d11_s)
     plan = {
         "mode": duration["mode"],
         "choice": duration["label"],
-        "split": int(SPLITNOISE),
+        "split": int(split_now),
+        "split_basis": split_basis,
+        "single_file_bytes": int(single_bytes),
+        "single_file_max_bytes": int(single_max),
         "requested_s": round(noise_secs, 1),
         "weekend_end_local": duration.get("weekend_end_local"),
         "weekend_refused": duration.get("refused") or [],
@@ -3896,10 +4034,22 @@ def run_noise_phase(meta, template, dsname, name_dir, o1_hz, duration,
         "stopped_early": None,
         "late_returns": 0,
     }
-    if SPLITNOISE:
+    if split_now:
         plan["block_max_bytes"] = int(block_max)
     meta["noise_plan"] = plan
     gib = float(1 << 30)
+    if split_basis == "auto_file_above_limit":
+        say("noise phase: one file would hold %.2f GiB, above the %.2f GiB "
+            "this script writes in one piece (a larger ser holds zg on a "
+            "TopSpin message: Torino, 2026-10-26) -- acquiring %d blocks "
+            "of at most %.2f GiB (expno %d, then %d, ...)"
+            % (single_bytes / gib, single_max / gib, len(sz["blocks"]),
+               block_max / gib, EXP_NOISE, EXP_NOISE_MORE_BASE))
+    elif split_basis == "argv_singlenoise" and single_bytes > single_max:
+        say("WARNING: 'singlenoise' -- one noise file of %.2f GiB, above "
+            "%.2f GiB; TopSpin may hold zg on a message after the last "
+            "row until someone closes it" % (single_bytes / gib,
+                                            single_max / gib))
     if sz["capped_by"] == "bundle_size":
         say("noise phase: the requested time holds %d rows; the bundle-size "
             "ceiling (%.1f GiB of raw data) allows %d -- the phase stops "
@@ -6850,7 +7000,8 @@ def main():
 
     # ---------------------------------------------------------------- 10
     # Noise phase.  Default: one long pulse-free block (expno 12): a fixed
-    # duration, or the weekend (v0.8.3); with 'splitnoise', consecutive
+    # duration, or the weekend (v0.8.3); when one file would exceed
+    # NOISE_SINGLE_MAX_BYTES (v0.8.6) or with 'splitnoise', consecutive
     # blocks at expno 12, 400, 401, ... under the deadline guard
     # (run_noise_phase).  With the 'sweep' flag: a ladder of field-stepped
     # noise blocks -- each step its own axion mass point

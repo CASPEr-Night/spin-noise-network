@@ -137,7 +137,7 @@ Dataset `SPINNOISE_<date>_<time>` in your current data directory:
 | 17 | row_probe (v0.7.7): `zgnoise2d`, RG 1, 2+ rows per attempt — finds the row length / transfer delay `d11` the receiver unit accepts; the last attempt's data stay here |
 | 11 | reference_open: `zgref2d`, 1° pseudo-2D, ~170 s of rows (8 × ~21 s at the default row) |
 | 12 | **noise**: `zgnoise2d`, *no pulse at all*, NS=1/row, RG max stable, rows fill the chosen duration (the weekend: until Monday 06:30, within the upload and disk limits; `meta.json` `noise_plan` records the plan) |
-| 400–499 | noise blocks 2, 3, ... (v0.8.3, only with `splitnoise`): the noise phase as consecutive blocks of at most 1 GiB each, at expno 12's RG and row geometry; a block starts only if it fits before the phase's planned end. The report co-adds them with expno 12 as one block |
+| 400–499 | noise blocks 2, 3, ... (v0.8.3; since v0.8.6 whenever one noise file would exceed 1 GiB, e.g. any ten-hour or weekend run, and always with `splitnoise`; never with `singlenoise`): the noise phase as consecutive blocks of at most 1 GiB each, at expno 12's RG and row geometry; a block starts only if it fits before the phase's planned end. The report co-adds them with expno 12 as one block |
 | 13 | reference_close: same as 11 |
 
 The row length (TD, default 262144) and the transfer delay (D11,

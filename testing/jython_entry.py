@@ -484,6 +484,96 @@ def _ticket_20261118_checks(check, script_globals):
           and calib(-1500.0, 9000.0, est) is None)
 
 
+def _v086_checks(check, script_globals, _mo, sweep_on, split_basis_want,
+                 workdir):
+    """v0.8.6: (1) the noise phase is split by itself exactly when one
+    file would exceed NOISE_SINGLE_MAX_BYTES (Torino, 2026-10-26: TopSpin
+    4.4.0 held zg on "Reading off file limits ... /12/ser", a 3.34 GiB
+    file); (2) a data directory that cannot be written stops the run
+    with a plain message instead of a parameter dialog (Oulu 400,
+    2026-11-18: "Read-only file system")."""
+    g = script_globals
+    _gib = 1 << 30
+    dec = g["noise_split_decision"]
+    smax = g["NOISE_SINGLE_MAX_BYTES"]
+    neo_row = 262144 * 8
+    i32_row = 262144 * 4
+    _pnb6 = g["plan_noise_blocks"]
+    _per_neo = g["NOISE_BLOCK_MAX_BYTES"] // neo_row
+    _per_i32 = g["NOISE_BLOCK_MAX_BYTES"] // i32_row
+    check("split decision, production ceiling %.2f GiB (= one block): 10 h "
+          "is split on the Neo (1710 rows, 3.34 GiB: 4 blocks) and on an "
+          "int32 console (1710 rows, 1.67 GiB: 855 + 855); the Neo's 180 "
+          "min (513 rows, one over 1 GiB) is 257 + 256; 180 min of int32 "
+          "rows (513) and the Neo's 60 min (171) stay one file"
+          % (smax / float(_gib)),
+          smax == 1 << 30 and smax == g["NOISE_BLOCK_MAX_BYTES"]
+          and dec(1710 * neo_row, smax, 0, 0) == (1, "auto_file_above_limit")
+          and len(_pnb6(1710, _per_neo, 100)) == 4
+          and dec(1710 * i32_row, smax, 0, 0) == (1, "auto_file_above_limit")
+          and _pnb6(1710, _per_i32, 100) == [855, 855]
+          and dec(513 * neo_row, smax, 0, 0) == (1, "auto_file_above_limit")
+          and _pnb6(513, _per_neo, 100) == [257, 256]
+          and dec(513 * i32_row, smax, 0, 0) == (0, "auto_file_within_limit")
+          and dec(171 * neo_row, smax, 0, 0) == (0, "auto_file_within_limit"),
+          repr((_pnb6(1710, _per_neo, 100), _pnb6(1710, _per_i32, 100),
+                _pnb6(513, _per_neo, 100))))
+    check("split decision: 'splitnoise' always splits, 'singlenoise' "
+          "never does and wins when both are given",
+          dec(10 * i32_row, smax, 1, 0) == (1, "argv_splitnoise")
+          and dec(1710 * neo_row, smax, 0, 1) == (0, "argv_singlenoise")
+          and dec(1710 * neo_row, smax, 1, 1) == (0, "argv_singlenoise"))
+    if not sweep_on:
+        _np = _mo.get("noise_plan") or {}
+        check("noise_plan.split_basis is %s, with the single-file size "
+              "and ceiling recorded" % split_basis_want,
+              _np.get("split_basis") == split_basis_want
+              and isinstance(_np.get("single_file_bytes"), (int, long))
+              and isinstance(_np.get("single_file_max_bytes"), (int, long))
+              and (_np.get("split") == 1)
+              == (split_basis_want in ("argv_splitnoise",
+                                       "auto_file_above_limit")),
+              repr([(k, _np.get(k)) for k in
+                    ("split", "split_basis", "single_file_bytes",
+                     "single_file_max_bytes")]))
+    # (2) the writability guard, on a real directory made read-only
+    dw = g["dir_writable"]
+    rw = os.path.join(workdir, "v086_rw")
+    ro = os.path.join(workdir, "v086_ro")
+    for d in (rw, ro):
+        if not os.path.isdir(d):
+            os.makedirs(d)
+    os.chmod(ro, 0555)
+    try:
+        check("dir_writable: 1 on a writable directory (probe file "
+              "removed), 0 on a read-only one, None on a path that is not "
+              "a directory",
+              dw(rw) == 1 and os.listdir(rw) == [] and dw(ro) == 0
+              and dw(os.path.join(workdir, "v086_absent")) is None,
+              repr((dw(rw), os.listdir(rw), dw(ro))))
+        aborted = []
+        real_abort = g["abort"]
+        g["abort"] = lambda msg: aborted.append(msg)
+        try:
+            g["stop_if_unwritable"]("setting the number of rows (F1 TD)", rw)
+            n_rw = len(aborted)
+            g["stop_if_unwritable"]("setting the number of rows (F1 TD)", ro)
+        finally:
+            g["abort"] = real_abort
+        check("stop_if_unwritable: silent on a writable directory; on a "
+              "read-only one it aborts with the plain message (names the "
+              "directory and the failed step, says nothing typed into "
+              "TopSpin will fix it)",
+              n_rw == 0 and len(aborted) == 1
+              and ro in aborted[0]
+              and "setting the number of rows (F1 TD)" in aborted[0]
+              and "nothing typed into" in aborted[0]
+              and "Read-only file system" in aborted[0],
+              repr(aborted)[:400])
+    finally:
+        os.chmod(ro, 0755)
+
+
 def _noise_phase_checks(check, script_globals, _mo, _log, sweep_on,
                         weekend_on, split_on, latezg_on, ts32_on=0):
     """The v0.8.3 noise-phase checks (see the NOISE-PHASE FIXTURE
@@ -665,23 +755,36 @@ def main():
     if len(sys.argv) < 2 or sys.argv[1] not in ("simulate", "desktest"):
         print "usage: jython jython_entry.py {simulate|desktest} " \
               "[rdopt] [sweep] [autostep] [nonutation] [sparseladder] " \
-              "[splitnoise] [weekend] [latezg]"
+              "[splitnoise] [singlenoise] [weekend] [latezg] [autosplit]"
         return 2
     mode = sys.argv[1]
     features = []          # passed to the script's argv
     variants = []          # harness-only: the fixture, not the script
     for a in sys.argv[2:]:
         if a in ("rdopt", "sweep", "autostep", "nonutation", "sparseladder",
-                 "splitnoise"):
+                 "splitnoise", "singlenoise"):
             features.append(a)
-        elif a in ("weekend", "latezg", "ts32date"):
+        elif a in ("weekend", "latezg", "ts32date", "autosplit"):
             variants.append(a)
     rdopt_on = "rdopt" in features
     sweep_on = "sweep" in features
     autostep_on = "autostep" in features
     nutation_on = "nonutation" not in features
     dense_on = "sparseladder" not in features
-    split_on = "splitnoise" in features
+    # autosplit (v0.8.6, harness variant of the weekend): the single-file
+    # ceiling is scaled to megabytes like the other limits, so the script
+    # splits the phase BY ITSELF, no argv word -- the same layout as
+    # 'weekend splitnoise'.  singlenoise must keep it one file.
+    autosplit_on = "autosplit" in variants
+    single_on = "singlenoise" in features
+    split_on = ("splitnoise" in features or autosplit_on) and not single_on
+    split_basis_want = "auto_file_within_limit"
+    if single_on:
+        split_basis_want = "argv_singlenoise"
+    elif "splitnoise" in features:
+        split_basis_want = "argv_splitnoise"
+    elif autosplit_on:
+        split_basis_want = "auto_file_above_limit"
     weekend_on = "weekend" in variants
     latezg_on = "latezg" in variants
     ts32_on = "ts32date" in variants
@@ -727,6 +830,10 @@ def main():
     if weekend_on:
         topspin_stub.NOISE_LIMITS[0] = (WEEKEND_BLOCK_BYTES,
                                         WEEKEND_SESSION_BYTES, None)
+        if autosplit_on:
+            topspin_stub.NOISE_LIMITS[0] = (
+                WEEKEND_BLOCK_BYTES, WEEKEND_SESSION_BYTES, None,
+                WEEKEND_BLOCK_BYTES)
         topspin_stub._VCLOCK_MS[0] = long(_local_epoch_s(*WEEKEND_START)
                                           * 1000)
     elif ts32_on:
@@ -1850,6 +1957,8 @@ def main():
     # the JVM's 64 KB method-size limit under Jython.
     _noise_phase_checks(check, script_globals, _mo, _log, sweep_on,
                         weekend_on, split_on, latezg_on, ts32_on)
+    _v086_checks(check, script_globals, _mo, sweep_on, split_basis_want,
+                 workdir)
     _ticket_20261118_checks(check, script_globals)
 
     # ---- clock audit (schema 1.2).  Jython 2.7 ships json, so the
