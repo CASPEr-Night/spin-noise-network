@@ -351,6 +351,22 @@ covers ~10 GB), set the shared token, and hand facilities the endpoint + token p
   Jython harness (a virtual Friday-to-Monday weekend across a daylight-saving change, a zg
   held 30 h, the split layout) and on a re-packed synthetic bundle whose science matches the
   unsplit one; not yet run on hardware. Reports of earlier bundles are unchanged.
+- **v0.8.6 keeps every noise file below TopSpin's file limit, and stops plainly on a disk
+  that cannot be written.** Torino's two late zg returns (9 h, then 57 h) are explained:
+  on 26 October the console showed "Reading off file limits: …/local_acqu/…/12/ser", and zg
+  waited on that message until the operator closed it. Both blocks were the only noise
+  files above 2 GiB (3.5 and 3.3 GiB). The script now writes no noise file above 1 GiB:
+  a phase that fits stays one file at expno 12 (up to three hours on an int32 console, a
+  little under three on an Avance Neo); a larger one, such as ten hours on any console or a
+  weekend, is acquired as blocks of at most 1 GiB (expnos 12, 400, 401, …) that the report co-adds
+  (`noise_plan.split_basis`). `splitnoise` still forces the blocks and the new `singlenoise`
+  forces one file. Separately, on the Oulu 400 (18 November 2026) Linux remounted the data
+  disk read-only as the overnight block started; TopSpin answered the next parameter write
+  with "Read-only file system" and the script asked the operator to type `1 td` in a window
+  she could not reach. Wherever a failed write used to lead to such a dialog, the script
+  now tests whether the data directory can be written and, if not, stops with a message
+  that says so. The split layout and the guard pass the harness; neither has run on a
+  console.
 - **v0.8.5 fixes two faults of the first complete live `sweep` (Oulu 500, 18 November
   2026).** On the FIELD fallback every displaced step landed on the wrong side of the
   baseline: the dialog assumed +8.0 Hz per FIELD unit from the manuals, and the console

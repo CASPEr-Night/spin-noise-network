@@ -569,24 +569,48 @@ from the console's own acquisition stamps (acqus `DATE_START`/`DATE`)
 and says so in the QA row "wind-aware halo: row times". What the run
 loses is the magnet's time after the last row, and the closing
 reference describes the morning, not the end of the noise.
-*Cause: not known.* The two blocks are the only Torino datasets above
-2 GiB (float64 sers of 3.50 and 3.34 GiB; every block below 2 GiB
-completed within seconds), which points at the file size. They are
-also the only long unattended blocks, so an overnight screen lock,
-sleep setting or session timeout fits as well. *If it happens to you:*
-nothing to do for the data. Note what was on the screen when you came
-in -- a TopSpin message or error box, a locked screen -- and tell us.
-Since v0.8.3 every noise block records how long after its last row zg
-returned (`noise_plan.blocks[].zg_return_lag_s`, and a status-line
-WARNING above 10 min), so the bundle tells us too. *If the file size
-is the cause,* `xpy spin_noise_run splitnoise` acquires the noise phase
-as blocks of at most 1 GiB (expno 12, then 400, 401, ...), and the
-report co-adds them as one block. *If a lock or sleep is the cause,*
-the first block's zg is held in the same way, and the script then
-starts no further block after the phase's planned end (the deadline
-guard: a held zg never pushes acquisition into the working day) -- the
-run keeps the first block only. That is why `splitnoise` is not the
-default.
+*Cause (known since 19 November 2026):* on 26 October the console
+showed a TopSpin message, "Reading off file limits:
+/root/.topspin-BladeEpu/local_acqu/SPINNOISE_20261023_1729/12/ser",
+and zg waited on it until the operator closed it on Monday; the script
+then went on and finished. The two blocks are the only Torino datasets
+above 2 GiB (float64 sers of 3.50 and 3.34 GiB; every block below
+2 GiB completed within seconds). Where exactly TopSpin's limit lies is
+not measured; 2 GiB is the natural value. *If it happens to you:*
+close the message; nothing is lost. *Fix (v0.8.6):* the script writes
+no noise file above 1 GiB. A phase that fits stays one file at
+expno 12 (up to three hours on an int32 console, a little under three
+on an Avance Neo). A larger one (ten hours on any console, any
+weekend) is acquired as blocks of at most 1 GiB (expno 12, then 400,
+401, ...)
+that the report co-adds as one block; a block starts only if it fits
+before the phase's planned end (`noise_plan.split_basis`, and
+`zg_return_lag_s` on every block). `xpy spin_noise_run splitnoise`
+forces the blocks, `singlenoise` forces one file. The split layout has
+passed the desk harness since v0.8.3 and has not yet run on a console:
+make the first such run a daytime one.
+
+**"Read-only file system" in a TopSpin error window, then the script
+asks you to type `1 td` (or stops with "cannot write to the data
+directory"), and afterwards TopSpin will not start ("access() failed:
+Read-only file system").** Seen on the Oulu 400 (TopSpin 3.2, Linux)
+on 18 November 2026, seven minutes into an overnight session, as the
+noise block started: zg reported "Cannot start DRU1 ... cannot open
+file .../12/ser", TopSpin reported "I/O error while writing parameter
+... acqu2: Cannot open file: Read-only file system", and script 0.8.4
+showed its "set F1 TD" dialog behind that window. *Cause:* not a
+permission and not TopSpin. Linux has remounted the disk partition
+read-only, which it does by itself when it meets a disk error or an
+inconsistency in the file system. The noise block's raw file is the
+largest write of a session (TopSpin 3.x reserves all of it when zg
+starts), so it is the likeliest moment for an existing disk problem to
+show. *What to do:* with the person who looks after the computer, copy
+your data and TopSpin's user folders to another disk first (reading
+still works), read the kernel log (`dmesg`, `/var/log/messages` at the
+time of the error), and only then restart; replace the disk if the log
+shows disk errors. *Since v0.8.6* the script tests whether the data
+directory can be written wherever a failed write used to lead to a
+dialog, and stops with a message that says the disk cannot be written.
 
 **The status line and the report say "zg returned late" after a run
 that finished on time (script 0.8.3 on TopSpin 3.2, Avance III 400,

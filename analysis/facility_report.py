@@ -5936,7 +5936,10 @@ def noise_plan_section(meta, bundle=None):
                "%s%s; planned %s row(s) in %s block(s)%s"
                % (plan.get("mode") or "?", plan.get("choice") or "?", rows,
                   len(blocks), ", ".join(str(b.get("expno")) for b in blocks),
-                  " (splitnoise)" if plan.get("split") else "",
+                  ((" (split by the script: one file would exceed its "
+                    "single-file limit)")
+                   if plan.get("split_basis") == "auto_file_above_limit"
+                   else " (splitnoise)") if plan.get("split") else "",
                   plan.get("rows_planned"), plan.get("blocks_planned"),
                   ("; capped by %s" % plan["capped_by"])
                   if plan.get("capped_by") else ""))

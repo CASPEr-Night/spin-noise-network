@@ -58,6 +58,7 @@ Usage:  python3 testing/static_check.py     (exit 0 iff all green)
 """
 
 import json
+import io
 import os
 import re
 import sys
@@ -1443,6 +1444,46 @@ check("ticket 20261118: open_expno never WR()s the current dataset onto "
       and "def _ticket_20261118_checks(check, script_globals):" in ENTRY_SRC
       and "source and target identical" in _TS
       and "-7.09 Hz per unit" in _TS.replace("\n", " "))
+
+
+# v0.8.6: no noise file above the single-file ceiling (Torino's "Reading
+# off file limits"), and a plain stop on a data directory that cannot be
+# written (Oulu 400, "Read-only file system").
+_rnp6 = SRC[SRC.index("def run_noise_phase("):
+            SRC.index("def run_noise_phase(") + 9000]
+_f1td = SRC[SRC.index('stop_if_unwritable("setting the number of rows (F1 TD)")'):
+            SRC.index('stop_if_unwritable("setting the number of rows (F1 TD)")')
+            + 200]
+check("v0.8.6: the noise phase is split by the script itself when one file "
+      "would exceed NOISE_SINGLE_MAX_BYTES (1 GiB), 'splitnoise' and "
+      "'singlenoise' override, the plan records the basis; a failed write "
+      "meets stop_if_unwritable before the F1 TD and PARMODE dialogs, in "
+      "open_expno and around the noise block; schema, TROUBLESHOOTING, "
+      "INSTALL and the harness (weekend autosplit, with and without "
+      "singlenoise) carry it",
+      "NOISE_SINGLE_MAX_BYTES = 1 << 30 " in SRC
+      and "def noise_split_decision(single_bytes, single_max, force_split,"
+      in SRC
+      and "single_bytes, single_max, SPLITNOISE, SINGLENOISE)" in _rnp6
+      and '"split_basis": split_basis,' in _rnp6
+      and "SINGLENOISE = 1" in SRC
+      and "def stop_if_unwritable(what, path=None):" in SRC
+      and 'CONFIRM("spin_noise_run: set F1 TD (number of rows)"' in _f1td
+      and 'stop_if_unwritable("switching the dataset to %s" % label)' in SRC
+      and 'stop_if_unwritable("starting the %s" % what, expno_dir)' in SRC
+      and 'stop_if_unwritable("writing the %s" % what, expno_dir)' in SRC
+      and 'stop_if_unwritable("creating dataset %s/%s" % (name, expno),'
+      in SRC
+      and "split_basis" in _np_props.get("description", "")
+      and "Reading off file limits" in _TS
+      and "Read-only file system" in _TS
+      and "singlenoise" in io.open(
+          os.path.join(REPO, "topspin", "INSTALL.md"),
+          encoding="utf-8").read()
+      and '"ts44 desktest weekend autosplit"' in _HARN
+      and '"legacy desktest singlenoise weekend autosplit"' in _HARN
+      and "def _v086_checks(check, script_globals, _mo, sweep_on," in ENTRY_SRC
+      and 'if plan.get("split_basis") == "auto_file_above_limit"' in REPORT_SRC)
 
 
 # --------------------------------------------------------------------------
