@@ -566,6 +566,31 @@ def orientation_site_cases(fr):
           fr._wind_site({"facility": {"city": "Carbondale, Illinois",
                                       "country": "USA"}})
           == (37.7, -89.2, "registry_city"))
+    check("8.4 site: 'Ames, IA' (Iowa State, registered 2026-11-19) "
+          "resolves to (42.0, -93.6)",
+          fr._wind_site({"facility": {"city": "Ames, IA", "country": "USA"}})
+          == (42.0, -93.6, "registry_city"))
+    _rr = fr.registry_report_module()
+    _typed = {"city": "(56.1680867", "country": "10.1951402)",
+              "city_country_raw": "(56.1680867, 10.1951402)"}
+    check("8.4 site: coordinates typed into the city field (a sign-up of "
+          "2026-11-18) resolve to the nearest gazetteer city's city-level "
+          "values (Aarhus, 56.2, 10.2) and print as the city name, never "
+          "as coordinates",
+          _rr.resolve_coords(_typed) == (56.2, 10.2)
+          and _rr.display_city(_typed) == "Aarhus"
+          and fr._wind_site({"facility": _typed})
+          == (56.2, 10.2, "registry_city"))
+    _far = {"city_country_raw": "(-45.8788, 170.5028)"}
+    check("8.4 site: typed coordinates far from any gazetteer city resolve "
+          "rounded to 0.1 degree and print no city; a pair that is not a "
+          "latitude and longitude, and an ordinary city, are left alone",
+          _rr.resolve_coords(_far) == (-45.9, 170.5)
+          and _rr.display_city(_far) == ""
+          and _rr.typed_coords({"city_country_raw": "(156.2, 10.2)"}) is None
+          and _rr.typed_coords({"city": "Oulu", "country": "Finland",
+                                "city_country_raw": "Oulu, Finland"}) is None
+          and _rr.display_city({"city": "Oulu"}) == "Oulu")
     check("8.4 site: operator facility.latitude_deg / longitude_east_deg win "
           "over the city, basis operator",
           fr._wind_site({"facility": {"city": "Carbondale", "latitude_deg": 65.0,

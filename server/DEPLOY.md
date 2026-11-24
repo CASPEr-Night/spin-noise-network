@@ -65,6 +65,45 @@ The value goes into exactly one consumer: the CONFIG block of the Apps
 Script pasted into the Form (setup walkthrough: `docs/REGISTRY.md`).
 `GET /registry/list` accepts either token — the coordinator holds both.
 
+## 2c. Collaboration read access (optional; DATA_POLICY.md v1.1)
+
+Members of the CASPEr collaboration may be given read-only access to the
+bundles of the facilities whose PI has agreed (`DATA_POLICY.md`, "Access by
+the CASPEr collaboration"). Two settings, and with either one missing
+nothing is shared:
+
+```sh
+# One key per NAMED person -- this JSON object IS the list the policy says
+# the coordinators keep. Mint each key with:  openssl rand -hex 32
+npx wrangler secret put COLLAB_TOKENS
+#   paste one line of JSON, e.g.  {"first-member":"<64 hex>","second-member":"<64 hex>"}
+
+# The facility slugs whose data are shared, separated by commas: those whose
+# PI agreed by e-mail (data uploaded under policy 1.0), plus every facility
+# that uploads under policy 1.1 or later, where uploading is the agreement --
+# add its slug when its first bundle arrives:
+npx wrangler secret put SHARED_SLUGS
+#   paste e.g.  siu-carbondale,uni-oulu,uni-oulu400,unito
+
+npx wrangler deploy                       # redeploy so the settings take effect
+```
+
+- A bundle is shared exactly when the slug in its name
+  (`spinnoise_<slug>_<date>_...`) is on `SHARED_SLUGS`. A bundle of any other
+  facility answers a member exactly like one that does not exist.
+- A member key lists and downloads through `GET /shared/list` and
+  `GET /shared/object?key=...` and opens no other route: no upload, no
+  receipts, no facility registry. The facilities' `INGEST_TOKEN` does not
+  open `/shared/*`. Keys shorter than 32 characters are never accepted.
+- To end one person's access, re-enter `COLLAB_TOKENS` without their entry
+  and redeploy. To end the sharing of a facility's data, re-enter
+  `SHARED_SLUGS` without its slug and redeploy.
+- Every listing and download is logged with the member's label (the
+  dashboard's Logs tab: `shared_list`, `shared_download`).
+- Give each member their own key privately, with
+  `analysis/fetch_shared.py` (its header is the recipe) and the policy.
+  Never give a member the ingest token.
+
 ## 3. Deploy
 
 ```sh
@@ -117,7 +156,10 @@ code changes; just update `endpoint_url` in the facility configs.
 
 All routes except `/health` require `Authorization: Bearer <INGEST_TOKEN>`,
 except the two registry routes: `POST /registry` takes `REGISTRY_TOKEN`
-only, and `GET /registry/list` takes either token.
+only, and `GET /registry/list` takes either token; and the two
+collaboration routes, `GET /shared/list` and `GET /shared/object?key=...`,
+which take a member's own key from `COLLAB_TOKENS` and nothing else
+(section 2c).
 
 | Route | Purpose |
 |---|---|
@@ -297,7 +339,10 @@ mid-transfer and proves the resume, verifies byte-exact retrieval via
 facility-registry suite (`testing/test_registry.sh`, also runnable on its
 own): the 503-until-configured path, a synthetic sign-up, the idempotent
 re-POST, the 401 paths, `/registry/list`, the `/list`+`/stats` exclusion,
-and `analysis/registry_report.py` against the live local endpoint. Run it
+and `analysis/registry_report.py` against the live local endpoint.
+`./testing/test_shared_access.sh` does the same for the collaboration
+routes (section 2c): closed until configured, the consent list, named keys,
+read-only, and `analysis/fetch_shared.py`. Run it
 after any change to `worker.js` or `upload_bundle.py`.
 
 ---

@@ -38,6 +38,7 @@ import argparse
 import datetime
 import html as html_escape
 import json
+import math
 import os
 import re
 import sys
@@ -68,6 +69,7 @@ GAZETTEER = {
     "oxford": (51.8, -1.3), "london": (51.5, -0.1), "birmingham": (52.5, -1.9),
     "nottingham": (52.9, -1.2), "warwick": (52.4, -1.6), "coventry": (52.4, -1.5),
     "st andrews": (56.3, -2.8), "edinburgh": (55.9, -3.2),
+    "belfast": (54.6, -5.9),
     "cambridge, uk": (52.2, 0.1), "cambridge, united kingdom": (52.2, 0.1),
     "cambridge, usa": (42.4, -71.1), "cambridge, united states": (42.4, -71.1),
     "cambridge": (52.2, 0.1),          # bare "Cambridge" defaults to the UK one
@@ -78,6 +80,9 @@ GAZETTEER = {
     "madison": (43.1, -89.4), "minneapolis": (45.0, -93.3),
     "tallahassee": (30.4, -84.3), "gainesville": (29.7, -82.3),
     "carbondale": (37.7, -89.2),       # Southern Illinois University
+    "ames": (42.0, -93.6),             # Iowa State University (registered
+                                       # 2026-11-19 as "Ames, IA", unresolved)
+    "omaha": (41.3, -96.0),            # Creighton University (2026-11-23)
     "tempe": (33.4, -111.9),           # Arizona State University
     "davis": (38.5, -121.7), "miami": (25.8, -80.2),
     "college station": (30.6, -96.3), "houston": (29.8, -95.4),
@@ -239,12 +244,54 @@ def render_table(facilities):
 # Best-effort sidereal coverage (geo_coverage.py math, minimal reimplementation)
 # ---------------------------------------------------------------------------
 
+TYPED_COORDS_RE = re.compile(
+    r"^\s*\(?\s*([+-]?\d{1,2}(?:\.\d+)?)\s*[,;]\s*"
+    r"([+-]?\d{1,3}(?:\.\d+)?)\s*\)?\s*$")
+TYPED_COORDS_NEAR_DEG = 0.5
+
+
+def typed_coords(facility):
+    """(lat, lon) when the form's "city, country" field was filled with a
+    coordinate pair instead of a place name -- "(56.1680867, 10.1951402)",
+    which the forwarder splits on the comma into city "(56.1680867" and
+    country "10.1951402)" (a sign-up of 2026-11-18). None otherwise, or
+    when the pair is not a latitude and an east longitude."""
+    raw = str(facility.get("city_country_raw", "")).strip()
+    if not raw:
+        raw = "%s, %s" % (str(facility.get("city", "")).strip(),
+                          str(facility.get("country", "")).strip())
+    m = TYPED_COORDS_RE.match(raw)
+    if not m:
+        return None
+    lat, lon = float(m.group(1)), float(m.group(2))
+    if abs(lat) > 90.0 or abs(lon) > 180.0:
+        return None
+    return lat, lon
+
+
+def nearest_gazetteer_city(lat, lon, within_deg=TYPED_COORDS_NEAR_DEG):
+    """(key, (lat, lon)) of the gazetteer city closest to the point, or
+    None when none lies within within_deg (great-circle, degrees)."""
+    best = None
+    for key, (glat, glon) in sorted(GAZETTEER.items()):
+        dlon = (glon - lon + 180.0) % 360.0 - 180.0
+        d = math.hypot(glat - lat, dlon * math.cos(math.radians(lat)))
+        if best is None or d < best[0]:
+            best = (d, key, (glat, glon))
+    if best is None or best[0] > within_deg:
+        return None
+    return best[1], best[2]
+
+
 def resolve_coords(facility):
     """(lat, lon) from the gazetteer, or None. Tries 'city, country' first,
     then the bare city, then the raw combined field, then the city's first
     comma-component (the forwarder splits 'Carbondale, Illinois, USA' on the
     LAST comma, so city arrives as 'Carbondale, Illinois' -- the gazetteer
-    keys plain city names)."""
+    keys plain city names).  A coordinate pair typed into the field
+    (typed_coords) resolves to the nearest gazetteer city's own city-level
+    values, else to the pair rounded to 0.1 degree: precise coordinates
+    never leave this function (DATA_POLICY: city level only)."""
     city = str(facility.get("city", "")).strip().lower()
     country = str(facility.get("country", "")).strip().lower()
     raw = str(facility.get("city_country_raw", "")).strip().lower()
@@ -254,7 +301,27 @@ def resolve_coords(facility):
         key = key.strip(" ,")
         if key in GAZETTEER:
             return GAZETTEER[key]
+    pair = typed_coords(facility)
+    if pair is not None:
+        near = nearest_gazetteer_city(*pair)
+        if near is not None:
+            return near[1]
+        return round(pair[0], 1), round(pair[1], 1)
     return None
+
+
+def display_city(facility):
+    """The city to PRINT for a facility (report table, website map): the
+    form's city, except when coordinates were typed there -- then the
+    nearest gazetteer city's name, or "" when none is near.  Coordinates
+    are never printed (DATA_POLICY: no precise coordinates in public)."""
+    pair = typed_coords(facility)
+    if pair is None:
+        return str(facility.get("city", "")).strip()
+    near = nearest_gazetteer_city(*pair)
+    if near is None:
+        return ""
+    return " ".join(w.capitalize() for w in near[0].split(",")[0].split())
 
 
 def sidereal_coverage(sites, np, n_days=14, start_h=20.0, end_h=30.0):
@@ -367,9 +434,10 @@ def build_map_markers(facilities):
             skipped.append(str(f.get("institution", "?")))
             continue
         x, y = latlon_to_svg(*coords)
+        _city = display_city(f)
         label = html_escape.escape(
-            "%s — %s" % (str(f.get("institution", "")).strip(),
-                              str(f.get("city", "")).strip()))
+            ("%s — %s" % (str(f.get("institution", "")).strip(), _city))
+            if _city else str(f.get("institution", "")).strip())
         markers.append(
             '      <g class="fac"><title>%s</title>'
             '<circle class="fac-glow" cx="%g" cy="%g" r="7"/>'

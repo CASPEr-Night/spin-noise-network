@@ -19,6 +19,10 @@
  *   GET  /stats              bundle count + total bytes (auth required)
  *   POST /registry           store one facility sign-up (REGISTRY_TOKEN auth)
  *   GET  /registry/list      sign-ups + keys (REGISTRY_TOKEN or INGEST_TOKEN)
+ *   GET  /shared/list        bundles of the facilities that agreed to share them
+ *                            with the CASPEr collaboration (a member's own key
+ *                            from COLLAB_TOKENS; DATA_POLICY.md v1.1)
+ *   GET  /shared/object?key= one such bundle, read-only (same auth)
  *
  * Design notes (kept deliberately boring — this must run unattended for years):
  *   - No external dependencies. Plain ES-module Worker, one file.
@@ -174,6 +178,156 @@ function checkRegistryReadAuth(request, env) {
     return json({ ok: false, error: "unauthorized" }, 401);
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Collaboration read access (DATA_POLICY.md v1.1, "Access by the CASPEr
+// collaboration")
+// ---------------------------------------------------------------------------
+//
+// Two settings, both absent by default, and with either absent nothing is
+// shared (fail closed):
+//
+//   COLLAB_TOKENS  secret: a JSON object {"<member label>": "<key>", ...},
+//                  one key per NAMED person. Access is given to individuals
+//                  and the coordinators keep the list: this object is that
+//                  list. Removing an entry ends that person's access. These
+//                  keys only ever read; they authorize nothing else here,
+//                  and the facilities' INGEST_TOKEN does not open /shared/*.
+//   SHARED_SLUGS   var or secret: the facility slugs whose PI has agreed,
+//                  separated by commas or spaces, e.g. "uni-oulu, unito".
+//                  A bundle is shared exactly when the slug in its name,
+//                  spinnoise_<slug>_<date>_..., is on this list.
+//
+// A member can list and download; there is no route by which a member key
+// uploads, changes or deletes anything. Receipts and the facility registry
+// (which holds contact details of facilities that have not agreed to
+// anything) are not reachable with a member key.
+
+const BUNDLE_SLUG_RE = /^spinnoise_([a-z0-9-]+)_[0-9]{8}_/;
+
+/** The consent allow-list as a Set of slugs (empty when unset). */
+function sharedSlugs(env) {
+  const raw = String(env.SHARED_SLUGS || "");
+  return new Set(
+    raw
+      .split(/[\s,]+/)
+      .map((x) => x.trim().toLowerCase())
+      .filter((x) => /^[a-z0-9][a-z0-9-]*$/.test(x))
+  );
+}
+
+/** The facility slug in a bundle key, or null. */
+function slugOfBundle(key) {
+  const m = BUNDLE_SLUG_RE.exec(String(key || ""));
+  return m ? m[1] : null;
+}
+
+/**
+ * Collaboration-member auth. Returns [label, null] when the presented key
+ * is one of COLLAB_TOKENS, else [null, errorResponse]. Every entry is
+ * compared (no early exit), so timing does not say which entry matched.
+ */
+function checkCollabAuth(request, env) {
+  if (!env.COLLAB_TOKENS) {
+    return [
+      null,
+      json(
+        {
+          ok: false,
+          error:
+            "collaboration access not configured (COLLAB_TOKENS secret missing) — see server/DEPLOY.md",
+        },
+        503
+      ),
+    ];
+  }
+  let table = null;
+  try {
+    table = JSON.parse(env.COLLAB_TOKENS);
+  } catch (err) {
+    table = null;
+  }
+  if (!table || typeof table !== "object" || Array.isArray(table)) {
+    return [null, json({ ok: false, error: "collaboration access misconfigured (COLLAB_TOKENS is not a JSON object)" }, 503)];
+  }
+  const header = request.headers.get("Authorization") || "";
+  const m = header.match(/^Bearer\s+(\S+)$/);
+  if (!m) return [null, json({ ok: false, error: "unauthorized" }, 401)];
+  let label = null;
+  for (const [name, secret] of Object.entries(table)) {
+    // A key shorter than 32 characters is never accepted, whatever the table says.
+    if (typeof secret !== "string" || secret.length < 32) continue;
+    if (tokensMatch(m[1], secret) && label === null) label = name;
+  }
+  if (label === null) return [null, json({ ok: false, error: "unauthorized" }, 401)];
+  return [label, null];
+}
+
+/** GET /shared/list — every bundle of the facilities on the allow-list. */
+async function handleSharedList(request, env) {
+  const [label, authError] = checkCollabAuth(request, env);
+  if (authError) return authError;
+  const allowed = sharedSlugs(env);
+  const bundles = [];
+  let cursor = undefined;
+  do {
+    const page = await env.SPIN_NOISE.list({
+      prefix: "spinnoise_",
+      limit: 1000,
+      cursor,
+      include: ["customMetadata"],
+    });
+    for (const o of page.objects) {
+      const slug = slugOfBundle(o.key);
+      if (!slug || !allowed.has(slug)) continue;
+      bundles.push({
+        name: o.key,
+        facility_slug: slug,
+        size: o.size,
+        uploaded: o.uploaded,
+        sha256: (o.customMetadata && o.customMetadata.sha256) || null,
+      });
+    }
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor);
+  console.log(JSON.stringify({ event: "shared_list", member: label, count: bundles.length }));
+  return json({
+    ok: true,
+    member: label,
+    facilities: Array.from(allowed).sort(),
+    count: bundles.length,
+    bundles,
+    terms: "DATA_POLICY.md v1.1: quality assurance, analysis and aggregation only; no onward sharing; the data remain the facilities'.",
+  });
+}
+
+/**
+ * GET /shared/object?key=spinnoise_... — one shared bundle, as stored.
+ * Bundles only (no receipts). A bundle that exists but whose facility has
+ * not agreed answers exactly like one that does not exist.
+ */
+async function handleSharedObject(request, env) {
+  const [label, authError] = checkCollabAuth(request, env);
+  if (authError) return authError;
+  const url = new URL(request.url);
+  const key = sanitizeBundleName((url.searchParams.get("key") || "").trim());
+  if (!key) {
+    return json({ ok: false, error: "missing or invalid key parameter (a bundle name from /shared/list)" }, 400);
+  }
+  const slug = slugOfBundle(key);
+  const notShared = json({ ok: false, error: "no such shared bundle", key }, 404);
+  if (!slug || !sharedSlugs(env).has(slug)) return notShared;
+  const object = await env.SPIN_NOISE.get(key);
+  if (object === null) return notShared;
+  console.log(JSON.stringify({ event: "shared_download", member: label, key, size: object.size }));
+  const headers = new Headers();
+  headers.set("Content-Type", "application/zip");
+  headers.set("Content-Length", String(object.size));
+  headers.set("ETag", object.httpEtag);
+  const sha = object.customMetadata && object.customMetadata.sha256;
+  if (sha) headers.set("X-Content-SHA256", sha);
+  return new Response(object.body, { status: 200, headers });
 }
 
 /** SHA-256 of a byte array as lowercase hex. */
@@ -915,6 +1069,8 @@ export default {
       if (method === "GET" && path === "/stats") return await handleStats(request, env);
       if (method === "POST" && path === "/registry") return await handleRegistrySubmit(request, env);
       if (method === "GET" && path === "/registry/list") return await handleRegistryList(request, env);
+      if (method === "GET" && path === "/shared/list") return await handleSharedList(request, env);
+      if (method === "GET" && path === "/shared/object") return await handleSharedObject(request, env);
     } catch (err) {
       // Last-ditch guard so a bug never leaks a stack trace to the client.
       return json({ ok: false, error: "internal error: " + String((err && err.message) || err) }, 500);
@@ -938,6 +1094,8 @@ export default {
           "GET /stats",
           "POST /registry",
           "GET /registry/list",
+          "GET /shared/list",
+          "GET /shared/object?key=..",
         ],
       },
       405
