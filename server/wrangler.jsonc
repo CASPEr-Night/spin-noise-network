@@ -25,5 +25,9 @@
   // The facility-registry route uses a SEPARATE secret (so the Google-Form
   // forwarder never holds the bundle-upload token):
   //   npx wrangler secret put REGISTRY_TOKEN
-  // Never put either token value in this file.
+  // Collaboration read access (DATA_POLICY.md v1.1; DEPLOY.md section 2c) uses
+  // two more settings, both absent by default (= nothing shared):
+  //   npx wrangler secret put COLLAB_TOKENS   // JSON: one key per named member
+  //   npx wrangler secret put SHARED_SLUGS    // slugs of the facilities that agreed
+  // Never put any token value in this file.
 }

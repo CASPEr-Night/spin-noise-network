@@ -63,7 +63,7 @@ except ImportError:  # pragma: no cover - cannot happen on py3, but stay polite
 # Kept in sync with the repository VERSION file (a literal, not a file
 # read, because this script is copied standalone to facility machines);
 # testing/static_check.py enforces the sync.
-UPLOADER_VERSION = "0.8.6"
+UPLOADER_VERSION = "0.8.7"
 
 # Metadata schema versions this uploader understands.  The shipped
 # schema/meta.schema.json describes the CURRENT version (2.0, which made
@@ -105,6 +105,15 @@ UPLOAD_TIMEOUT_S = 600  # per request (one bundle or one part)
 # --------------------------------------------------------------------------
 # Small helpers
 # --------------------------------------------------------------------------
+
+DATA_POLICY_VERSION = "1.1"
+DATA_POLICY_NOTICE = (
+    "NOTE : by uploading you agree to the network's data policy (DATA_POLICY.md,\n"
+    "       version %s): the data remain yours; the coordinators, and members of\n"
+    "       the CASPEr collaboration with read-only access, may use them for\n"
+    "       quality checks, analysis and combining with other sites, and for\n"
+    "       nothing else. Ctrl-C now if you do not agree." % DATA_POLICY_VERSION)
+
 
 def script_dir():
     return os.path.dirname(os.path.abspath(__file__))
@@ -1334,6 +1343,11 @@ def main(argv=None):
         print(fallback_instructions(bundle_path, cfg.get("maintainer_email",
                                                          DEFAULT_MAINTAINER_EMAIL)))
         return 1
+
+    # DATA_POLICY.md v1.1, "Access by the CASPEr collaboration", item (5):
+    # uploading is the agreement, so the uploader says what is agreed to.
+    if not args.dry_run:
+        print(DATA_POLICY_NOTICE)
 
     print("Computing sha256 (may take a minute for large bundles)...")
     digest_hex = sha256_of_file(bundle_path)

@@ -76,7 +76,8 @@ commands mocked — runnable on a free processing-only TopSpin install
 | `testing/` | real-Jython harness (`run_jython_harness.sh`), Tier-0 desk-test checklist (`tier0_desktest.md`), `static_check.py`, end-to-end upload test against a local Worker (`test_upload_integration.sh`), synthetic bundles (`make_synthetic_bundle.py` for the schema; `make_physics_bundle.py` for an injected spin-noise line with a known clock offset and, from v0.8, session times, site, injected sidereal modulation and laboratory cycle), and the report tests `test_report_qa_flags.py`, `test_report_bruker_refs.py`, `test_sweep_report.py`, `test_agilent_report.py`, `test_site_exclusion.py` and `test_wind_sidereal.py` (v0.8, two tiers — see *The facility report*) |
 | `VERSION` | repository release version (mirrored by `SCRIPT_VERSION` in the run script) |
 | `PROTOCOL.md` | the science, the operator questions, and why each exists |
-| `DATA_POLICY.md` | ownership, permitted uses, co-authorship, embargo, and withdrawal terms |
+| `DATA_POLICY.md` | ownership, permitted uses, co-authorship, embargo, and withdrawal terms; from v1.1, read-only access for members of the CASPEr collaboration to the bundles of facilities that agreed |
+| `analysis/fetch_shared.py` | for collaboration members: list and download the shared bundles with a personal key (stdlib only) |
 
 ## Vendor support
 
@@ -351,6 +352,19 @@ covers ~10 GB), set the shared token, and hand facilities the endpoint + token p
   Jython harness (a virtual Friday-to-Monday weekend across a daylight-saving change, a zg
   held 30 h, the split layout) and on a re-packed synthetic bundle whose science matches the
   unsplit one; not yet run on hardware. Reports of earlier bundles are unchanged.
+- **v0.8.7 adopts data policy 1.1: read-only access for members of the CASPEr collaboration.**
+  CASPEr@night is part of the wider CASPEr effort, and the people best placed to check this
+  analysis are in that collaboration. Under `DATA_POLICY.md` version 1.1 its members may be
+  given read-only access to the stored bundles, for the same three uses as the coordinators
+  and nothing else, with no onward sharing and the same co-authorship, embargo and
+  withdrawal rules. The three facilities with data agreed by e-mail; from this version,
+  using the software and uploading a bundle is the agreement, and the acquisition script's
+  opening dialog and the uploader both say so (each bundle records which policy version was
+  shown). The ingest server gains two read-only routes behind a personal key per named
+  member and a list of the facilities that agreed; with neither configured, nothing is
+  shared. `analysis/fetch_shared.py` is the member's tool. Also: two sign-ups whose location
+  did not resolve (a city missing from the built-in list; coordinates typed into the city
+  field) are now placed, at city level only.
 - **v0.8.6 keeps every noise file below TopSpin's file limit, and stops plainly on a disk
   that cannot be written.** Torino's two late zg returns (9 h, then 57 h) are explained:
   on 26 October the console showed "Reading off file limits: …/local_acqu/…/12/ser", and zg

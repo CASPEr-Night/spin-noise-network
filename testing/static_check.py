@@ -1486,6 +1486,25 @@ check("v0.8.6: the noise phase is split by the script itself when one file "
       and 'if plan.get("split_basis") == "auto_file_above_limit"' in REPORT_SRC)
 
 
+# Data policy v1.1: uploading is the agreement, so the version the software
+# names must be the version of DATA_POLICY.md.
+with open(os.path.join(REPO, "DATA_POLICY.md"), "r", encoding="utf-8") as fh:
+    _DP = fh.read()
+_dpv = re.search(r"^Version (\d+\.\d+), ", _DP, re.MULTILINE)
+with open(UPLOADER_PATH, "r", encoding="utf-8") as fh:
+    _UP6 = fh.read()
+check("data policy: DATA_POLICY.md's version is the one the acquisition "
+      "script's greeting and the uploader's notice name, the bundle records "
+      "it (meta data_policy), and the policy says uploading is the agreement",
+      _dpv is not None
+      and ('DATA_POLICY_VERSION = "%s"' % _dpv.group(1)) in SRC
+      and ('DATA_POLICY_VERSION = "%s"' % _dpv.group(1)) in _UP6
+      and '"data_policy": {"version_shown": DATA_POLICY_VERSION,' in SRC
+      and "print(DATA_POLICY_NOTICE)" in _UP6
+      and "uploading a\nbundle means the facility agrees" in _DP
+      and "data_policy" in schema.get("properties", {}))
+
+
 # --------------------------------------------------------------------------
 print("")
 if FAILURES:

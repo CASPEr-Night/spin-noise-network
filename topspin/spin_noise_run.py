@@ -138,6 +138,14 @@ DENSE_LADDER_ON = 1       # 1 (default): after the four legacy RG rungs,
                           # flag 'sparseladder'; meta records why.
                           # Runtime:  xpy spin_noise_run sparseladder
 
+DATA_POLICY_VERSION = "1.1"   # the version of DATA_POLICY.md the greeting
+                              # names; uploading a bundle is the facility's
+                              # agreement to it (its item (5)), so every
+                              # bundle records which version its operator
+                              # was shown (meta data_policy).  KEEP IN SYNC
+                              # with DATA_POLICY.md and the uploader
+                              # (testing/static_check.py enforces it).
+
 SPLITNOISE = 0            # 1 (argv 'splitnoise', v0.8.3): ALWAYS acquire
                           # the noise phase as consecutive blocks of at
                           # most NOISE_BLOCK_MAX_BYTES each (expno 12,
@@ -154,7 +162,7 @@ SINGLENOISE = 0           # 1 (argv 'singlenoise', v0.8.6): NEVER split,
 
 # Single source of truth for the script version.  KEEP IN SYNC with the
 # repository VERSION file (testing/static_check.py enforces the match).
-SCRIPT_VERSION  = "0.8.6"
+SCRIPT_VERSION  = "0.8.7"
 # NOTE: no module constant named PROGRAM_VERSION -- TopSpin's TopCmds
 # exports a FUNCTION of that name and `from TopCmds import *` (below)
 # overwrote the alias, so v0.7.3 bundles carry "<function PROGRAM_VERSION
@@ -6427,11 +6435,16 @@ def main():
         "    small-flip references, and a long pulse-free noise block\n"
         "    (default ~55 min total)\n"
         "  * write meta.json and pack everything into one zip for upload\n\n"
+        "Your data: uploading the zip means you agree to the network's\n"
+        "data policy (DATA_POLICY.md, version %s). The data remain yours;\n"
+        "the coordinators, and members of the CASPEr collaboration with\n"
+        "read-only access, may use them for quality checks, analysis and\n"
+        "combining with other sites, and for nothing else.\n\n"
         "Before continuing:\n"
         "  * a 5 mm tube of water is in the magnet\n"
         "  * ANY existing 1H dataset is open (used only as a parameter\n"
         "    template)\n%s"
-        % (SCRIPT_VERSION, mode_notice),
+        % (SCRIPT_VERSION, DATA_POLICY_VERSION, mode_notice),
         ["Start", "Cancel"])
     if v != 0:
         abort("Operator chose Cancel at greeting.")
@@ -6687,6 +6700,8 @@ def main():
             "contact_email": email,
             "contact_consent": contact_consent,
         },
+        "data_policy": {"version_shown": DATA_POLICY_VERSION,
+                        "shown_in": "greeting"},
         "spectrometer": {
             "topspin_version": ts_version,
             "h1_freq_mhz": h1_equiv_mhz,
